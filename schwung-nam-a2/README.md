@@ -2,9 +2,7 @@
 
 Neural Amp Modeler audio effect module for [Schwung](https://github.com/charlesvestal/move-everything)
 on Ableton Move, based on [schwung-nam](https://github.com/charlesvestal/schwung-nam)
-by Charles Vestal. Adds a 3-band EQ, a Full/Lite quality switch, and a
-"solo" FX chain (Doubler / Echo / Reverb) inspired by the layout of the
-Solar Guitars CHUG SOLO pedal.
+by Charles Vestal. Adds a 3-band EQ and a Full/Lite quality switch.
 
 Built on [NeuralAudio](https://github.com/mikeoliphant/NeuralAudio) by Mike
 Oliphant and [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore)
@@ -17,12 +15,13 @@ by Steven Atkinson.
 ## Signal chain
 
 ```
-Input Gain -> NAM Model -> Cab IR -> 3-Band EQ -> Doubler -> Echo -> Reverb -> Output Gain
+Input Gain -> NAM Model -> Cab IR -> 3-Band EQ -> Output Gain
 ```
 
-Doubler, Echo and Reverb are each independently bypassable and default to
-**bypassed** - they're an occasional "kick it in for the solo" chain, not
-an always-on coloration.
+For delay, reverb or chorus, add them as separate FX in the slot's own
+chain - the host already hosts those, and keeping them out of this module
+keeps `create_instance` (which runs on the SPI audio callback, where
+allocation is forbidden) light.
 
 ## Features
 
@@ -31,22 +30,13 @@ an always-on coloration.
 - **Full / Lite quality switch**: Lite halves the neural net's per-block
   work (processes at half rate, holds each output sample for two frames) to
   free up CPU headroom on Move's ARM core when a heavy model plus the cab
-  IR, EQ and solo FX chain below would otherwise miss the real-time budget.
+  IR and EQ would otherwise miss the real-time budget.
   Measure with the CPU page (`docs/DIAGNOSTICS.md` in the host repo) before
   relying on it - it's a genuine tradeoff, not free.
 - **Cabinet IR convolution**: apply cabinet impulse responses with optional
   bypass.
 - **3-band EQ**: independent gain + frequency for Low (shelf), Mid (bell)
   and High (shelf) bands, sitting after the cab IR.
-- **Solo FX chain**:
-  - **Doubler** - a subtle modulated-delay chorus that thickens a single
-    note into a "doubled" line, with a Mix control.
-  - **Echo** - a filtered delay (repeats darken progressively, like a tape
-    echo) from short slap-back up to ~2 seconds, with Feedback, Filter and
-    Mix controls, plus tap-tempo (tap twice or more on the beat to set the
-    time).
-  - **Reverb** - a small room emulation (Freeverb-derived comb/allpass
-    network) with Room Size, Damping and Mix controls.
 - **Model / cabinet browsers**: hierarchical file browsers for selecting
   `.nam` model files and `.wav` cabinet IRs.
 - **Input/Output level**: independent gain staging controls.
@@ -69,18 +59,6 @@ an always-on coloration.
 | `eq_low_gain` / `eq_low_freq` | -15..15 dB / 40..500 Hz | 0 dB / 100 Hz | Low shelf |
 | `eq_mid_gain` / `eq_mid_freq` | -15..15 dB / 200..4000 Hz | 0 dB / 800 Hz | Mid bell |
 | `eq_high_gain` / `eq_high_freq` | -15..15 dB / 1000..10000 Hz | 0 dB / 3000 Hz | High shelf |
-| `doubler_bypass` | 0-1 | 1 (bypassed) | Doubler on/off |
-| `doubler_mix` | 0.0-1.0 | 0.35 | Doubler wet mix |
-| `echo_bypass` | 0-1 | 1 (bypassed) | Echo on/off |
-| `echo_time_ms` | 50-2000 ms | 350 ms | Delay time |
-| `echo_feedback` | 0.0-0.9 | 0.35 | Repeat count |
-| `echo_filter_hz` | 400-8000 Hz | 3000 Hz | Feedback-path lowpass (darkens repeats) |
-| `echo_mix` | 0.0-1.0 | 0.3 | Echo wet mix |
-| `echo_tap` | momentary | - | Tap on the beat (2+ taps) to set `echo_time_ms` |
-| `reverb_bypass` | 0-1 | 1 (bypassed) | Reverb on/off |
-| `reverb_room` | 0.0-1.0 | 0.5 | Room size |
-| `reverb_damping` | 0.0-1.0 | 0.5 | High-frequency damping |
-| `reverb_mix` | 0.0-1.0 | 0.3 | Reverb wet mix |
 
 ## Adding Models and Cabinets
 
@@ -122,7 +100,6 @@ update those placeholders (or just tag `v0.1.0` - `release.yml` rewrites
 - **NeuralAudio**: [Mike Oliphant](https://github.com/mikeoliphant/NeuralAudio) (MIT License)
 - **RTNeural**: [Jatin Chowdhury](https://github.com/jatinchowdhury18/RTNeural) (BSD 3-Clause License)
 - **math_approx**: [Jatin Chowdhury](https://github.com/jatinchowdhury18/math_approx) (BSD 3-Clause License)
-- **Freeverb**: Jezar at Dreampoint (public domain) - the Reverb stage's comb/allpass network.
 
 ## License
 

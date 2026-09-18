@@ -41,16 +41,6 @@ license (see `LICENSE`).
 - **How it's used:** Header-only fast-math approximations, pulled in
   transitively via NeuralAudio/RTNeural (`LSTM_MATH`/`WAVENET_MATH=FastMath`).
 
-## Freeverb algorithm (Reverb stage of the solo FX chain)
-
-- **Project:** Freeverb, originally by Jezar at Dreampoint
-- **License:** Public domain
-- **How it's used:** The Reverb stage's comb-filter / allpass-filter network
-  and delay-line tuning tables are adapted from the classic Freeverb
-  algorithm, following the same adaptation already shipped as this host's
-  own built-in `freeverb.c` audio FX module. Not a NeuralAudio dependency -
-  original C++ implementation written for this module.
-
 ## schwung-nam (module this plugin is based on)
 
 - **Project:** [`charlesvestal/schwung-nam`](https://github.com/charlesvestal/schwung-nam)
@@ -59,8 +49,8 @@ license (see `LICENSE`).
 - **How it's used:** This module's NAM model loading, cabinet IR WAV parsing
   and time-domain convolution, and background model-loader thread are
   carried over near-verbatim from schwung-nam's `nam_plugin.cpp`, per its
-  MIT license. The 3-band EQ, Quality (Full/Lite) switch, and the
-  Doubler/Echo/Reverb solo FX chain are new code written for this module.
+  MIT license. The 3-band EQ and the Quality (Full/Lite) switch are new
+  code written for this module.
 
 ## No bundled models or cabinet IRs
 

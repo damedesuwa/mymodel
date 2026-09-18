@@ -1,5 +1,5 @@
 /*
- * Nam A2 Audio FX Plugin - Neural Amp Modeler + solo FX chain for Move Anything
+ * Nam A2 Audio FX Plugin - Neural Amp Modeler for Move Anything
  *
  * Based on the schwung-nam module (https://github.com/charlesvestal/schwung-nam)
  * by Charles Vestal, which wraps NeuralAudio (MIT, by Mike Oliphant) to run
@@ -10,15 +10,14 @@
  *     running the model at half the block's sample rate (averaging input
  *     pairs, zero-order-hold on the output) - a CPU/quality tradeoff for
  *     models too heavy to run in real time on Move's ARM core alongside the
- *     cab IR, EQ and solo FX chain below.
+ *     cab IR and EQ.
  *   - A 3-band EQ (low/high shelf + mid bell) sitting after the cab IR.
- *   - A "solo" FX chain - Doubler (chorus) -> Echo (filtered delay, tap
- *     tempo) -> Reverb (small room) - each independently bypassable,
- *     inspired by the layout of the Solar Guitars CHUG SOLO pedal.
  *
- * Cab IR convolution and the reverb's comb/allpass network are adapted from
- * the classic public-domain Freeverb algorithm (Jezar at Dreampoint), as
- * already used by this host's own built-in freeverb.c audio FX.
+ * A Doubler/Echo/Reverb "solo" FX chain was previously part of this module
+ * and has been removed: those stages are better served by the host's own
+ * chain FX slots, and their buffers cost ~900 KB of allocation inside
+ * create_instance - which runs on the SPI audio callback, where allocation
+ * is forbidden.
  *
  * Dependencies (all header-only / static, permissive licenses):
  *   NeuralAudio  - MIT      - Mike Oliphant
@@ -28,8 +27,8 @@
  *   nlohmann/json- MIT      - Niels Lohmann
  *
  * Audio: 44100 Hz, 128 frames/block, stereo interleaved int16 in-place.
- * NAM models are mono - we sum L+R to mono, process the amp/cab/EQ stage in
- * mono, then split to stereo for the solo FX chain.
+ * NAM models are mono - we sum L+R to mono, process amp/cab/EQ in mono,
+ * then write the result to both output channels.
  */
 
 #include <cstdio>
@@ -65,36 +64,6 @@ extern "C" {
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-
-/* Doubler (chorus) */
-#define DOUBLER_BUF_LEN 4096
-#define DOUBLER_RATE_HZ 0.6f
-#define DOUBLER_BASE_MS 15.0f
-#define DOUBLER_DEPTH_MS 4.0f
-
-/* Echo */
-#define ECHO_MAX_SECONDS 2.0f
-#define ECHO_BUF_LEN ((int)(SAMPLE_RATE * ECHO_MAX_SECONDS) + FRAMES_PER_BLOCK)
-#define ECHO_TAP_MIN_MS 60.0f
-#define ECHO_TAP_MAX_MS 2000.0f
-
-/* Reverb - adapted from the public-domain Freeverb algorithm, same tuning
- * tables as this host's built-in freeverb.c audio FX. */
-#define REVERB_NUM_COMBS 8
-#define REVERB_NUM_ALLPASSES 4
-#define REVERB_MAX_DELAY 2048
-
-static const int reverb_comb_tuning_l[REVERB_NUM_COMBS] = {
-    1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617
-};
-static const int reverb_comb_tuning_r[REVERB_NUM_COMBS] = {
-    1116 + 23, 1188 + 23, 1277 + 23, 1356 + 23,
-    1422 + 23, 1491 + 23, 1557 + 23, 1617 + 23
-};
-static const int reverb_allpass_tuning_l[REVERB_NUM_ALLPASSES] = { 556, 441, 341, 225 };
-static const int reverb_allpass_tuning_r[REVERB_NUM_ALLPASSES] = {
-    556 + 23, 441 + 23, 341 + 23, 225 + 23
-};
 
 static const host_api_v1_t *g_host = nullptr;
 
@@ -329,46 +298,6 @@ typedef struct {
     float eq_mid_gain, eq_mid_freq;
     float eq_high_gain, eq_high_freq;
     biquad_t eq_low, eq_mid, eq_high;
-
-    /* Doubler (chorus, mono -> stereo) */
-    int doubler_bypass;
-    float doubler_mix;
-    float doubler_buf[DOUBLER_BUF_LEN];
-    int doubler_pos;
-    float doubler_phase;
-
-    /* Echo (stereo, filtered feedback, tap tempo) */
-    int echo_bypass;
-    float echo_time_ms;
-    float echo_feedback;
-    float echo_filter_hz;
-    float echo_mix;
-    float echo_filter_coeff; /* one-pole lowpass coefficient, derived from echo_filter_hz */
-    float *echo_buf_l;
-    float *echo_buf_r;
-    int echo_pos;
-    float echo_lp_l, echo_lp_r;
-    uint64_t sample_clock;
-    uint64_t echo_last_tap_sample;
-    int echo_has_last_tap;
-
-    /* Reverb (stereo, Freeverb-derived comb/allpass network) */
-    int reverb_bypass;
-    float reverb_room;
-    float reverb_damping;
-    float reverb_mix;
-    float reverb_feedback, reverb_damp1, reverb_damp2, reverb_wet;
-    struct {
-        float buffer[REVERB_MAX_DELAY];
-        int bufsize;
-        int bufidx;
-        float filterstore;
-    } reverb_comb_l[REVERB_NUM_COMBS], reverb_comb_r[REVERB_NUM_COMBS];
-    struct {
-        float buffer[REVERB_MAX_DELAY];
-        int bufsize;
-        int bufidx;
-    } reverb_allpass_l[REVERB_NUM_ALLPASSES], reverb_allpass_r[REVERB_NUM_ALLPASSES];
 
     /* Audio buffers (avoid per-block allocation) */
     float mono_in[FRAMES_PER_BLOCK];
@@ -611,171 +540,6 @@ static inline float eq_process(nam_a2_instance_t *inst, float x) {
     return y;
 }
 
-/* --- Doubler (chorus) --- */
-
-static inline float doubler_read_interp(nam_a2_instance_t *inst, float delay_samples) {
-    float read_pos = (float)inst->doubler_pos - delay_samples;
-    while (read_pos < 0.0f) read_pos += DOUBLER_BUF_LEN;
-    int i0 = (int)read_pos;
-    float frac = read_pos - (float)i0;
-    int i1 = i0 + 1;
-    if (i0 >= DOUBLER_BUF_LEN) i0 -= DOUBLER_BUF_LEN;
-    if (i1 >= DOUBLER_BUF_LEN) i1 -= DOUBLER_BUF_LEN;
-    return inst->doubler_buf[i0] * (1.0f - frac) + inst->doubler_buf[i1] * frac;
-}
-
-static inline void doubler_process(nam_a2_instance_t *inst, float in, float *out_l, float *out_r) {
-    inst->doubler_buf[inst->doubler_pos] = in;
-
-    float lfo_l = sinf(inst->doubler_phase);
-    float lfo_r = sinf(inst->doubler_phase + (float)M_PI * 0.5f);
-    float delay_l = (DOUBLER_BASE_MS + DOUBLER_DEPTH_MS * lfo_l) * 0.001f * SAMPLE_RATE;
-    float delay_r = (DOUBLER_BASE_MS + DOUBLER_DEPTH_MS * lfo_r) * 0.001f * SAMPLE_RATE;
-
-    float wet_l = doubler_read_interp(inst, delay_l);
-    float wet_r = doubler_read_interp(inst, delay_r);
-
-    if (++inst->doubler_pos >= DOUBLER_BUF_LEN) inst->doubler_pos = 0;
-    inst->doubler_phase += 2.0f * (float)M_PI * DOUBLER_RATE_HZ / SAMPLE_RATE;
-    if (inst->doubler_phase > 2.0f * (float)M_PI) inst->doubler_phase -= 2.0f * (float)M_PI;
-
-    float mix = inst->doubler_mix;
-    *out_l = in * (1.0f - mix) + wet_l * mix;
-    *out_r = in * (1.0f - mix) + wet_r * mix;
-}
-
-/* --- Echo --- */
-
-static void update_echo_filter(nam_a2_instance_t *inst) {
-    float hz = clampf(inst->echo_filter_hz, 20.0f, SAMPLE_RATE * 0.45f);
-    /* One-pole lowpass coefficient, alpha = 1 - exp(-2*pi*fc/fs). */
-    inst->echo_filter_coeff = 1.0f - expf(-2.0f * (float)M_PI * hz / SAMPLE_RATE);
-}
-
-static inline int echo_delay_samples(nam_a2_instance_t *inst) {
-    float ms = clampf(inst->echo_time_ms, 1.0f, ECHO_MAX_SECONDS * 1000.0f);
-    int samples = (int)(ms * 0.001f * SAMPLE_RATE);
-    if (samples < 1) samples = 1;
-    if (samples > ECHO_BUF_LEN - FRAMES_PER_BLOCK - 1) samples = ECHO_BUF_LEN - FRAMES_PER_BLOCK - 1;
-    return samples;
-}
-
-static inline float echo_process_channel(float in, float *buf, int pos, int delay,
-                                         float feedback, float filter_coeff, float *lp_state) {
-    int read_idx = pos - delay;
-    if (read_idx < 0) read_idx += ECHO_BUF_LEN;
-
-    float delayed = buf[read_idx];
-    *lp_state += filter_coeff * (delayed - *lp_state);
-
-    buf[pos] = in + (*lp_state) * feedback;
-    return delayed;
-}
-
-static inline void echo_process(nam_a2_instance_t *inst, float in_l, float in_r,
-                                float *out_l, float *out_r) {
-    int delay = echo_delay_samples(inst);
-
-    float delayed_l = echo_process_channel(in_l, inst->echo_buf_l, inst->echo_pos, delay,
-                                           inst->echo_feedback, inst->echo_filter_coeff,
-                                           &inst->echo_lp_l);
-    float delayed_r = echo_process_channel(in_r, inst->echo_buf_r, inst->echo_pos, delay,
-                                           inst->echo_feedback, inst->echo_filter_coeff,
-                                           &inst->echo_lp_r);
-
-    if (++inst->echo_pos >= ECHO_BUF_LEN) inst->echo_pos = 0;
-
-    float mix = inst->echo_mix;
-    *out_l = in_l * (1.0f - mix) + delayed_l * mix;
-    *out_r = in_r * (1.0f - mix) + delayed_r * mix;
-}
-
-/* Registers one tap; two or more taps sets echo_time_ms from the interval. */
-static void echo_register_tap(nam_a2_instance_t *inst) {
-    uint64_t now = inst->sample_clock;
-
-    if (inst->echo_has_last_tap) {
-        uint64_t delta_samples = now - inst->echo_last_tap_sample;
-        float delta_ms = (float)delta_samples / SAMPLE_RATE * 1000.0f;
-        if (delta_ms >= ECHO_TAP_MIN_MS && delta_ms <= ECHO_TAP_MAX_MS) {
-            inst->echo_time_ms = delta_ms;
-            char msg[96];
-            snprintf(msg, sizeof(msg), "Nam A2: tap tempo set echo time to %.0f ms", delta_ms);
-            plugin_log(msg);
-        }
-    }
-
-    inst->echo_last_tap_sample = now;
-    inst->echo_has_last_tap = 1;
-}
-
-/* --- Reverb (Freeverb-derived) --- */
-
-static void reverb_comb_init(void *comb_v, int size) {
-    struct comb_s { float buffer[REVERB_MAX_DELAY]; int bufsize; int bufidx; float filterstore; };
-    comb_s *c = (comb_s *)comb_v;
-    memset(c->buffer, 0, sizeof(c->buffer));
-    c->bufsize = (size < REVERB_MAX_DELAY) ? size : REVERB_MAX_DELAY;
-    c->bufidx = 0;
-    c->filterstore = 0.0f;
-}
-
-static void reverb_allpass_init(void *ap_v, int size) {
-    struct ap_s { float buffer[REVERB_MAX_DELAY]; int bufsize; int bufidx; };
-    ap_s *a = (ap_s *)ap_v;
-    memset(a->buffer, 0, sizeof(a->buffer));
-    a->bufsize = (size < REVERB_MAX_DELAY) ? size : REVERB_MAX_DELAY;
-    a->bufidx = 0;
-}
-
-template <typename Comb>
-static inline float reverb_comb_process(Comb *c, float input, float feedback, float damp1, float damp2) {
-    float output = c->buffer[c->bufidx];
-    c->filterstore = (output * damp2) + (c->filterstore * damp1);
-    c->buffer[c->bufidx] = input + (c->filterstore * feedback);
-    if (++c->bufidx >= c->bufsize) c->bufidx = 0;
-    return output;
-}
-
-template <typename Allpass>
-static inline float reverb_allpass_process(Allpass *a, float input) {
-    float bufout = a->buffer[a->bufidx];
-    float output = -input + bufout;
-    a->buffer[a->bufidx] = input + (bufout * 0.5f);
-    if (++a->bufidx >= a->bufsize) a->bufidx = 0;
-    return output;
-}
-
-static void update_reverb(nam_a2_instance_t *inst) {
-    inst->reverb_feedback = inst->reverb_room * 0.28f + 0.7f;
-    inst->reverb_damp1 = inst->reverb_damping * 0.4f;
-    inst->reverb_damp2 = 1.0f - inst->reverb_damp1;
-    inst->reverb_wet = inst->reverb_mix;
-}
-
-static inline void reverb_process(nam_a2_instance_t *inst, float in_l, float in_r,
-                                  float *out_l, float *out_r) {
-    float wet_l = 0.0f, wet_r = 0.0f;
-
-    for (int c = 0; c < REVERB_NUM_COMBS; c++) {
-        wet_l += reverb_comb_process(&inst->reverb_comb_l[c], in_l, inst->reverb_feedback,
-                                     inst->reverb_damp1, inst->reverb_damp2);
-        wet_r += reverb_comb_process(&inst->reverb_comb_r[c], in_r, inst->reverb_feedback,
-                                     inst->reverb_damp1, inst->reverb_damp2);
-    }
-    wet_l *= 0.125f;
-    wet_r *= 0.125f;
-
-    for (int a = 0; a < REVERB_NUM_ALLPASSES; a++) {
-        wet_l = reverb_allpass_process(&inst->reverb_allpass_l[a], wet_l);
-        wet_r = reverb_allpass_process(&inst->reverb_allpass_r[a], wet_r);
-    }
-
-    float dry = 1.0f - inst->reverb_wet;
-    *out_l = in_l * dry + wet_l * inst->reverb_wet;
-    *out_r = in_r * dry + wet_r * inst->reverb_wet;
-}
-
 /* ======================================================================== */
 /* audio_fx_api_v2 implementation                                            */
 /* ======================================================================== */
@@ -834,46 +598,6 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->eq_high_gain = 0.0f; inst->eq_high_freq = 3000.0f;
     update_eq(inst);
 
-    /* Doubler defaults - off until the user opts in */
-    inst->doubler_bypass = 1;
-    inst->doubler_mix = 0.35f;
-    inst->doubler_pos = 0;
-    inst->doubler_phase = 0.0f;
-
-    /* Echo defaults */
-    inst->echo_bypass = 1;
-    inst->echo_time_ms = 350.0f;
-    inst->echo_feedback = 0.35f;
-    inst->echo_filter_hz = 3000.0f;
-    inst->echo_mix = 0.3f;
-    update_echo_filter(inst);
-    inst->echo_buf_l = (float *)calloc(ECHO_BUF_LEN, sizeof(float));
-    inst->echo_buf_r = (float *)calloc(ECHO_BUF_LEN, sizeof(float));
-    inst->echo_pos = 0;
-    inst->echo_lp_l = 0.0f;
-    inst->echo_lp_r = 0.0f;
-    inst->sample_clock = 0;
-    inst->echo_has_last_tap = 0;
-
-    /* Reverb defaults - off until the user opts in */
-    inst->reverb_bypass = 1;
-    inst->reverb_room = 0.5f;
-    inst->reverb_damping = 0.5f;
-    inst->reverb_mix = 0.3f;
-    for (int i = 0; i < REVERB_NUM_COMBS; i++) {
-        reverb_comb_init(&inst->reverb_comb_l[i], reverb_comb_tuning_l[i]);
-        reverb_comb_init(&inst->reverb_comb_r[i], reverb_comb_tuning_r[i]);
-    }
-    for (int i = 0; i < REVERB_NUM_ALLPASSES; i++) {
-        reverb_allpass_init(&inst->reverb_allpass_l[i], reverb_allpass_tuning_l[i]);
-        reverb_allpass_init(&inst->reverb_allpass_r[i], reverb_allpass_tuning_r[i]);
-    }
-    update_reverb(inst);
-
-    if (!inst->echo_buf_l || !inst->echo_buf_r) {
-        plugin_log("Nam A2: failed to allocate echo buffers");
-    }
-
     /* Scan for model/cab files and load the first of each */
     scan_models(inst);
     scan_cabs(inst);
@@ -906,8 +630,6 @@ static void v2_destroy_instance(void *instance) {
 
     free(inst->cab_ir);
     free(inst->cab_history);
-    free(inst->echo_buf_l);
-    free(inst->echo_buf_r);
 
     free(inst);
     plugin_log("Nam A2: instance destroyed");
@@ -931,7 +653,6 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     if (!inst->model) return;
 
     int n = (frames > FRAMES_PER_BLOCK) ? FRAMES_PER_BLOCK : frames;
-    inst->sample_clock += (uint64_t)n;
 
     /* Deinterleave stereo int16 -> mono float, with input gain */
     float ig = inst->input_gain;
@@ -973,27 +694,13 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         inst->mono_out[i] = eq_process(inst, inst->mono_out[i]);
     }
 
-    /* Solo FX chain: Doubler -> Echo -> Reverb, per sample, mono -> stereo */
+    /* Output gain, then back to stereo int16 (mono source written to both) */
     float og = inst->output_gain;
     for (int i = 0; i < n; i++) {
-        float src = inst->mono_out[i];
-
-        float dl, dr;
-        if (inst->doubler_bypass) { dl = src; dr = src; }
-        else doubler_process(inst, src, &dl, &dr);
-
-        float el, er;
-        if (inst->echo_bypass) { el = dl; er = dr; }
-        else echo_process(inst, dl, dr, &el, &er);
-
-        float rl, rr;
-        if (inst->reverb_bypass) { rl = el; rr = er; }
-        else reverb_process(inst, el, er, &rl, &rr);
-
-        float out_l = clampf(rl * og, -1.0f, 1.0f);
-        float out_r = clampf(rr * og, -1.0f, 1.0f);
-        audio_inout[i * 2]     = (int16_t)(out_l * 32767.0f);
-        audio_inout[i * 2 + 1] = (int16_t)(out_r * 32767.0f);
+        float s = clampf(inst->mono_out[i] * og, -1.0f, 1.0f);
+        int16_t sample = (int16_t)(s * 32767.0f);
+        audio_inout[i * 2]     = sample;
+        audio_inout[i * 2 + 1] = sample;
     }
 }
 
@@ -1097,23 +804,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (json_get_float(val, "eq_high_freq", &f) == 0) inst->eq_high_freq = clampf(f, 1000.0f, 10000.0f);
         update_eq(inst);
 
-        if (json_get_int(val, "doubler_bypass", &i) == 0) inst->doubler_bypass = (i != 0);
-        if (json_get_float(val, "doubler_mix", &f) == 0) inst->doubler_mix = clampf(f, 0.0f, 1.0f);
-
-        if (json_get_int(val, "echo_bypass", &i) == 0) inst->echo_bypass = (i != 0);
-        if (json_get_float(val, "echo_time_ms", &f) == 0)
-            inst->echo_time_ms = clampf(f, 50.0f, ECHO_MAX_SECONDS * 1000.0f);
-        if (json_get_float(val, "echo_feedback", &f) == 0) inst->echo_feedback = clampf(f, 0.0f, 0.9f);
-        if (json_get_float(val, "echo_filter_hz", &f) == 0) inst->echo_filter_hz = clampf(f, 400.0f, 8000.0f);
-        if (json_get_float(val, "echo_mix", &f) == 0) inst->echo_mix = clampf(f, 0.0f, 1.0f);
-        update_echo_filter(inst);
-
-        if (json_get_int(val, "reverb_bypass", &i) == 0) inst->reverb_bypass = (i != 0);
-        if (json_get_float(val, "reverb_room", &f) == 0) inst->reverb_room = clampf(f, 0.0f, 1.0f);
-        if (json_get_float(val, "reverb_damping", &f) == 0) inst->reverb_damping = clampf(f, 0.0f, 1.0f);
-        if (json_get_float(val, "reverb_mix", &f) == 0) inst->reverb_mix = clampf(f, 0.0f, 1.0f);
-        update_reverb(inst);
-
         return;
     }
 
@@ -1152,32 +842,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         inst->eq_high_gain = clampf(atof(val), -15.0f, 15.0f); update_eq(inst);
     } else if (strcmp(key, "eq_high_freq") == 0) {
         inst->eq_high_freq = clampf(atof(val), 1000.0f, 10000.0f); update_eq(inst);
-    } else if (strcmp(key, "doubler_bypass") == 0) {
-        inst->doubler_bypass = (atoi(val) != 0);
-    } else if (strcmp(key, "doubler_mix") == 0) {
-        inst->doubler_mix = clampf(atof(val), 0.0f, 1.0f);
-    } else if (strcmp(key, "echo_bypass") == 0) {
-        inst->echo_bypass = (atoi(val) != 0);
-    } else if (strcmp(key, "echo_time_ms") == 0) {
-        inst->echo_time_ms = clampf(atof(val), 50.0f, ECHO_MAX_SECONDS * 1000.0f);
-    } else if (strcmp(key, "echo_feedback") == 0) {
-        inst->echo_feedback = clampf(atof(val), 0.0f, 0.9f);
-    } else if (strcmp(key, "echo_filter_hz") == 0) {
-        inst->echo_filter_hz = clampf(atof(val), 400.0f, 8000.0f); update_echo_filter(inst);
-    } else if (strcmp(key, "echo_mix") == 0) {
-        inst->echo_mix = clampf(atof(val), 0.0f, 1.0f);
-    } else if (strcmp(key, "echo_tap") == 0) {
-        /* Momentary: any write to this key is a tap, the value itself is not
-         * meaningful state and is never persisted. */
-        echo_register_tap(inst);
-    } else if (strcmp(key, "reverb_bypass") == 0) {
-        inst->reverb_bypass = (atoi(val) != 0);
-    } else if (strcmp(key, "reverb_room") == 0) {
-        inst->reverb_room = clampf(atof(val), 0.0f, 1.0f); update_reverb(inst);
-    } else if (strcmp(key, "reverb_damping") == 0) {
-        inst->reverb_damping = clampf(atof(val), 0.0f, 1.0f); update_reverb(inst);
-    } else if (strcmp(key, "reverb_mix") == 0) {
-        inst->reverb_mix = clampf(atof(val), 0.0f, 1.0f); update_reverb(inst);
     }
 }
 
@@ -1186,8 +850,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     nam_a2_instance_t *inst = (nam_a2_instance_t *)instance;
     if (!inst || !key || !buf) return -1;
 
-    /* Bulk serialization for slot autosave. echo_tap is momentary and is
-     * deliberately never included - it has no meaningful saved state. */
+    /* Bulk serialization for slot autosave. */
     if (strcmp(key, "state") == 0) {
         return snprintf(buf, buf_len,
             "{\"input_level\":%.4f,\"output_level\":%.4f,\"quality\":%d,"
@@ -1195,21 +858,13 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             "\"cab_index\":%d,\"cab_name\":\"%s\",\"cab_bypass\":%d,"
             "\"eq_low_gain\":%.2f,\"eq_low_freq\":%.1f,"
             "\"eq_mid_gain\":%.2f,\"eq_mid_freq\":%.1f,"
-            "\"eq_high_gain\":%.2f,\"eq_high_freq\":%.1f,"
-            "\"doubler_bypass\":%d,\"doubler_mix\":%.3f,"
-            "\"echo_bypass\":%d,\"echo_time_ms\":%.1f,\"echo_feedback\":%.3f,"
-            "\"echo_filter_hz\":%.1f,\"echo_mix\":%.3f,"
-            "\"reverb_bypass\":%d,\"reverb_room\":%.3f,\"reverb_damping\":%.3f,\"reverb_mix\":%.3f}",
+            "\"eq_high_gain\":%.2f,\"eq_high_freq\":%.1f}",
             inst->input_level, inst->output_level, inst->quality_lite,
             inst->current_model_index, inst->model_name,
             inst->current_cab_index, inst->cab_name, inst->cab_bypass ? 1 : 0,
             inst->eq_low_gain, inst->eq_low_freq,
             inst->eq_mid_gain, inst->eq_mid_freq,
-            inst->eq_high_gain, inst->eq_high_freq,
-            inst->doubler_bypass ? 1 : 0, inst->doubler_mix,
-            inst->echo_bypass ? 1 : 0, inst->echo_time_ms, inst->echo_feedback,
-            inst->echo_filter_hz, inst->echo_mix,
-            inst->reverb_bypass ? 1 : 0, inst->reverb_room, inst->reverb_damping, inst->reverb_mix);
+            inst->eq_high_gain, inst->eq_high_freq);
     }
 
     if (strcmp(key, "input_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->input_level);
@@ -1263,21 +918,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "eq_high_gain") == 0) return snprintf(buf, buf_len, "%.2f", inst->eq_high_gain);
     if (strcmp(key, "eq_high_freq") == 0) return snprintf(buf, buf_len, "%.1f", inst->eq_high_freq);
 
-    if (strcmp(key, "doubler_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->doubler_bypass ? 1 : 0);
-    if (strcmp(key, "doubler_mix") == 0) return snprintf(buf, buf_len, "%.3f", inst->doubler_mix);
-
-    if (strcmp(key, "echo_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->echo_bypass ? 1 : 0);
-    if (strcmp(key, "echo_time_ms") == 0) return snprintf(buf, buf_len, "%.1f", inst->echo_time_ms);
-    if (strcmp(key, "echo_feedback") == 0) return snprintf(buf, buf_len, "%.3f", inst->echo_feedback);
-    if (strcmp(key, "echo_filter_hz") == 0) return snprintf(buf, buf_len, "%.1f", inst->echo_filter_hz);
-    if (strcmp(key, "echo_mix") == 0) return snprintf(buf, buf_len, "%.3f", inst->echo_mix);
-    if (strcmp(key, "echo_tap") == 0) return snprintf(buf, buf_len, "0");
-
-    if (strcmp(key, "reverb_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->reverb_bypass ? 1 : 0);
-    if (strcmp(key, "reverb_room") == 0) return snprintf(buf, buf_len, "%.3f", inst->reverb_room);
-    if (strcmp(key, "reverb_damping") == 0) return snprintf(buf, buf_len, "%.3f", inst->reverb_damping);
-    if (strcmp(key, "reverb_mix") == 0) return snprintf(buf, buf_len, "%.3f", inst->reverb_mix);
-
     /* ui_hierarchy - returned dynamically (static shape, but kept alongside
      * the rest of the dynamic get_param handling for a single source of
      * truth with module.json). */
@@ -1296,10 +936,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
                         "{\"level\":\"models\",\"label\":\"Choose Model\"},"
                         "{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"},"
-                        "{\"level\":\"eq\",\"label\":\"3-Band EQ\"},"
-                        "{\"level\":\"doubler\",\"label\":\"Doubler\"},"
-                        "{\"level\":\"echo\",\"label\":\"Echo\"},"
-                        "{\"level\":\"reverb\",\"label\":\"Reverb\"}"
+                        "{\"level\":\"eq\",\"label\":\"3-Band EQ\"}"
                     "]"
                 "},"
                 "\"models\":{"
@@ -1321,34 +958,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                                "\"eq_mid_freq\",\"eq_high_gain\",\"eq_high_freq\"],"
                     "\"params\":[\"eq_low_gain\",\"eq_low_freq\",\"eq_mid_gain\","
                                 "\"eq_mid_freq\",\"eq_high_gain\",\"eq_high_freq\"]"
-                "},"
-                "\"doubler\":{"
-                    "\"label\":\"Doubler\","
-                    "\"children\":null,"
-                    "\"knobs\":[\"doubler_mix\"],"
-                    "\"params\":["
-                        "{\"key\":\"doubler_bypass\",\"label\":\"Doubler Bypass\"},"
-                        "\"doubler_mix\""
-                    "]"
-                "},"
-                "\"echo\":{"
-                    "\"label\":\"Echo\","
-                    "\"children\":null,"
-                    "\"knobs\":[\"echo_time_ms\",\"echo_feedback\",\"echo_filter_hz\",\"echo_mix\"],"
-                    "\"params\":["
-                        "{\"key\":\"echo_bypass\",\"label\":\"Echo Bypass\"},"
-                        "\"echo_time_ms\",\"echo_feedback\",\"echo_filter_hz\",\"echo_mix\","
-                        "{\"key\":\"echo_tap\",\"label\":\"Tap Tempo\"}"
-                    "]"
-                "},"
-                "\"reverb\":{"
-                    "\"label\":\"Reverb\","
-                    "\"children\":null,"
-                    "\"knobs\":[\"reverb_room\",\"reverb_damping\",\"reverb_mix\"],"
-                    "\"params\":["
-                        "{\"key\":\"reverb_bypass\",\"label\":\"Reverb Bypass\"},"
-                        "\"reverb_room\",\"reverb_damping\",\"reverb_mix\""
-                    "]"
                 "}"
             "}"
         "}";

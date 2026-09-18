@@ -6,10 +6,10 @@
       "lines": [
         "Neural Amp Modeler A2.",
         "",
-        "Amp modeling, cab IR,",
-        "3-band EQ and a solo",
-        "FX chain in one",
-        "Signal Chain effect.",
+        "Amp modeling, cab IR",
+        "and a 3-band EQ in",
+        "one Signal Chain",
+        "audio effect.",
         "",
         "Loads .nam model",
         "files and optional",
@@ -63,35 +63,24 @@
         "filters, Mid is a",
         "bell (peak) filter.",
         "Sits after the cab",
-        "IR, before the FX",
-        "chain below."
+        "IR, at the end of",
+        "the chain."
       ]
     },
     {
-      "title": "Solo FX Chain",
+      "title": "Signal Flow",
       "lines": [
-        "Inspired by the",
-        "Solar Guitars",
-        "CHUG SOLO pedal.",
+        "Input Gain",
+        "  > NAM Model",
+        "  > Cab IR",
+        "  > 3-Band EQ",
+        "  > Output Gain",
         "",
-        "Doubler > Echo >",
-        "Reverb, each with",
-        "its own Bypass.",
-        "",
-        "Doubler: subtle",
-        "chorus to thicken",
-        "a single note.",
-        "",
-        "Echo: filtered",
-        "delay, slap-back",
-        "to ~2s. Hold and",
-        "tap Tap Tempo on",
-        "the beat twice or",
-        "more to set time.",
-        "",
-        "Reverb: small room",
-        "emulation with a",
-        "Mix knob."
+        "For delay, reverb",
+        "or chorus, add",
+        "them as separate",
+        "FX in the slot's",
+        "own chain."
       ]
     }
   ]
