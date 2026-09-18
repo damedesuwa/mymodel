@@ -119,10 +119,75 @@ fi
 echo "Found NeuralAudio: $NA_LIB"
 echo "Found RTNeural: $RT_LIB"
 
+# --- ABI safety: target the glibc/libstdc++ Move actually runs, not the ---
+# --- build host's. ---
+#
+# Move's rootfs is close to Ubuntu 22.04 (glibc 2.35) - that's why
+# scripts/Dockerfile pins ubuntu:22.04. Compiling with a newer host's own
+# cross-toolchain (e.g. Ubuntu 24.04's, glibc 2.39) silently produces a .so
+# that requires glibc symbols Move doesn't have (GLIBC_2.38 measured) -
+# dlopen fails on-device with nothing but a cryptic version-not-found line,
+# while every check on the BUILD machine (compiles clean, correct ELF
+# arch/entry point) looks fine. This bit a real build: native (no-Docker)
+# CROSS_PREFIX compiles happened to run on a newer host and produced an
+# unloadable module that "wouldn't open" with no error visible until the
+# GLIBC symbol versions were inspected directly.
+#
+# Inside the project's own Docker image this is already correct (it IS
+# Ubuntu 22.04), so only the native/no-Docker path needs a fetched sysroot.
+SYSROOT_FLAGS=""
+if [ ! -f "/.dockerenv" ]; then
+    JAMMY_SYSROOT="build/jammy-arm64-sysroot"
+    if [ ! -f "$JAMMY_SYSROOT/usr/aarch64-linux-gnu/lib/libc.so.6" ]; then
+        echo ""
+        echo "--- Fetching a jammy (glibc 2.35) aarch64 sysroot for ABI-correct native linking ---"
+        JAMMY_PKG_DIR="build/jammy-pkgs"
+        mkdir -p "$JAMMY_PKG_DIR" "$JAMMY_SYSROOT"
+        JAMMY_SOURCELIST="build/jammy-sources.list"
+        echo "deb http://archive.ubuntu.com/ubuntu jammy main universe" > "$JAMMY_SOURCELIST"
+
+        apt-get -o Dir::Etc::sourcelist="$REPO_ROOT/$JAMMY_SOURCELIST" \
+            -o Dir::Etc::sourceparts=/dev/null update
+
+        # `apt-cache policy` prints "  VERSION PRIORITY" then, on the next
+        # line, "  PRIORITY http://.../jammy/..." - track the version from
+        # the first line shape and only read it back on the second, or the
+        # http line's own leading priority number gets picked up instead.
+        JAMMY_APT_VER() {
+            apt-cache -o Dir::Etc::sourcelist="$REPO_ROOT/$JAMMY_SOURCELIST" \
+                -o Dir::Etc::sourceparts=/dev/null policy "$1" \
+                | awk '/^ +[^ ]+ [0-9]+$/ && !/http/ { ver=$1 } /http:\/\/.*jammy\/main/ { print ver; exit }'
+        }
+        JAMMY_LIBC_VER=$(JAMMY_APT_VER libc6-arm64-cross)
+        JAMMY_KERNEL_VER=$(JAMMY_APT_VER linux-libc-dev-arm64-cross)
+
+        if [ -z "$JAMMY_LIBC_VER" ] || [ -z "$JAMMY_KERNEL_VER" ]; then
+            echo "ERROR: could not resolve jammy arm64-cross package versions from archive.ubuntu.com"
+            exit 1
+        fi
+
+        (cd "$JAMMY_PKG_DIR" && apt-get \
+            -o Dir::Etc::sourcelist="$REPO_ROOT/$JAMMY_SOURCELIST" \
+            -o Dir::Etc::sourceparts=/dev/null \
+            download \
+            "libc6-arm64-cross=$JAMMY_LIBC_VER" \
+            "libc6-dev-arm64-cross=$JAMMY_LIBC_VER" \
+            "linux-libc-dev-arm64-cross=$JAMMY_KERNEL_VER")
+
+        for deb in "$JAMMY_PKG_DIR"/*.deb; do
+            dpkg-deb -x "$deb" "$JAMMY_SYSROOT"
+        done
+    fi
+    SYSROOT_FLAGS="--sysroot=$REPO_ROOT/$JAMMY_SYSROOT -B$REPO_ROOT/$JAMMY_SYSROOT/usr/aarch64-linux-gnu/lib"
+    echo "Linking against jammy sysroot: $JAMMY_SYSROOT"
+fi
+
 ${CROSS_PREFIX}g++ -Ofast -shared -fPIC \
     -std=c++20 \
+    $SYSROOT_FLAGS \
     -march=armv8-a -mtune=cortex-a72 \
     -fomit-frame-pointer -fno-stack-protector \
+    -static-libgcc -static-libstdc++ \
     -DNDEBUG \
     -DNAM_SAMPLE_FLOAT \
     -DDSP_SAMPLE_FLOAT \
