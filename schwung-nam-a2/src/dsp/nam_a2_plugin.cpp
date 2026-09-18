@@ -11,7 +11,8 @@
  *     pairs, zero-order-hold on the output) - a CPU/quality tradeoff for
  *     models too heavy to run in real time on Move's ARM core alongside the
  *     cab IR and EQ.
- *   - A 3-band EQ (low/high shelf + mid bell) sitting after the cab IR.
+ *   - A 3-band EQ (low/high shelf + mid bell) as the amp's tone stack,
+ *     between the model and the cab IR.
  *
  * A Doubler/Echo/Reverb "solo" FX chain was previously part of this module
  * and has been removed: those stages are better served by the host's own
@@ -27,8 +28,10 @@
  *   nlohmann/json- MIT      - Niels Lohmann
  *
  * Audio: 44100 Hz, 128 frames/block, stereo interleaved int16 in-place.
- * NAM models are mono - we sum L+R to mono, process amp/cab/EQ in mono,
- * then write the result to both output channels.
+ * Chain: input gain -> NAM model -> 3-band EQ -> cab IR -> output gain,
+ * mirroring real hardware (preamp -> tone stack -> power amp -> speaker).
+ * NAM models are mono - we sum L+R to mono, process in mono, then write
+ * the result to both output channels.
  */
 
 #include <cstdio>
@@ -684,14 +687,18 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         inst->model->Process(inst->mono_in, inst->mono_out, (size_t)n);
     }
 
-    /* Cab IR convolution */
-    if (!inst->cab_bypass && inst->cab_ir) {
-        apply_cab_ir(inst, inst->mono_out, n);
-    }
-
-    /* 3-band EQ (mono, in place) */
+    /* 3-band EQ (mono, in place) - this is the amp's tone stack, so it sits
+     * BEFORE the cabinet, exactly as on real hardware: preamp -> tone stack
+     * -> power amp -> speaker cab. Running it after the IR instead would let
+     * the EQ boost back the top end the cabinet exists to roll off, which is
+     * where the harshness a real cab removes lives. */
     for (int i = 0; i < n; i++) {
         inst->mono_out[i] = eq_process(inst, inst->mono_out[i]);
+    }
+
+    /* Cab IR convolution - the speaker is the last acoustic stage */
+    if (!inst->cab_bypass && inst->cab_ir) {
+        apply_cab_ir(inst, inst->mono_out, n);
     }
 
     /* Output gain, then back to stereo int16 (mono source written to both) */
@@ -935,8 +942,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                         "{\"key\":\"quality\",\"label\":\"Quality\"},"
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
                         "{\"level\":\"models\",\"label\":\"Choose Model\"},"
-                        "{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"},"
-                        "{\"level\":\"eq\",\"label\":\"3-Band EQ\"}"
+                        "{\"level\":\"eq\",\"label\":\"3-Band EQ\"},"
+                        "{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"}"
                     "]"
                 "},"
                 "\"models\":{"

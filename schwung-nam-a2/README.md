@@ -15,7 +15,7 @@ by Steven Atkinson.
 ## Signal chain
 
 ```
-Input Gain -> NAM Model -> Cab IR -> 3-Band EQ -> Output Gain
+Input Gain -> NAM Model -> 3-Band EQ -> Cab IR -> Output Gain
 ```
 
 For delay, reverb or chorus, add them as separate FX in the slot's own
@@ -36,7 +36,8 @@ allocation is forbidden) light.
 - **Cabinet IR convolution**: apply cabinet impulse responses with optional
   bypass.
 - **3-band EQ**: independent gain + frequency for Low (shelf), Mid (bell)
-  and High (shelf) bands, sitting after the cab IR.
+  and High (shelf) bands. It is the amp's tone stack, so it sits between
+  the model and the cab - the same place it does on real hardware.
 - **Model / cabinet browsers**: hierarchical file browsers for selecting
   `.nam` model files and `.wav` cabinet IRs.
 - **Input/Output level**: independent gain staging controls.

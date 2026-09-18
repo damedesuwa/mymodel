@@ -62,9 +62,10 @@
         "Low/High are shelf",
         "filters, Mid is a",
         "bell (peak) filter.",
-        "Sits after the cab",
-        "IR, at the end of",
-        "the chain."
+        "The amp's tone",
+        "stack: sits after",
+        "the model, before",
+        "the cab IR."
       ]
     },
     {
@@ -72,8 +73,8 @@
       "lines": [
         "Input Gain",
         "  > NAM Model",
-        "  > Cab IR",
         "  > 3-Band EQ",
+        "  > Cab IR",
         "  > Output Gain",
         "",
         "For delay, reverb",

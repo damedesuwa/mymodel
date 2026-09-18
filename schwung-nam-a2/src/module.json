@@ -29,8 +29,8 @@
               "label": "Cab Bypass"
             },
             { "level": "models", "label": "Choose Model" },
-            { "level": "cabs", "label": "Choose Cabinet" },
-            { "level": "eq", "label": "3-Band EQ" }
+            { "level": "eq", "label": "3-Band EQ" },
+            { "level": "cabs", "label": "Choose Cabinet" }
           ],
           "knobs": ["input_level", "output_level", "quality"]
         },
