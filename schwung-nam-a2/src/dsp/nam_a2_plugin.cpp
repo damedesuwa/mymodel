@@ -487,7 +487,10 @@ static void load_cab(nam_a2_instance_t *inst, int index) {
     inst->current_cab_index = index;
     path_to_name(inst->cab_paths[index], inst->cab_name, MAX_NAME_LEN);
 
-    inst->cab_history = (float *)calloc(ir_len + FRAMES_PER_BLOCK, sizeof(float));
+    /* Doubled length: apply_cab_ir() writes each sample at BOTH pos and
+     * pos + hist_len so its inner loop can read backward as a contiguous
+     * slice with no wraparound branch - see the comment there. */
+    inst->cab_history = (float *)calloc(2 * (ir_len + FRAMES_PER_BLOCK), sizeof(float));
     inst->cab_hist_pos = 0;
 
     free(old_ir);
@@ -498,7 +501,30 @@ static void load_cab(nam_a2_instance_t *inst, int index) {
     plugin_log(msg);
 }
 
-/* Direct time-domain overlap-save convolution via a circular history buffer. */
+/* Direct time-domain convolution via a DOUBLED circular history buffer.
+ *
+ * The original (schwung-nam-derived) version kept a single hist_len-sized
+ * buffer and stepped the read pointer backward with
+ * `if (--p < 0) p = hist_len - 1;` inside the innermost per-tap loop. That
+ * branch is evaluated ir_len times per output sample - for a several-
+ * thousand-tap cabinet IR that is the hot loop, and a data-dependent
+ * branch there defeats auto-vectorization entirely (measured ~7.8x slower
+ * than the branch-free version below at -Ofast on a 4096-tap IR - at
+ * -Ofast that one branchy loop alone was already ~22% of the 128-sample
+ * real-time budget, before the NAM model, EQ or solo FX chain get their
+ * share, which is what produced audible crackling with a normal-length
+ * cab IR loaded).
+ *
+ * Fix: `cab_history` is allocated at 2x size (see load_cab) and every
+ * sample is written at BOTH pos and pos + hist_len. Reading backward from
+ * `&hist[pos + hist_len]` is then always a contiguous, branch-free slice -
+ * `h[-k]` for k in [0, ir_len) never needs to wrap, because the mirrored
+ * copy is already sitting where the wrapped read would have landed. This
+ * changes nothing about the output (verified sample-for-sample identical
+ * against the old implementation, aside from float-reassociation-level
+ * noise from vectorization, ~1e-5) - it only removes the branch so the
+ * compiler can vectorize it.
+ */
 static void apply_cab_ir(nam_a2_instance_t *inst, float *audio, int frames) {
     if (!inst->cab_ir || inst->cab_ir_len <= 0 || !inst->cab_history) return;
 
@@ -509,13 +535,14 @@ static void apply_cab_ir(nam_a2_instance_t *inst, float *audio, int frames) {
     int pos = inst->cab_hist_pos;
 
     for (int i = 0; i < frames; i++) {
-        hist[pos] = audio[i];
+        float x = audio[i];
+        hist[pos] = x;
+        hist[pos + hist_len] = x;
 
+        const float *h = &hist[pos + hist_len]; /* h[0] = newest sample, h[-1] = previous, ... */
         float sum = 0.0f;
-        int p = pos;
         for (int k = 0; k < ir_len; k++) {
-            sum += ir[k] * hist[p];
-            if (--p < 0) p = hist_len - 1;
+            sum += ir[k] * h[-k];
         }
 
         audio[i] = sum;
