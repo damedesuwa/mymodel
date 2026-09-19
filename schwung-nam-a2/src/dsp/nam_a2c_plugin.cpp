@@ -1,0 +1,795 @@
+/*
+ * Nam A2c - eight freely-typed blocks, in the shape of a pedalboard.
+ *
+ * Nam A2 is one amp and one cabinet in a fixed order. This is eight blocks
+ * in series, each of which can be any type: an amp, a cabinet, a drive, or
+ * nothing. Pads 1-8 are the blocks.
+ *
+ *   In -> [1] -> [2] -> [3] -> [4] -> [5] -> [6] -> [7] -> [8] -> Out
+ *
+ * MONO THROUGHOUT. A guitar arrives on one channel (Move's own setting is
+ * `monoFromLeftChannel` and a TRS with its ring tied to sleeve is silent on
+ * the right), every block here is a mono device, and the result is written
+ * to both outputs. Summing L+R instead would halve a mono source.
+ *
+ * THE BUDGET IS THE DESIGN CONSTRAINT. An SPI frame has ~2370 us of slack
+ * and a full-quality NAM is ~1200 us of it, so eight blocks does not mean
+ * eight amps - it means one amp and seven cheap things. `cpu` is a real
+ * parameter on the main page for exactly that reason: the number has to be
+ * in front of you while you choose, not in a log afterwards.
+ *
+ *   NAM Full ~1200us   NAM Slim ~250us   IR 1024 taps ~60us   Drive ~5us
+ *
+ * LOADS ARE OFF THE CALLBACK. Every module entry point here - create,
+ * destroy, set_param, get_param, process_block - runs on the SPI audio
+ * callback at SCHED_FIFO 70. A .nam parse or a 500 ms WAV read there is a
+ * dropout, so both go through the worker below, and the worker is put back
+ * to SCHED_OTHER explicitly: a thread created from an entry point INHERITS
+ * FIFO 70, and Move's own `Link Main` runs at 35.
+ */
+
+#include <new>
+
+#include "a2_common.h"
+
+#define NAM_A2C_BUILD_ID "blocks-1"
+
+#define NUM_BLOCKS 8
+#define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
+
+/* How many entries the model and cab pickers offer. The lists are served as
+ * enum options inside chain_params, so this bounds that JSON rather than
+ * what may sit on the card. */
+#define MAX_LISTED 48
+
+/* BLK_NAM is any .nam capture, which is NOT the same thing as an amp: the
+ * bundled OCD is a pedal, captured at the same architecture (3ch/8ch
+ * WaveNet, identical weight counts) and therefore at the same cost. Naming
+ * the type "Amp" would put a fuzz pedal under a label that says otherwise
+ * and hide that two of them do not fit in a frame. */
+enum { BLK_OFF = 0, BLK_NAM = 1, BLK_CAB = 2, BLK_DRIVE = 3, BLK_TYPES = 4 };
+
+static const char *block_type_name(int t) {
+    switch (t) {
+        case BLK_NAM:   return "NAM";
+        case BLK_CAB:   return "Cab";
+        case BLK_DRIVE: return "Drive";
+        default:        return "Off";
+    }
+}
+
+/* ======================================================================== */
+/* Load requests                                                             */
+/* ======================================================================== */
+
+/* A 16-deep single-producer/single-consumer ring. The producer is
+ * set_param on the audio callback, the consumer is the worker. A ring
+ * rather than one slot because changing a block's type writes its model and
+ * its cab in the same breath, and a single slot loses whichever lost the
+ * race - silently, leaving a block that says "Amp" and makes no sound. */
+#define REQ_RING 16
+
+typedef struct {
+    int  block;
+    int  kind;      /* BLK_NAM or BLK_CAB */
+    int  index;
+    char path[MAX_PATH_LEN];
+} load_req_t;
+
+typedef struct {
+    load_req_t items[REQ_RING];
+    std::atomic<unsigned> head;   /* worker reads */
+    std::atomic<unsigned> tail;   /* callback writes */
+} req_ring_t;
+
+static int req_push(req_ring_t *r, const load_req_t *req) {
+    unsigned t = r->tail.load(std::memory_order_relaxed);
+    unsigned h = r->head.load(std::memory_order_acquire);
+    if (t - h >= REQ_RING) return 0;          /* full - drop, never block */
+    r->items[t % REQ_RING] = *req;
+    r->tail.store(t + 1, std::memory_order_release);
+    return 1;
+}
+
+static int req_pop(req_ring_t *r, load_req_t *out) {
+    unsigned h = r->head.load(std::memory_order_relaxed);
+    unsigned t = r->tail.load(std::memory_order_acquire);
+    if (h == t) return 0;
+    *out = r->items[h % REQ_RING];
+    r->head.store(h + 1, std::memory_order_release);
+    return 1;
+}
+
+/* ======================================================================== */
+/* Instance                                                                  */
+/* ======================================================================== */
+
+typedef struct {
+    char module_dir[MAX_PATH_LEN];
+
+    int  type[NUM_BLOCKS];
+    int  on[NUM_BLOCKS];          /* 1 = in circuit, 0 = bypassed */
+
+    nam_block_t   amp[NUM_BLOCKS];
+    ir_block_t    cab[NUM_BLOCKS];
+    drive_block_t drive[NUM_BLOCKS];
+
+    /* Per-block cost, peak-held. What makes the budget legible: the main
+     * page shows the total, and a block's own page shows its share. */
+    double us_peak[NUM_BLOCKS];
+
+    int  sel_block;               /* which block the grid is editing */
+
+    float in_level, out_level;
+    float in_gain,  out_gain;
+
+    /* Shared lists, scanned once. A model or a cab belongs to the module,
+     * not to a block - eight blocks pointing at one file is ordinary. */
+    int  model_count;
+    char model_names[MAX_MODELS][MAX_NAME_LEN];
+    char model_paths[MAX_MODELS][MAX_PATH_LEN];
+    int  cab_count;
+    char cab_names[MAX_CABS][MAX_NAME_LEN];
+    char cab_paths[MAX_CABS][MAX_PATH_LEN];
+
+    /* Scratch. Allocated once in create_instance - never per block. */
+    float mono[FRAMES_PER_BLOCK];
+    float scratch[FRAMES_PER_BLOCK];
+
+    req_ring_t   reqs;
+    volatile int worker_stop;
+    pthread_t    worker_tid;
+    int          worker_running;
+
+    double cpu_us_peak;
+    int    cpu_warn;
+
+    uint64_t blocks_seen;
+    double   rate_t0_us;
+    double   rate_hz;
+    float    in_peak_l, in_peak_r;
+    float    out_peak;
+    uint64_t nan_samples;
+
+    volatile int diag_stop;
+    pthread_t    diag_tid;
+    int          diag_running;
+} a2c_t;
+
+/* ======================================================================== */
+/* Threads                                                                   */
+/* ======================================================================== */
+
+/* A thread started from a module entry point inherits the SPI callback's
+ * SCHED_FIFO 70. Nothing here needs to be realtime and two of Move's own
+ * threads (`Link Main` at 35) would starve behind a model parse, so both of
+ * ours are put back explicitly rather than left to inherit. */
+static int start_low_prio_thread(pthread_t *tid, void *(*fn)(void *), void *arg,
+                                 int detached) {
+    pthread_attr_t at;
+    struct sched_param sp;
+    pthread_attr_init(&at);
+    pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED);
+    pthread_attr_setschedpolicy(&at, SCHED_OTHER);
+    sp.sched_priority = 0;
+    pthread_attr_setschedparam(&at, &sp);
+    if (detached) pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(tid, &at, fn, arg);
+    pthread_attr_destroy(&at);
+    return rc == 0;
+}
+
+static void *worker_thread(void *arg) {
+    a2c_t *s = (a2c_t *)arg;
+    char msg[MAX_PATH_LEN + 96];
+
+    while (!s->worker_stop) {
+        load_req_t r;
+        if (!req_pop(&s->reqs, &r)) {
+            struct timespec ts = { 0, 20000000L };   /* 20 ms */
+            nanosleep(&ts, NULL);
+            continue;
+        }
+        if (r.block < 0 || r.block >= NUM_BLOCKS) continue;
+
+        if (r.kind == BLK_NAM) {
+            nam_block_t *b = &s->amp[r.block];
+            NeuralAudio::NeuralModelLoader loader;
+            NeuralAudio::NeuralModel *m = loader.CreateFromFile(r.path);
+            if (m) {
+                /* Published BEFORE the model, and adopted with it by the
+                 * same exchange, so a block can never run a model at
+                 * another model's calibration. */
+                /* LINEAR here, not dB: converting at publish time means the
+                 * audio thread multiplies rather than calling powf twice a
+                 * block, and there is only one place that can get the
+                 * conversion wrong. */
+                b->pending_in_gain  = db_to_gain(m->GetRecommendedInputDBAdjustment());
+                b->pending_out_gain = db_to_gain(m->GetRecommendedOutputDBAdjustment());
+                path_to_name(r.path, b->name, MAX_NAME_LEN);
+                NeuralAudio::NeuralModel *stale =
+                    b->pending.exchange(m, std::memory_order_acq_rel);
+                delete stale;
+                snprintf(msg, sizeof(msg), "Nam A2c: block %d amp '%s' loaded",
+                         r.block + 1, b->name);
+            } else {
+                snprintf(msg, sizeof(msg), "Nam A2c: block %d amp FAILED %s",
+                         r.block + 1, r.path);
+            }
+            b->loading.store(false, std::memory_order_release);
+            plugin_log(msg);
+        } else if (r.kind == BLK_CAB) {
+            ir_block_t *b = &s->cab[r.block];
+            b->run_cap = IR_RUN_TAPS;
+            int n = ir_block_load(b, r.path);
+            if (n > 0)
+                snprintf(msg, sizeof(msg),
+                         "Nam A2c: block %d cab '%s' %d taps (%.0f ms) gain %+.1f dB",
+                         r.block + 1, b->name, n, 1000.0f * n / SAMPLE_RATE,
+                         b->norm_db);
+            else
+                snprintf(msg, sizeof(msg), "Nam A2c: block %d cab FAILED %s",
+                         r.block + 1, r.path);
+            plugin_log(msg);
+        }
+    }
+    return NULL;
+}
+
+static void *diag_thread(void *arg) {
+    a2c_t *s = (a2c_t *)arg;
+    int first = 1;
+    while (!s->diag_stop) {
+        struct timespec ts = { first ? 0 : 2, first ? 200000000L : 0 };
+        first = 0;
+        nanosleep(&ts, NULL);
+        if (s->diag_stop) break;
+
+        char chain[160]; int w = 0;
+        for (int i = 0; i < NUM_BLOCKS; i++) {
+            w += snprintf(chain + w, sizeof(chain) - w, "%s%s%.0f",
+                          i ? " " : "",
+                          s->type[i] == BLK_OFF ? "-" :
+                          (s->on[i] ? block_type_name(s->type[i]) : "("),
+                          s->type[i] == BLK_OFF ? 0.0 : s->us_peak[i]);
+        }
+
+        char msg[512];
+        snprintf(msg, sizeof(msg),
+            "Nam A2c diag: blocks/s=%.0f (expect 344) | total_us=%.0f | %s | "
+            "in pkL=%.4f pkR=%.4f | out pk=%.4f nan=%lu",
+            s->rate_hz, s->cpu_us_peak, chain,
+            s->in_peak_l, s->in_peak_r, s->out_peak,
+            (unsigned long)s->nan_samples);
+        plugin_log(msg);
+
+        s->in_peak_l = s->in_peak_r = 0.0f;
+        s->out_peak = 0.0f;
+    }
+    return NULL;
+}
+
+/* ======================================================================== */
+/* Lists                                                                     */
+/* ======================================================================== */
+
+static void scan_lists(a2c_t *s) {
+    char dir[MAX_PATH_LEN];
+    snprintf(dir, sizeof(dir), "%s/models", s->module_dir);
+    s->model_count = scan_directory(dir, s->model_names, s->model_paths,
+                                    MAX_MODELS, is_model_file);
+    snprintf(dir, sizeof(dir), "%s/cabs", s->module_dir);
+    s->cab_count = scan_directory(dir, s->cab_names, s->cab_paths,
+                                  MAX_CABS, is_cab_file);
+}
+
+/* ======================================================================== */
+/* API v2                                                                    */
+/* ======================================================================== */
+
+typedef struct audio_fx_api_v2 {
+    uint32_t api_version;
+    void* (*create_instance)(const char *module_dir, const char *config_json);
+    void  (*destroy_instance)(void *instance);
+    void  (*process_block)(void *instance, int16_t *audio_inout, int frames);
+    void  (*set_param)(void *instance, const char *key, const char *val);
+    int   (*get_param)(void *instance, const char *key, char *buf, int buf_len);
+    void  (*on_midi)(void *instance, const uint8_t *msg, int len, int source);
+} audio_fx_api_v2_t;
+
+static void request_load(a2c_t *s, int block, int kind, int index) {
+    load_req_t r;
+    r.block = block;
+    r.kind = kind;
+    r.index = index;
+    if (kind == BLK_NAM) {
+        if (index < 0 || index >= s->model_count) return;
+        snprintf(r.path, sizeof(r.path), "%s", s->model_paths[index]);
+        s->amp[block].index = index;
+        s->amp[block].loading.store(true, std::memory_order_release);
+    } else {
+        if (index < 0 || index >= s->cab_count) return;
+        snprintf(r.path, sizeof(r.path), "%s", s->cab_paths[index]);
+        s->cab[block].index = index;
+    }
+    req_push(&s->reqs, &r);
+}
+
+static void *v2_create_instance(const char *module_dir, const char *config_json) {
+    (void)config_json;
+    a2c_t *s = (a2c_t *)calloc(1, sizeof(a2c_t));
+    if (!s) return NULL;
+
+    plugin_log("Nam A2c BUILD " NAM_A2C_BUILD_ID);
+
+    snprintf(s->module_dir, sizeof(s->module_dir), "%s",
+             module_dir ? module_dir : ".");
+
+    for (int i = 0; i < NUM_BLOCKS; i++) {
+        s->type[i] = BLK_OFF;
+        s->on[i] = 1;
+        s->amp[i].index = -1;
+        s->amp[i].quality = 0;
+        new (&s->amp[i].pending) std::atomic<NeuralAudio::NeuralModel *>(nullptr);
+        new (&s->amp[i].loading) std::atomic<bool>(false);
+        s->cab[i].index = -1;
+        s->cab[i].run_cap = IR_RUN_TAPS;
+        s->drive[i].mode = DRIVE_OD;
+        s->drive[i].drive = 0.5f;
+        s->drive[i].tone = 0.5f;
+        s->drive[i].level = 0.5f;
+    }
+    new (&s->reqs.head) std::atomic<unsigned>(0);
+    new (&s->reqs.tail) std::atomic<unsigned>(0);
+
+    s->in_level = 0.5f;
+    s->out_level = 0.85f;
+    s->in_gain = knob_to_gain(s->in_level);
+    s->out_gain = knob_to_gain(s->out_level);
+    s->sel_block = 0;
+
+    scan_lists(s);
+
+    s->worker_stop = 0;
+    s->worker_running = start_low_prio_thread(&s->worker_tid, worker_thread, s, 0);
+    if (!s->worker_running) plugin_log("Nam A2c: worker FAILED to start");
+
+    /* THE DEFAULT CHAIN IS BUILT TO FIT, not just to be non-empty.
+     *
+     * A module that makes no sound on install reads as broken, and one that
+     * crackles on install reads as worse. The bundle is a pedal capture and
+     * an amp capture with the SAME architecture, so both cost ~1200 us at
+     * Full and two of them is 2400 of a 2370 us frame - over, before the
+     * cabinet. So the first model goes in at Slim (~250 us) and the second
+     * at Full:
+     *
+     *     [1] OCD   NAM  Slim   ~250 us
+     *     [2] Recto NAM  Full  ~1200 us
+     *     [3] Cab   1024 taps   ~60 us      total ~1510 of 2370
+     *
+     * With one model on the card there is nothing to make room for, so it
+     * gets Full. The rule is positional rather than by name - matching
+     * "Recto" would work for this tarball and for nothing else. */
+    int b = 0;
+    if (s->model_count > 0) {
+        s->type[b] = BLK_NAM;
+        s->amp[b].quality = (s->model_count > 1) ? 1 : 0;
+        request_load(s, b, BLK_NAM, 0);
+        b++;
+    }
+    if (s->model_count > 1) {
+        s->type[b] = BLK_NAM;
+        s->amp[b].quality = 0;
+        request_load(s, b, BLK_NAM, 1);
+        b++;
+    }
+    if (s->cab_count > 0) {
+        s->type[b] = BLK_CAB;
+        request_load(s, b, BLK_CAB, 0);
+    }
+
+    s->diag_stop = 0;
+    s->diag_running = start_low_prio_thread(&s->diag_tid, diag_thread, s, 0);
+
+    return s;
+}
+
+static void v2_destroy_instance(void *instance) {
+    a2c_t *s = (a2c_t *)instance;
+    if (!s) return;
+
+    s->diag_stop = 1;
+    if (s->diag_running) pthread_join(s->diag_tid, NULL);
+    s->worker_stop = 1;
+    if (s->worker_running) pthread_join(s->worker_tid, NULL);
+
+    for (int i = 0; i < NUM_BLOCKS; i++) {
+        delete s->amp[i].model;
+        delete s->amp[i].pending.exchange(nullptr, std::memory_order_acq_rel);
+        ir_block_free(&s->cab[i]);
+    }
+    free(s);
+    plugin_log("Nam A2c: instance destroyed");
+}
+
+static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
+    a2c_t *s = (a2c_t *)instance;
+    if (!s || !audio_inout) return;
+
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    int n = (frames > FRAMES_PER_BLOCK) ? FRAMES_PER_BLOCK : frames;
+
+    /* Call-rate meter. If this module is called 344 times a second and the
+     * output still has whole blocks of silence in it, the silence is
+     * inserted after us; if it is called appreciably fewer, the host is
+     * skipping our slot. Nothing else tells those two apart. */
+    double now_us = t0.tv_sec * 1e6 + t0.tv_nsec / 1e3;
+    if (s->rate_t0_us == 0.0) s->rate_t0_us = now_us;
+    s->blocks_seen++;
+    if (now_us - s->rate_t0_us >= 1e6) {
+        s->rate_hz = s->blocks_seen * 1e6 / (now_us - s->rate_t0_us);
+        s->blocks_seen = 0;
+        s->rate_t0_us = now_us;
+    }
+
+    const float ig = s->in_gain;
+    for (int i = 0; i < n; i++) {
+        float l = audio_inout[i * 2]     / 32768.0f;
+        float r = audio_inout[i * 2 + 1] / 32768.0f;
+        float al = l < 0 ? -l : l, ar = r < 0 ? -r : r;
+        if (al > s->in_peak_l) s->in_peak_l = al;
+        if (ar > s->in_peak_r) s->in_peak_r = ar;
+        s->mono[i] = l * ig;
+    }
+
+    for (int b = 0; b < NUM_BLOCKS; b++) {
+        int t = s->type[b];
+        if (t == BLK_OFF) { s->us_peak[b] = 0.0; continue; }
+
+        /* Adopt a finished load even while bypassed: coming off bypass
+         * should not then wait for a model that has been ready for a
+         * minute. */
+        if (t == BLK_NAM) nam_block_adopt_pending(&s->amp[b]);
+
+        if (!s->on[b]) { s->us_peak[b] *= CPU_PEAK_DECAY; continue; }
+
+        struct timespec b0, b1;
+        clock_gettime(CLOCK_MONOTONIC, &b0);
+        switch (t) {
+            case BLK_NAM:
+                if (s->amp[b].model) {
+                    const float mg = s->amp[b].in_gain;
+                    for (int i = 0; i < n; i++) s->mono[i] *= mg;
+                    nam_block_process(&s->amp[b], s->mono, s->scratch, n);
+                    const float mo = s->amp[b].out_gain;
+                    for (int i = 0; i < n; i++) s->mono[i] *= mo;
+                }
+                break;
+            case BLK_CAB:
+                ir_block_process(&s->cab[b], s->mono, n);
+                break;
+            case BLK_DRIVE:
+                drive_block_process(&s->drive[b], s->mono, n);
+                break;
+            default: break;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &b1);
+        double us = (b1.tv_sec - b0.tv_sec) * 1e6 + (b1.tv_nsec - b0.tv_nsec) / 1e3;
+        double decayed = s->us_peak[b] * CPU_PEAK_DECAY;
+        s->us_peak[b] = (us > decayed) ? us : decayed;
+    }
+
+    const float og = s->out_gain;
+    for (int i = 0; i < n; i++) {
+        float v = sanitize_sample(s->mono[i] * og);
+        if (v != s->mono[i] * og) s->nan_samples++;
+        float a = v < 0 ? -v : v;
+        if (a > s->out_peak) s->out_peak = a;
+        int32_t q = (int32_t)lrintf(v * 32767.0f);
+        if (q > 32767) q = 32767;
+        if (q < -32768) q = -32768;
+        audio_inout[i * 2]     = (int16_t)q;
+        audio_inout[i * 2 + 1] = (int16_t)q;
+    }
+
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double total = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3;
+    double dec = s->cpu_us_peak * CPU_PEAK_DECAY;
+    s->cpu_us_peak = (total > dec) ? total : dec;
+    double pct = 100.0 * s->cpu_us_peak / FRAME_BUDGET_US;
+    if (pct > CPU_WARN_ON)       s->cpu_warn = 1;
+    else if (pct < CPU_WARN_OFF) s->cpu_warn = 0;
+}
+
+static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
+    (void)instance; (void)msg; (void)len; (void)source;
+}
+
+/* ------------------------------------------------------------------ params */
+
+/* `b<N>_<key>`, the shape `child_key_template` in the hierarchy resolves to.
+ * Returns the block index, or -1 when the key is not a block key. */
+static int block_key(const char *key, const char **rest) {
+    if (key[0] != 'b') return -1;
+    if (key[1] < '1' || key[1] > '0' + NUM_BLOCKS) return -1;
+    if (key[2] != '_') return -1;
+    *rest = key + 3;
+    return key[1] - '1';
+}
+
+static void v2_set_param(void *instance, const char *key, const char *val) {
+    a2c_t *s = (a2c_t *)instance;
+    if (!s || !key || !val) return;
+
+    const char *sub;
+    int b = block_key(key, &sub);
+    if (b >= 0) {
+        if (strcmp(sub, "type") == 0) {
+            int t = atoi(val);
+            if (t < 0) t = 0;
+            if (t >= BLK_TYPES) t = BLK_TYPES - 1;
+            if (t == s->type[b]) return;
+            s->type[b] = t;
+            /* A block given a type with nothing chosen yet takes the first
+             * thing on the card, so selecting "Amp" makes a sound rather
+             * than a silence you then have to diagnose. */
+            if (t == BLK_NAM && s->amp[b].index < 0 && s->model_count > 0)
+                request_load(s, b, BLK_NAM, 0);
+            if (t == BLK_CAB && s->cab[b].index < 0 && s->cab_count > 0)
+                request_load(s, b, BLK_CAB, 0);
+        } else if (strcmp(sub, "on") == 0) {
+            /* Enum: 0 = On, 1 = Bypass. Reads the way the pad does. */
+            s->on[b] = (atoi(val) == 0) ? 1 : 0;
+        } else if (strcmp(sub, "model") == 0) {
+            int i = atoi(val);
+            if (i != s->amp[b].index) request_load(s, b, BLK_NAM, i);
+        } else if (strcmp(sub, "quality") == 0) {
+            int q = atoi(val);
+            s->amp[b].quality = (q < 0) ? 0 : (q > 2) ? 2 : q;
+            nam_block_apply_quality(&s->amp[b]);
+        } else if (strcmp(sub, "cab") == 0) {
+            int i = atoi(val);
+            if (i != s->cab[b].index) request_load(s, b, BLK_CAB, i);
+        } else if (strcmp(sub, "dmode") == 0) {
+            int m = atoi(val);
+            s->drive[b].mode = (m < 0) ? 0 : (m > 2) ? 2 : m;
+        } else if (strcmp(sub, "drive") == 0) {
+            s->drive[b].drive = clampf(atof(val), 0.0f, 1.0f);
+        } else if (strcmp(sub, "tone") == 0) {
+            s->drive[b].tone = clampf(atof(val), 0.0f, 1.0f);
+        } else if (strcmp(sub, "level") == 0) {
+            s->drive[b].level = clampf(atof(val), 0.0f, 1.0f);
+        }
+        return;
+    }
+
+    if (strcmp(key, "in_level") == 0) {
+        s->in_level = clampf(atof(val), 0.0f, 1.0f);
+        s->in_gain = knob_to_gain(s->in_level);
+    } else if (strcmp(key, "out_level") == 0) {
+        s->out_level = clampf(atof(val), 0.0f, 1.0f);
+        s->out_gain = knob_to_gain(s->out_level);
+    } else if (strcmp(key, "sel_block") == 0) {
+        int i = atoi(val);
+        s->sel_block = (i < 0) ? 0 : (i >= NUM_BLOCKS) ? NUM_BLOCKS - 1 : i;
+    } else if (strcmp(key, "rescan") == 0) {
+        scan_lists(s);
+    }
+}
+
+/* The option list for a picker, as chain_params enum options.
+ *
+ * Emitted from the SCANNED list rather than declared, so a model dropped on
+ * the card by the file browser appears without a rebuild. Quotes and
+ * backslashes in a filename are dropped rather than escaped: both readers of
+ * this JSON truncate a quoted value at its first quote, so an escaped name
+ * would be worse than a shortened one. */
+static int emit_options(char *buf, int buf_len,
+                        char names[][MAX_NAME_LEN], int count) {
+    int w = 0;
+    w += snprintf(buf + w, buf_len - w, "[");
+    int shown = (count < MAX_LISTED) ? count : MAX_LISTED;
+    if (shown == 0) {
+        w += snprintf(buf + w, buf_len - w, "\"(none)\"");
+    }
+    for (int i = 0; i < shown && w < buf_len - 96; i++) {
+        if (i) w += snprintf(buf + w, buf_len - w, ",");
+        w += snprintf(buf + w, buf_len - w, "\"");
+        for (const char *p = names[i]; *p && w < buf_len - 8; p++)
+            if (*p != '"' && *p != '\\') buf[w++] = *p;
+        buf[w] = '\0';
+        w += snprintf(buf + w, buf_len - w, "\"");
+    }
+    w += snprintf(buf + w, buf_len - w, "]");
+    return w;
+}
+
+static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
+    a2c_t *s = (a2c_t *)instance;
+    if (!s || !key || !buf) return -1;
+
+    const char *sub;
+    int b = block_key(key, &sub);
+    if (b >= 0) {
+        if (strcmp(sub, "type") == 0)    return snprintf(buf, buf_len, "%d", s->type[b]);
+        if (strcmp(sub, "on") == 0)      return snprintf(buf, buf_len, "%d", s->on[b] ? 0 : 1);
+        if (strcmp(sub, "model") == 0)   return snprintf(buf, buf_len, "%d", s->amp[b].index < 0 ? 0 : s->amp[b].index);
+        if (strcmp(sub, "quality") == 0) return snprintf(buf, buf_len, "%d", s->amp[b].quality);
+        if (strcmp(sub, "cab") == 0)     return snprintf(buf, buf_len, "%d", s->cab[b].index < 0 ? 0 : s->cab[b].index);
+        if (strcmp(sub, "dmode") == 0)   return snprintf(buf, buf_len, "%d", s->drive[b].mode);
+        if (strcmp(sub, "drive") == 0)   return snprintf(buf, buf_len, "%.4f", s->drive[b].drive);
+        if (strcmp(sub, "tone") == 0)    return snprintf(buf, buf_len, "%.4f", s->drive[b].tone);
+        if (strcmp(sub, "level") == 0)   return snprintf(buf, buf_len, "%.4f", s->drive[b].level);
+        if (strcmp(sub, "cpu") == 0) {
+            double pct = 100.0 * s->us_peak[b] / FRAME_BUDGET_US;
+            return snprintf(buf, buf_len, "%d", (int)(clampf(pct, 0.0f, 100.0f) + 0.5f));
+        }
+        return -1;
+    }
+
+    if (strcmp(key, "in_level") == 0)  return snprintf(buf, buf_len, "%.4f", s->in_level);
+    if (strcmp(key, "out_level") == 0) return snprintf(buf, buf_len, "%.4f", s->out_level);
+    if (strcmp(key, "sel_block") == 0) return snprintf(buf, buf_len, "%d", s->sel_block);
+    if (strcmp(key, "cpu") == 0) {
+        double pct = 100.0 * s->cpu_us_peak / FRAME_BUDGET_US;
+        return snprintf(buf, buf_len, "%d", (int)(clampf(pct, 0.0f, 100.0f) + 0.5f));
+    }
+
+    /* Never -1 for these two: an unserved key answers null, which means THE
+     * READ DID NOT COMPLETE, is never cached, and costs ~50 failed reads a
+     * second on a key the chain line polls twice a second. */
+    if (strcmp(key, "name") == 0 || strcmp(key, "preset_name") == 0) {
+        int amp = -1;
+        for (int i = 0; i < NUM_BLOCKS; i++)
+            if (s->type[i] == BLK_NAM && s->amp[i].name[0]) { amp = i; break; }
+        return snprintf(buf, buf_len, "%s%s",
+                        amp >= 0 ? s->amp[amp].name : "A2c",
+                        s->cpu_warn ? " !" : "");
+    }
+    if (strcmp(key, "display_name") == 0) {
+        if (!s->cpu_warn) return -1;
+        return snprintf(buf, buf_len, "Nam A2c CPU overload");
+    }
+    if (strcmp(key, "is_loading") == 0 || strcmp(key, "loading") == 0) {
+        int any = 0;
+        for (int i = 0; i < NUM_BLOCKS; i++)
+            if (s->amp[i].loading.load(std::memory_order_acquire)) any = 1;
+        return snprintf(buf, buf_len, "%d", any);
+    }
+
+    if (strcmp(key, "state") == 0) {
+        int w = 0;
+        w += snprintf(buf + w, buf_len - w,
+                      "{\"in_level\":%.4f,\"out_level\":%.4f,\"blocks\":[",
+                      s->in_level, s->out_level);
+        for (int i = 0; i < NUM_BLOCKS && w < buf_len - 256; i++) {
+            w += snprintf(buf + w, buf_len - w,
+                "%s{\"type\":%d,\"on\":%d,\"model\":%d,\"quality\":%d,\"cab\":%d,"
+                "\"dmode\":%d,\"drive\":%.4f,\"tone\":%.4f,\"level\":%.4f}",
+                i ? "," : "", s->type[i], s->on[i],
+                s->amp[i].index, s->amp[i].quality, s->cab[i].index,
+                s->drive[i].mode, s->drive[i].drive, s->drive[i].tone,
+                s->drive[i].level);
+        }
+        w += snprintf(buf + w, buf_len - w, "]}");
+        return w;
+    }
+
+    /* chain_params is BUILT rather than written out, because eight blocks of
+     * nine keys is 72 declarations and a literal that long is a literal that
+     * drifts. Served here and not left to module.json for a second reason:
+     * the C side's chain_param_info_t has no member for `access` or `live`,
+     * so the CPU readout only survives when the plugin's own string is
+     * returned verbatim - and it only IS returned verbatim while it parses,
+     * which a trailing comma once quietly prevented for four builds. */
+    if (strcmp(key, "chain_params") == 0) {
+        char models[4096], cabs[4096];
+        emit_options(models, sizeof(models), s->model_names, s->model_count);
+        emit_options(cabs, sizeof(cabs), s->cab_names, s->cab_count);
+
+        int w = 0;
+        w += snprintf(buf + w, buf_len - w,
+            "[{\"key\":\"in_level\",\"name\":\"Input\",\"type\":\"float\","
+              "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01},"
+             "{\"key\":\"out_level\",\"name\":\"Output\",\"type\":\"float\","
+              "\"min\":0.0,\"max\":1.0,\"default\":0.85,\"step\":0.01},"
+             "{\"key\":\"cpu\",\"name\":\"CPU\",\"type\":\"int\",\"min\":0,"
+              "\"max\":100,\"default\":0,\"step\":1,\"unit\":\"%%\","
+              "\"access\":\"read\",\"live\":true},"
+             "{\"key\":\"sel_block\",\"name\":\"Block\",\"type\":\"int\","
+              "\"min\":0,\"max\":%d,\"default\":0,\"step\":1}", NUM_BLOCKS - 1);
+
+        for (int i = 1; i <= NUM_BLOCKS && w < buf_len - 2048; i++) {
+            w += snprintf(buf + w, buf_len - w,
+                ",{\"key\":\"b%d_type\",\"name\":\"Type\",\"type\":\"enum\","
+                  "\"options\":[\"Off\",\"NAM\",\"Cab\",\"Drive\"],\"default\":0}"
+                ",{\"key\":\"b%d_on\",\"name\":\"On\",\"type\":\"enum\","
+                  "\"options\":[\"On\",\"Bypass\"],\"default\":0}"
+                ",{\"key\":\"b%d_model\",\"name\":\"Model\",\"type\":\"enum\","
+                  "\"options\":%s,\"default\":0}"
+                ",{\"key\":\"b%d_quality\",\"name\":\"Qual\",\"type\":\"enum\","
+                  "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0}"
+                ",{\"key\":\"b%d_cab\",\"name\":\"Cab\",\"type\":\"enum\","
+                  "\"options\":%s,\"default\":0}"
+                ",{\"key\":\"b%d_dmode\",\"name\":\"Mode\",\"type\":\"enum\","
+                  "\"options\":[\"OD\",\"Dist\",\"Fuzz\"],\"default\":0}"
+                ",{\"key\":\"b%d_drive\",\"name\":\"Drive\",\"type\":\"float\","
+                  "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01}"
+                ",{\"key\":\"b%d_tone\",\"name\":\"Tone\",\"type\":\"float\","
+                  "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01}"
+                ",{\"key\":\"b%d_level\",\"name\":\"Level\",\"type\":\"float\","
+                  "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01}"
+                ",{\"key\":\"b%d_cpu\",\"name\":\"CPU\",\"type\":\"int\","
+                  "\"min\":0,\"max\":100,\"default\":0,\"step\":1,\"unit\":\"%%\","
+                  "\"access\":\"read\",\"live\":true}",
+                i, i, i, models, i, i, cabs, i, i, i, i, i);
+        }
+        w += snprintf(buf + w, buf_len - w, "]");
+        return w;
+    }
+
+    if (strcmp(key, "ui_hierarchy") == 0) {
+        /* The eight blocks are ONE declared level multiplied by the host
+         * (`child_key_template` resolves `type` to `b3_type` for block 3),
+         * not eight levels written out. And every block declares all nine
+         * keys with `visible_if` on the type, so a block shows the cells
+         * its type has and no others - which is the whole reason a block
+         * can be any type without the page becoming a menu of dead knobs. */
+        return snprintf(buf, buf_len, "%s",
+            "{\"modes\":null,\"levels\":{"
+              "\"root\":{\"label\":\"Nam A2c\",\"children\":null,"
+                "\"knobs\":[\"in_level\",\"out_level\",\"cpu\"],"
+                "\"params\":["
+                  "{\"key\":\"in_level\",\"label\":\"Input\"},"
+                  "{\"key\":\"out_level\",\"label\":\"Output\"},"
+                  "{\"key\":\"cpu\",\"label\":\"CPU\"},"
+                  "{\"level\":\"blocks\",\"label\":\"Blocks 1-8\"}"
+                "]},"
+              "\"blocks\":{\"label\":\"Block\","
+                "\"child_count\":8,\"child_label\":\"Block\","
+                "\"child_key_template\":\"b{index}_{key}\","
+                "\"child_index_base\":1,"
+                "\"child_index_param\":\"sel_block\","
+                "\"knobs\":[\"type\",\"on\",\"model\",\"quality\",\"cab\","
+                           "\"dmode\",\"drive\",\"tone\",\"level\",\"cpu\"],"
+                "\"params\":["
+                  "{\"key\":\"type\",\"label\":\"Type\"},"
+                  "{\"key\":\"on\",\"label\":\"On\"},"
+                  "{\"key\":\"model\",\"label\":\"Model\","
+                    "\"visible_if\":{\"param\":\"type\",\"equals\":1}},"
+                  "{\"key\":\"quality\",\"label\":\"Qual\","
+                    "\"visible_if\":{\"param\":\"type\",\"equals\":1}},"
+                  "{\"key\":\"cab\",\"label\":\"Cab\","
+                    "\"visible_if\":{\"param\":\"type\",\"equals\":2}},"
+                  "{\"key\":\"dmode\",\"label\":\"Mode\","
+                    "\"visible_if\":{\"param\":\"type\",\"equals\":3}},"
+                  "{\"key\":\"drive\",\"label\":\"Drive\","
+                    "\"visible_if\":{\"param\":\"type\",\"equals\":3}},"
+                  "{\"key\":\"tone\",\"label\":\"Tone\","
+                    "\"visible_if\":{\"param\":\"type\",\"equals\":3}},"
+                  "{\"key\":\"level\",\"label\":\"Level\","
+                    "\"visible_if\":{\"param\":\"type\",\"equals\":3}},"
+                  "{\"key\":\"cpu\",\"label\":\"CPU\"}"
+                "]}"
+            "}}");
+    }
+
+    return -1;
+}
+
+static audio_fx_api_v2_t g_fx_api_v2;
+
+extern "C" audio_fx_api_v2_t* move_audio_fx_init_v2(const host_api_v1_t *host) {
+    g_host = host;
+    g_fx_api_v2.api_version     = 2;
+    g_fx_api_v2.create_instance = v2_create_instance;
+    g_fx_api_v2.destroy_instance = v2_destroy_instance;
+    g_fx_api_v2.process_block   = v2_process_block;
+    g_fx_api_v2.set_param       = v2_set_param;
+    g_fx_api_v2.get_param       = v2_get_param;
+    g_fx_api_v2.on_midi         = v2_on_midi;
+    return &g_fx_api_v2;
+}

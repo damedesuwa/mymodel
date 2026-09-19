@@ -13,6 +13,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 IMAGE_NAME="move-anything-nam-a2-builder"
 
+# --- Which module ---------------------------------------------------------
+#
+# Two modules share this repo, this script and Phase 1's libNeuralAudio.a:
+# `a2` is the fixed amp+cab, `a2c` is eight freely-typed blocks. They are one
+# script rather than two because the ABI gate, the sysroot handling and the
+# packaging are the parts that have actually gone wrong here, and a second
+# copy of those is a second copy to fix.
+#
+# Phase 1 is NOT rebuilt per target - the static library is the same one - so
+# building the second module after the first costs only its own translation
+# unit.
+TARGET="${1:-${SCHWUNG_TARGET:-a2}}"
+case "$TARGET" in
+    a2)  MODULE_ID="nam-a2";  PLUGIN_SRC="src/dsp/nam_a2_plugin.cpp";  SRC_DIR="src"   ;;
+    a2c) MODULE_ID="nam-a2c"; PLUGIN_SRC="src/dsp/nam_a2c_plugin.cpp"; SRC_DIR="src/c" ;;
+    *)   echo "Unknown target '$TARGET' (want: a2 | a2c)"; exit 1 ;;
+esac
+
 # Check if we need Docker
 if [ -z "$CROSS_PREFIX" ] && [ ! -f "/.dockerenv" ]; then
     echo "=== Nam A2 Module Build (via Docker) ==="
@@ -32,7 +50,7 @@ if [ -z "$CROSS_PREFIX" ] && [ ! -f "/.dockerenv" ]; then
         -u "$(id -u):$(id -g)" \
         -w /build \
         "$IMAGE_NAME" \
-        ./scripts/build.sh
+        ./scripts/build.sh "$TARGET"
 
     echo ""
     echo "=== Done ==="
@@ -44,14 +62,14 @@ CROSS_PREFIX="${CROSS_PREFIX:-aarch64-linux-gnu-}"
 
 cd "$REPO_ROOT"
 
-echo "=== Building Nam A2 Module ==="
+echo "=== Building $MODULE_ID ==="
 echo "Cross prefix: $CROSS_PREFIX"
 
-# Create build directories. Wipe dist/nam-a2 first so stale files from a
+# Create build directories. Wipe dist/<module> first so stale files from a
 # previous build (e.g. removed/renamed models) don't get repackaged.
 mkdir -p build/neuralaudio
-rm -rf dist/nam-a2
-mkdir -p dist/nam-a2
+rm -rf "dist/$MODULE_ID"
+mkdir -p "dist/$MODULE_ID"
 
 # --- ABI safety: target the glibc Move actually runs, not the build ---
 # --- host's. This must run BEFORE Phase 1. ---
@@ -262,9 +280,9 @@ ${CROSS_PREFIX}g++ -Ofast -shared -fPIC \
     -fomit-frame-pointer -fno-stack-protector \
     -static-libstdc++ \
     $NA_DEFS \
-    src/dsp/nam_a2_plugin.cpp \
+    "$PLUGIN_SRC" \
     build/glibc_compat.o \
-    -o build/nam-a2.so \
+    -o "build/$MODULE_ID.so" \
     -Isrc/dsp \
     -Ideps/NeuralAudio \
     -Ideps/NeuralAudio/NeuralAudio \
@@ -280,7 +298,7 @@ ${CROSS_PREFIX}g++ -Ofast -shared -fPIC \
     -Wl,--no-undefined \
     -lm -lpthread
 
-echo "Plugin compiled: build/nam-a2.so"
+echo "Plugin compiled: build/$MODULE_ID.so ($TARGET)"
 
 # --- ABI gate -------------------------------------------------------------
 #
@@ -296,16 +314,16 @@ echo "Plugin compiled: build/nam-a2.so"
 # message can name the symbol.
 MAX_GLIBC_MINOR=34
 
-BAD_UNVERSIONED=$(${CROSS_PREFIX}nm -D --undefined-only build/nam-a2.so \
+BAD_UNVERSIONED=$(${CROSS_PREFIX}nm -D --undefined-only "build/$MODULE_ID.so" \
     | awk '$1 == "U" { print $2 }' | grep -v '@' || true)
 
-BAD_VERSIONED=$(${CROSS_PREFIX}nm -D --undefined-only build/nam-a2.so \
+BAD_VERSIONED=$(${CROSS_PREFIX}nm -D --undefined-only "build/$MODULE_ID.so" \
     | grep -oE '[^ ]+@GLIBC_2\.[0-9]+' \
     | awk -F'@GLIBC_2.' -v max="$MAX_GLIBC_MINOR" '$2 + 0 > max { print $0 }' || true)
 
 if [ -n "$BAD_UNVERSIONED" ] || [ -n "$BAD_VERSIONED" ]; then
     echo ""
-    echo "ERROR: build/nam-a2.so cannot load on Move."
+    echo "ERROR: build/$MODULE_ID.so cannot load on Move."
     [ -n "$BAD_UNVERSIONED" ] && {
         echo "  Unversioned undefined symbols (device libc has no such symbol):"
         echo "$BAD_UNVERSIONED" | sed 's/^/    /'
@@ -327,16 +345,17 @@ echo "ABI gate: no undefined symbol above GLIBC_2.$MAX_GLIBC_MINOR, none unversi
 echo ""
 echo "--- Packaging ---"
 
-cat src/module.json > dist/nam-a2/module.json
-[ -f src/help.json ] && cat src/help.json > dist/nam-a2/help.json
-cat build/nam-a2.so > dist/nam-a2/nam-a2.so
-chmod +x dist/nam-a2/nam-a2.so
+cat "$SRC_DIR/module.json" > "dist/$MODULE_ID/module.json"
+[ -f "$SRC_DIR/help.json" ] && cat "$SRC_DIR/help.json" > "dist/$MODULE_ID/help.json"
+[ -f "$SRC_DIR/ui_chain.js" ] && cat "$SRC_DIR/ui_chain.js" > "dist/$MODULE_ID/ui_chain.js"
+cat "build/$MODULE_ID.so" > "dist/$MODULE_ID/$MODULE_ID.so"
+chmod +x "dist/$MODULE_ID/$MODULE_ID.so"
 
 # Always create models/ and cabs/ in the tarball so the Module Store install
 # lands the expected directory layout. Existing files are preserved on
 # extract; tar only overwrites same-named files (these dirs are empty by
 # default - no models/cabs are bundled).
-mkdir -p dist/nam-a2/models dist/nam-a2/cabs
+mkdir -p "dist/$MODULE_ID/models" "dist/$MODULE_ID/cabs"
 
 # find, not a glob: src/models and src/cabs normally hold only a .gitkeep
 # placeholder (dotfile) so any bundled real models/cabs stay opt-in, and a
@@ -344,21 +363,21 @@ mkdir -p dist/nam-a2/models dist/nam-a2/cabs
 # on a .gitkeep-only tree the literal unexpanded pattern was passed to cp
 # and it failed with "cannot stat 'src/models/*'".
 if [ -d "src/models" ]; then
-    find src/models -maxdepth 1 -type f ! -name '.gitkeep' -exec cp {} dist/nam-a2/models/ \;
+    find src/models -maxdepth 1 -type f ! -name '.gitkeep' -exec cp {} "dist/$MODULE_ID/models/" \;
 fi
 if [ -d "src/cabs" ]; then
-    find src/cabs -maxdepth 1 -type f ! -name '.gitkeep' -exec cp {} dist/nam-a2/cabs/ \;
+    find src/cabs -maxdepth 1 -type f ! -name '.gitkeep' -exec cp {} "dist/$MODULE_ID/cabs/" \;
 fi
 
 # Create tarball for release
 cd dist
-tar -czvf nam-a2-module.tar.gz nam-a2/
+tar -czf "$MODULE_ID-module.tar.gz" "$MODULE_ID/"
 cd ..
 
 echo ""
 echo "=== Build Complete ==="
-echo "Output: dist/nam-a2/"
-echo "Tarball: dist/nam-a2-module.tar.gz"
+echo "Output: dist/$MODULE_ID/"
+echo "Tarball: dist/$MODULE_ID-module.tar.gz"
 echo ""
 echo "To install on Move:"
 echo "  ./scripts/install.sh"

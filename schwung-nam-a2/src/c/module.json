@@ -1,0 +1,197 @@
+{
+  "id": "nam-a2c",
+  "name": "Nam A2c",
+  "abbrev": "A2C",
+  "version": "0.1.0",
+  "description": "Eight freely-typed blocks in series - NAM capture, cab IR or drive in any position",
+  "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
+  "license": "MIT",
+  "dsp": "nam-a2c.so",
+  "api_version": 2,
+  "assets": {
+    "path": ".",
+    "label": "Assets",
+    "extensions": [
+      ".nam",
+      ".wav",
+      ".ir"
+    ],
+    "allowFolders": true,
+    "ensure_dirs": [
+      "models",
+      "cabs"
+    ],
+    "description": "Manage NAM models (.nam) and cabinet IRs (.wav)",
+    "hint": "Find amp models at",
+    "hint_url": "https://tone3000.com",
+    "hint_url_label": "TONE3000"
+  },
+  "capabilities": {
+    "chainable": true,
+    "component_type": "audio_fx",
+    "requires_continuous_processing": true,
+    "ui_hierarchy": {
+      "modes": null,
+      "levels": {
+        "root": {
+          "label": "Nam A2c",
+          "children": null,
+          "knobs": [
+            "in_level",
+            "out_level",
+            "cpu"
+          ],
+          "params": [
+            {
+              "key": "in_level",
+              "label": "Input"
+            },
+            {
+              "key": "out_level",
+              "label": "Output"
+            },
+            {
+              "key": "cpu",
+              "label": "CPU"
+            },
+            {
+              "level": "blocks",
+              "label": "Blocks 1-8"
+            }
+          ]
+        },
+        "blocks": {
+          "label": "Block",
+          "child_count": 8,
+          "child_label": "Block",
+          "child_key_template": "b{index}_{key}",
+          "child_index_base": 1,
+          "child_index_param": "sel_block",
+          "knobs": [
+            "type",
+            "on",
+            "model",
+            "quality",
+            "cab",
+            "dmode",
+            "drive",
+            "tone",
+            "level",
+            "cpu"
+          ],
+          "params": [
+            {
+              "key": "type",
+              "label": "Type"
+            },
+            {
+              "key": "on",
+              "label": "On"
+            },
+            {
+              "key": "model",
+              "label": "Model",
+              "visible_if": {
+                "param": "type",
+                "equals": 1
+              }
+            },
+            {
+              "key": "quality",
+              "label": "Qual",
+              "visible_if": {
+                "param": "type",
+                "equals": 1
+              }
+            },
+            {
+              "key": "cab",
+              "label": "Cab",
+              "visible_if": {
+                "param": "type",
+                "equals": 2
+              }
+            },
+            {
+              "key": "dmode",
+              "label": "Mode",
+              "visible_if": {
+                "param": "type",
+                "equals": 3
+              }
+            },
+            {
+              "key": "drive",
+              "label": "Drive",
+              "visible_if": {
+                "param": "type",
+                "equals": 3
+              }
+            },
+            {
+              "key": "tone",
+              "label": "Tone",
+              "visible_if": {
+                "param": "type",
+                "equals": 3
+              }
+            },
+            {
+              "key": "level",
+              "label": "Level",
+              "visible_if": {
+                "param": "type",
+                "equals": 3
+              }
+            },
+            {
+              "key": "cpu",
+              "label": "CPU"
+            }
+          ]
+        }
+      }
+    },
+    "chain_params": [
+      {
+        "key": "in_level",
+        "name": "Input",
+        "type": "float",
+        "min": 0.0,
+        "max": 1.0,
+        "default": 0.5,
+        "step": 0.01
+      },
+      {
+        "key": "out_level",
+        "name": "Output",
+        "type": "float",
+        "min": 0.0,
+        "max": 1.0,
+        "default": 0.85,
+        "step": 0.01
+      },
+      {
+        "key": "cpu",
+        "name": "CPU",
+        "type": "int",
+        "min": 0,
+        "max": 100,
+        "default": 0,
+        "step": 1,
+        "unit": "%",
+        "access": "read",
+        "live": true
+      },
+      {
+        "key": "sel_block",
+        "name": "Block",
+        "type": "int",
+        "min": 0,
+        "max": 7,
+        "default": 0,
+        "step": 1
+      }
+    ]
+  }
+}

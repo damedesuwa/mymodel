@@ -1,0 +1,25 @@
+{
+  "title": "Nam A2c",
+  "sections": [
+    { "title": "Eight blocks",
+      "lines": [
+        "In -> 1 -> 2 -> ... -> 8 -> Out.",
+        "Each block is Off, Amp, Cab or Drive.",
+        "Any type in any position."
+      ] },
+    { "title": "CPU is the limit",
+      "lines": [
+        "A frame has ~2370us of room.",
+        "Amp Full ~1200us, Slim ~250us.",
+        "Cab ~60us. Drive ~5us.",
+        "So: one amp, not eight.",
+        "The CPU cell on Main is the real number."
+      ] },
+    { "title": "Files",
+      "lines": [
+        "Models go in models/, cabs in cabs/.",
+        "Drop them in with the web file browser",
+        "at move.local:7700."
+      ] }
+  ]
+}
