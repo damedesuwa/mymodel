@@ -248,6 +248,25 @@ typedef struct {
     /* Quality (0 = Full, 1 = Lite - runs the model at half rate) */
     int quality_lite;
 
+    /* Which channel feeds the model. A NAM model is mono, so something has
+     * to collapse the stereo input, and averaging L+R is the wrong default
+     * for the case this module exists for.
+     *
+     * A mono guitar reaches Move through a TRS jack: tip carries the pickup,
+     * ring is tied to sleeve at the guitar end, so the RIGHT channel is
+     * silent. Averaging then gives (L + 0) / 2 - the amp is driven 6 dB
+     * under the signal that is actually present, while Move's own input
+     * monitoring takes the left channel whole (its setting is literally
+     * "monoFromLeftChannel"). That 6 dB is why a dry monitor path sits
+     * louder against the amp than it should.
+     *
+     * Left is the default because it is correct for both mono cases - a
+     * source on the left alone, and a mono source duplicated to both
+     * channels, where (L+L)/2 and L are the same number. Only a genuinely
+     * stereo source needs Sum, and feeding one to a mono guitar amp is the
+     * unusual case, so it is the option rather than the default. */
+    int input_mode;   /* 0 = Left, 1 = Right, 2 = Sum L+R */
+
     /* DC blocker state (see process_block) */
     float dc_x1;
     float dc_y1;
@@ -543,10 +562,23 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
 
     /* Input/output/quality defaults */
     inst->input_level = 0.5f;
-    inst->output_level = 0.5f;
-    inst->input_gain = knob_to_gain(0.5f);
-    inst->output_gain = knob_to_gain(0.5f);
+    /* 0.85, not 0.5. The knob maps 0..1 to -24..+12 dB, so 0.5 is -6 dB -
+     * and a saturated amp model's output is a near-constant ~-22 dBFS
+     * whatever you feed it, so -6 dB on top of that is simply quiet. The
+     * level matters more than usual here because Move monitors its own line
+     * input on a hardware path this module cannot see or remove: the dry
+     * guitar is a fixed level, so the only thing that changes the balance
+     * is how loud the amp is. Measured on a -34 dBFS input: 0.5 gives rms
+     * 0.075 / peak 0.11, 0.85 gives 0.320 / 0.48, 1.0 gives 0.595 / 0.89,
+     * none of them clipping a sample. 0.85 is +12.6 dB over the old default
+     * with 6 dB still in hand for a hotter model. */
+    inst->output_level = 0.85f;
+    /* Derived from the levels above, never from a repeated literal - the
+     * pair silently disagreed the moment the output default moved. */
+    inst->input_gain  = knob_to_gain(inst->input_level);
+    inst->output_gain = knob_to_gain(inst->output_level);
     inst->quality_lite = 0;
+    inst->input_mode = 0;   /* Left */
 
     inst->model_in_gain = 1.0f;
     inst->model_out_gain = 1.0f;
@@ -617,7 +649,10 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     for (int i = 0; i < n; i++) {
         float l = audio_inout[i * 2]     / 32768.0f;
         float r = audio_inout[i * 2 + 1] / 32768.0f;
-        inst->mono_in[i] = (l + r) * 0.5f * ig;
+        float x = (inst->input_mode == 0) ? l
+                : (inst->input_mode == 1) ? r
+                : (l + r) * 0.5f;
+        inst->mono_in[i] = x * ig;
     }
 
     /* NAM model - Full runs every sample; Lite halves the neural net's work
@@ -742,6 +777,10 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->output_gain  = knob_to_gain(inst->output_level);
         }
         if (json_get_int(val, "quality", &i) == 0) inst->quality_lite = (i != 0);
+        if (json_get_int(val, "input_mode", &i) == 0)
+            inst->input_mode = (i < 0) ? 0 : (i > 2) ? 2 : i;
+        if (json_get_int(val, "input_mode", &i) == 0)
+            inst->input_mode = (i < 0) ? 0 : (i > 2) ? 2 : i;
 
         int target_model = -1;
         if (json_get_string(val, "model_name", name, sizeof(name)) > 0)
@@ -773,6 +812,9 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     } else if (strcmp(key, "output_level") == 0) {
         inst->output_level = clampf(atof(val), 0.0f, 1.0f);
         inst->output_gain = knob_to_gain(inst->output_level);
+    } else if (strcmp(key, "input_mode") == 0) {
+        int m = atoi(val);
+        inst->input_mode = (m < 0) ? 0 : (m > 2) ? 2 : m;
     } else if (strcmp(key, "quality") == 0) {
         inst->quality_lite = (atoi(val) != 0);
     } else if (strcmp(key, "model_index") == 0) {
@@ -830,15 +872,18 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "state") == 0) {
         return snprintf(buf, buf_len,
             "{\"input_level\":%.4f,\"output_level\":%.4f,\"quality\":%d,"
+            "\"input_mode\":%d,"
             "\"model_index\":%d,\"model_name\":\"%s\","
             "\"cab_index\":%d,\"cab_name\":\"%s\",\"cab_bypass\":%d}",
             inst->input_level, inst->output_level, inst->quality_lite,
+            inst->input_mode,
             inst->current_model_index, inst->model_name,
             inst->current_cab_index, inst->cab_name, inst->cab_bypass ? 1 : 0);
     }
 
     if (strcmp(key, "input_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->input_level);
     if (strcmp(key, "output_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->output_level);
+    if (strcmp(key, "input_mode") == 0) return snprintf(buf, buf_len, "%d", inst->input_mode);
     if (strcmp(key, "quality") == 0) return snprintf(buf, buf_len, "%d", inst->quality_lite);
 
     if (strcmp(key, "model_name") == 0)
@@ -892,10 +937,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                 "\"root\":{"
                     "\"label\":\"Nam A2\","
                     "\"children\":null,"
-                    "\"knobs\":[\"input_level\",\"output_level\",\"quality\"],"
+                    "\"knobs\":[\"input_level\",\"output_level\",\"input_mode\",\"quality\"],"
                     "\"params\":["
                         "{\"key\":\"input_level\",\"label\":\"Input\"},"
                         "{\"key\":\"output_level\",\"label\":\"Output\"},"
+                        "{\"key\":\"input_mode\",\"short_name\":\"In Ch\",\"label\":\"Input Channel\"},"
                         "{\"key\":\"quality\",\"label\":\"Quality\"},"
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
                         "{\"level\":\"models\",\"label\":\"Choose Model\"},"

@@ -15,7 +15,7 @@ by Steven Atkinson.
 ## Signal chain
 
 ```
-Input Gain -> NAM Model -> DC Block -> Cab IR -> Output Gain
+Input Channel -> Input Gain -> NAM Model -> DC Block -> Cab IR -> Output Gain
 ```
 
 For delay, reverb or chorus, add them as separate FX in the slot's own
@@ -51,9 +51,56 @@ allocation is forbidden) light.
 | Parameter | Range | Default | Description |
 |-----------|-------|---------|-------------|
 | `input_level` | 0.0-1.0 | 0.5 | Input gain before model processing |
-| `output_level` | 0.0-1.0 | 0.5 | Output gain after the whole chain |
+| `input_mode` | Left / Right / Sum L+R | Left | Which channel feeds the mono model |
+| `output_level` | 0.0-1.0 | 0.85 | Output gain after the whole chain |
 | `quality` | Full / Lite | Full | Neural net CPU/quality tradeoff |
 | `cab_bypass` | 0-1 | 0 | Bypass cabinet IR convolution |
+
+## Move monitors its own line input, and you cannot turn that off from here
+
+A guitar into Move's line in is audible **dry** alongside whatever this
+module produces. That is Move, not this module, and it was established by
+elimination rather than assumed: removing the Line In module from the slot
+entirely leaves the dry guitar audible, with no Schwung module reading the
+input at all. Zeroing Move's mailbox (Global Settings -> Audio ->
+`Move->Schwung`) does not remove it either, nor does Move's own monitoring
+toggle - with monitoring off you hear only the dry signal, with it on you
+hear dry plus the amp. So the dry path sits below the software mixer
+entirely, in the XMOS audio hardware, and nothing in this module can see or
+subtract it.
+
+What it leaves you is a balance problem, and only one side of it moves.
+**A saturated amp model's output level does not follow its input** -
+measured, the same 0.076 rms across a 36 dB input range - while the dry
+monitor tracks the guitar's volume knob one for one. Two consequences:
+
+- **Turning the guitar down lowers the dry and not the amp.** It costs
+  nothing.
+- **`output_level` is the lever that buries it.** Measured on a -34 dBFS
+  input: 0.5 gives rms 0.075 / peak 0.11, 0.85 gives 0.320 / 0.48, and 1.0
+  gives 0.595 / 0.89 - none of them clipping a sample. That is +18 dB of
+  amp against an unchanged dry signal.
+
+Hence the 0.85 default. The knob maps 0..1 to -24..+12 dB, so the old 0.5
+was -6 dB on top of an amp that already sits near -22 dBFS: simply quiet.
+
+## The input channel, and why Left is the default
+
+A mono guitar reaches Move through a TRS jack with its ring tied to sleeve,
+so the **right channel is silent** - Move's own setting says as much
+(`lineInRecordingMode: monoFromLeftChannel`). Averaging L+R would drive the
+model at (L + 0) / 2, 6 dB under the signal that is actually there.
+
+Left is the default because it is right for both mono cases: a source on
+the left alone, and a mono source duplicated to both channels, where
+(L+L)/2 and L are the same number - measured identical to 0.00 dB. Only a
+genuinely stereo source needs `Sum L+R`.
+
+Be honest about what this buys: at the **output** it is +0.2 to +0.5 dB,
+not +6, because the amp is saturated and 6 dB more drive does not make 6 dB
+more output. What it fixes is the amp's operating point - a high-gain
+model's character is a function of how hard its input is driven - not the
+level.
 
 ## Gain staging on a high-gain model
 
