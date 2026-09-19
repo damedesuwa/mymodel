@@ -312,6 +312,18 @@ typedef struct {
      * threshold would flap the label and talk over itself. */
     int cpu_warn;
 
+    /* CALL-RATE METER - the instrument for the dropout hunt.
+     *
+     * Move runs 44100/128 = 344.5 blocks per second. If this module is
+     * called 344 times a second and the output still has whole blocks of
+     * silence in it, the silence is inserted AFTER us. If it is called
+     * appreciably fewer - the recording lost 8.06% of blocks, which would
+     * read as ~317 - then the host is skipping our slot and the answer is
+     * upstream. Nothing else here can tell those two apart. */
+    uint64_t blocks_seen;
+    double   rate_t0_us;
+    double   rate_hz;
+
     /* DC blocker state (see process_block) */
     float dc_x1;
     float dc_y1;
@@ -733,6 +745,9 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->quality_mode = 0;   /* Full */
     inst->cpu_us_peak = 0.0;
     inst->cpu_warn = 0;
+    inst->blocks_seen = 0;
+    inst->rate_t0_us = 0.0;
+    inst->rate_hz = 0.0;
 
     inst->model_in_gain = 1.0f;
     inst->model_out_gain = 1.0f;
@@ -882,6 +897,17 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         double pct = 100.0 * inst->cpu_us_peak / FRAME_BUDGET_US;
         if (pct > CPU_WARN_ON)       inst->cpu_warn = 1;
         else if (pct < CPU_WARN_OFF) inst->cpu_warn = 0;
+
+        /* Blocks per second over a one-second window. */
+        double now_us = cpu_t1.tv_sec * 1e6 + cpu_t1.tv_nsec / 1e3;
+        if (inst->rate_t0_us == 0.0) inst->rate_t0_us = now_us;
+        inst->blocks_seen++;
+        double span = now_us - inst->rate_t0_us;
+        if (span >= 1000000.0) {
+            inst->rate_hz = inst->blocks_seen * 1e6 / span;
+            inst->blocks_seen = 0;
+            inst->rate_t0_us = now_us;
+        }
     }
 }
 
@@ -1068,7 +1094,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * flag behind it has hysteresis, because display_name is SPOKEN on change
      * and a number on the threshold would talk over itself. */
     if (strcmp(key, "name") == 0) {
-        return snprintf(buf, buf_len, "%s", inst->cpu_warn ? "Nam A2 CPU!" : "Nam A2");
+        /* 344 is every block. Appreciably less means the host is not calling
+         * us for some of them, which is a different bug in a different
+         * place. `!` still marks the CPU warning. */
+        return snprintf(buf, buf_len, "A2 %d%s",
+                        (int)(inst->rate_hz + 0.5), inst->cpu_warn ? " !" : "");
     }
     if (strcmp(key, "display_name") == 0) {
         /* Only while warning. Answering nothing the rest of the time keeps the
