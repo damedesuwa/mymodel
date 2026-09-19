@@ -88,7 +88,7 @@ extern "C" {
 /* Stamped into the log at create_instance so a report can be tied to a
  * build. Four rounds of this hunt were spent on reports that may or may not
  * have been from the build being discussed. */
-#define NAM_A2_BUILD_ID "cpu-meter"
+#define NAM_A2_BUILD_ID "inmeter"
 
 #define FRAME_BUDGET_US 2370.0
 
@@ -330,6 +330,14 @@ typedef struct {
     double   rate_t0_us;
     double   rate_hz;
     /* Read by diag_thread, written by process_block. Diagnostics only. */
+    /* RAW input, before any gain, per channel. The question it answers is
+     * whether the guitar reaches this module AT ALL - if the speaker has a
+     * clean guitar on it and `in pk` here is zero, the clean is a path
+     * BESIDE this chain and nothing the module does can remove it. L and R
+     * are kept apart because only L is read into the model. */
+    float    in_peak_l;
+    float    in_peak_r;
+    float    in_rms_l;
     float    out_peak;
     float    out_rms;
     float    ir_peak;
@@ -673,16 +681,19 @@ static void *diag_thread(void *arg) {
         char msg[512];
         snprintf(msg, sizeof(msg),
             "Nam A2 diag: blocks/s=%.0f (expect 344) | peak_us=%.0f | "
-            "cab=%s len=%d irpk=%.4f irsum=%.4f | out pk=%.4f rms=%.4f "
+            "cab=%s len=%d irpk=%.4f irsum=%.4f | in pkL=%.4f pkR=%.4f "
+            "rmsL=%.4f | out pk=%.4f rms=%.4f "
             "zeroblk=%lu nan=%lu | model=%s q=%d",
             inst->rate_hz, inst->cpu_us_peak,
             inst->cab_bypass ? "OFF" : "ON", inst->cab_ir_len,
             inst->ir_peak, inst->ir_sum,
+            inst->in_peak_l, inst->in_peak_r, inst->in_rms_l,
             inst->out_peak, inst->out_rms,
             (unsigned long)inst->zero_blocks, (unsigned long)inst->nan_samples,
             inst->model ? "yes" : "no", inst->quality_mode);
         plugin_log(msg);
         inst->out_peak = 0.0f;   /* per-window */
+        inst->in_peak_l = inst->in_peak_r = 0.0f;
     }
     return NULL;
 }
@@ -808,6 +819,7 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->input_gain  = knob_to_gain(inst->input_level);
     inst->output_gain = knob_to_gain(inst->output_level);
     inst->quality_mode = 0;   /* Full */
+    inst->in_peak_l = inst->in_peak_r = inst->in_rms_l = 0.0f;
     inst->cpu_us_peak = 0.0;
     inst->cpu_warn = 0;
     inst->blocks_seen = 0;
@@ -901,6 +913,7 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
 
     /* Deinterleave stereo int16 -> mono float, with input gain */
     float ig = inst->input_gain * inst->model_in_gain;
+    double in_sq = 0.0;
     for (int i = 0; i < n; i++) {
         float l = audio_inout[i * 2]     / 32768.0f;
         float r = audio_inout[i * 2 + 1] / 32768.0f;
@@ -909,9 +922,14 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
          * setting says `monoFromLeftChannel`. Averaging L+R would drive the
          * model at (L + 0) / 2. A stereo source into a mono guitar amp is
          * not a case worth a control. */
-        (void)r;
         inst->mono_in[i] = l * ig;
+
+        float al = l < 0 ? -l : l, ar = r < 0 ? -r : r;
+        if (al > inst->in_peak_l) inst->in_peak_l = al;
+        if (ar > inst->in_peak_r) inst->in_peak_r = ar;
+        in_sq += (double)l * (double)l;
     }
+    inst->in_rms_l = (float)sqrt(in_sq / (n > 0 ? n : 1));
 
     /* NAM model - Full runs every sample; Lite halves the neural net's work
      * by averaging input pairs, running the model at half rate, and holding
