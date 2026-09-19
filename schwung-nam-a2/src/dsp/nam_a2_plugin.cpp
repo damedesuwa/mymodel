@@ -120,6 +120,8 @@ static inline float clampf(float v, float lo, float hi) {
  * Test the exponent bits instead. That cannot be optimised away, costs a
  * compare and a branch that predicts perfectly, and turns a model blowing
  * up into silence rather than into full-scale noise through the speaker. */
+static inline int sample_is_zero(float v) { return v == 0.0f; }
+
 static inline float sanitize_sample(float v) {
     uint32_t bits;
     memcpy(&bits, &v, sizeof(bits));
@@ -249,8 +251,8 @@ typedef struct {
     /* Cabinet IR */
     float *cab_ir;
     int cab_ir_len;
-    /* How many taps the convolution may run. Set from the cab_length enum;
-     * the loaded IR is trimmed to it, so changing it reloads the cab. */
+    /* How many taps the convolution may run. Fixed: 1024 taps is 23 ms,
+     * which is a cabinet, and direct convolution gets expensive fast. */
     int cab_run_len;
     float cab_norm_db;   /* what normalisation cost, for the load line */
     float *cab_history;
@@ -323,6 +325,16 @@ typedef struct {
     uint64_t blocks_seen;
     double   rate_t0_us;
     double   rate_hz;
+    /* Read by diag_thread, written by process_block. Diagnostics only. */
+    float    out_peak;
+    float    out_rms;
+    float    ir_peak;
+    float    ir_sum;
+    uint64_t zero_blocks;
+    uint64_t nan_samples;
+    volatile int diag_stop;
+    pthread_t diag_tid;
+    int      diag_running;
 
     /* DC blocker state (see process_block) */
     float dc_x1;
@@ -541,6 +553,17 @@ static void load_cab(nam_a2_instance_t *inst, int index) {
         inst->cab_norm_db = (float)(20.0 * log10(norm));
     }
 
+    {   /* What the convolution will actually run, reported by diag_thread. */
+        float pk = 0.0f; double sum = 0.0;
+        for (int i = 0; i < want; i++) {
+            float a = new_ir[i] < 0 ? -new_ir[i] : new_ir[i];
+            if (a > pk) pk = a;
+            sum += new_ir[i];
+        }
+        inst->ir_peak = pk;
+        inst->ir_sum = (float)sum;
+    }
+
     free(raw);
     int ir_len = want;
 
@@ -619,6 +642,42 @@ static void apply_cab_ir(nam_a2_instance_t *inst, float *audio, int frames) {
     }
 
     inst->cab_hist_pos = pos;
+}
+
+/* DIAGNOSTICS TO THE LOG.
+ *
+ * Two attempts to put a number on screen reached nobody - the chain boxes
+ * draw module.json's abbrev, and the editor header was either the wrong
+ * field or the wrong screen. The host log is the one channel that has
+ * worked every time in this hunt, and schwung-manager serves it at
+ * /system/logs.
+ *
+ * Runs on its own thread because plugin_log is not callable from the SPI
+ * callback. It reads the counters below without locking: they are
+ * diagnostics, a torn double costs a wrong digit once, and a lock here
+ * would be a lock the callback could wait on. */
+static void *diag_thread(void *arg) {
+    nam_a2_instance_t *inst = (nam_a2_instance_t *)arg;
+    while (!inst->diag_stop) {
+        struct timespec ts = { 2, 0 };
+        nanosleep(&ts, NULL);
+        if (inst->diag_stop) break;
+
+        char msg[512];
+        snprintf(msg, sizeof(msg),
+            "Nam A2 diag: blocks/s=%.0f (expect 344) | peak_us=%.0f | "
+            "cab=%s len=%d irpk=%.4f irsum=%.4f | out pk=%.4f rms=%.4f "
+            "zeroblk=%lu nan=%lu | model=%s q=%d",
+            inst->rate_hz, inst->cpu_us_peak,
+            inst->cab_bypass ? "OFF" : "ON", inst->cab_ir_len,
+            inst->ir_peak, inst->ir_sum,
+            inst->out_peak, inst->out_rms,
+            (unsigned long)inst->zero_blocks, (unsigned long)inst->nan_samples,
+            inst->model ? "yes" : "no", inst->quality_mode);
+        plugin_log(msg);
+        inst->out_peak = 0.0f;   /* per-window */
+    }
+    return NULL;
 }
 
 static void *model_loader_thread(void *arg) {
@@ -718,7 +777,7 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     /* Cabinet IR defaults */
     inst->cab_ir = nullptr;
     inst->cab_ir_len = 0;
-    inst->cab_run_len = 1024;   /* 23 ms. See cab_length. */
+    inst->cab_run_len = 1024;   /* 23 ms */
     inst->cab_history = nullptr;
     inst->cab_hist_pos = 0;
     inst->cab_bypass = false;
@@ -755,6 +814,13 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->pending_out_gain = 1.0f;
 
 
+    {   /* Detached would race destroy_instance; this one is joined. */
+        pthread_attr_t at; pthread_attr_init(&at);
+        inst->diag_stop = 0;
+        inst->diag_running = (pthread_create(&inst->diag_tid, &at, diag_thread, inst) == 0);
+        pthread_attr_destroy(&at);
+    }
+
     /* Scan for model/cab files and load the first of each */
     scan_models(inst);
     scan_cabs(inst);
@@ -774,6 +840,12 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
 static void v2_destroy_instance(void *instance) {
     nam_a2_instance_t *inst = (nam_a2_instance_t *)instance;
     if (!inst) return;
+
+    if (inst->diag_running) {
+        inst->diag_stop = 1;
+        pthread_join(inst->diag_tid, NULL);
+        inst->diag_running = 0;
+    }
 
     while (inst->loading.load(std::memory_order_acquire)) {
         struct timespec ts = {0, 10000000}; /* 10ms */
@@ -871,14 +943,24 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         apply_cab_ir(inst, inst->mono_out, n);
     }
 
+    double blk_sq = 0.0; int blk_zero = 0;
     /* Output gain, then back to stereo int16 (mono source written to both) */
     float og = inst->output_gain * inst->model_out_gain;
     for (int i = 0; i < n; i++) {
-        float s = clampf(sanitize_sample(inst->mono_out[i] * og), -1.0f, 1.0f);
+        float pre = inst->mono_out[i] * og;
+        uint32_t bits; memcpy(&bits, &pre, sizeof(bits));
+        if ((bits & 0x7F800000u) == 0x7F800000u) inst->nan_samples++;
+        float s = clampf(sanitize_sample(pre), -1.0f, 1.0f);
+        float a = s < 0 ? -s : s;
+        if (a > inst->out_peak) inst->out_peak = a;
+        blk_sq += (double)s * s;
+        if (sample_is_zero(s)) blk_zero++;
         int16_t sample = (int16_t)(s * 32767.0f);
         audio_inout[i * 2]     = sample;
         audio_inout[i * 2 + 1] = sample;
     }
+    inst->out_rms = (float)sqrt(blk_sq / (n > 0 ? n : 1));
+    if (blk_zero == n) inst->zero_blocks++;
 
     {
         struct timespec cpu_t1;
@@ -1036,18 +1118,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (idx >= 0 && idx < inst->cab_count && idx != inst->current_cab_index) {
             load_cab(inst, idx);
         }
-    } else if (strcmp(key, "cab_length") == 0) {
-        static const int lens[4] = { 1024, 2048, 4096, 8192 };
-        int i = atoi(val);
-        if (i < 0) i = 0; if (i > 3) i = 3;
-        if (lens[i] != inst->cab_run_len) {
-            inst->cab_run_len = lens[i];
-            /* The trim happens at load, so the cab has to be read again.
-             * load_cab allocates - it already did, on this same callback,
-             * when the cab was first chosen - and this is a deliberate user
-             * action rather than something that happens while playing. */
-            if (inst->current_cab_index >= 0) load_cab(inst, inst->current_cab_index);
-        }
     } else if (strcmp(key, "cab_bypass") == 0) {
         inst->cab_bypass = (atoi(val) != 0);
     }
@@ -1156,11 +1226,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%s", inst->cab_name[0] ? inst->cab_name : "(none)");
     if (strcmp(key, "cab_count") == 0) return snprintf(buf, buf_len, "%d", inst->cab_count);
     if (strcmp(key, "cab_index") == 0) return snprintf(buf, buf_len, "%d", inst->current_cab_index);
-    if (strcmp(key, "cab_length") == 0) {
-        int i = (inst->cab_run_len <= 1024) ? 0 : (inst->cab_run_len <= 2048) ? 1
-              : (inst->cab_run_len <= 4096) ? 2 : 3;
-        return snprintf(buf, buf_len, "%d", i);
-    }
     if (strcmp(key, "cab_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->cab_bypass ? 1 : 0, inst->cab_run_len);
 
     if (strcmp(key, "cab_list") == 0) {
@@ -1205,8 +1270,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                 "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0},"
               "{\"key\":\"cab_bypass\",\"name\":\"Cab Bypass\",\"type\":\"int\","
                 "\"min\":0,\"max\":1,\"default\":0,\"step\":1},"
-              "{\"key\":\"cab_length\",\"name\":\"Cab Len\",\"type\":\"enum\","
-                "\"options\":[\"1024\",\"2048\",\"4096\",\"8192\"],\"default\":0}"
             "]");
     }
 
@@ -1217,13 +1280,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                 "\"root\":{"
                     "\"label\":\"Nam A2\","
                     "\"children\":null,"
-                    "\"knobs\":[\"input_level\",\"output_level\",\"quality\",\"cab_length\"],"
+                    "\"knobs\":[\"input_level\",\"output_level\",\"quality\"],"
                     "\"params\":["
                         "{\"key\":\"input_level\",\"label\":\"Input\"},"
                         "{\"key\":\"output_level\",\"label\":\"Output\"},"
                         "{\"key\":\"quality\",\"label\":\"Quality\"},"
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
-                        "{\"key\":\"cab_length\",\"short_name\":\"CabLen\",\"label\":\"Cab Length\"},"
                         "{\"level\":\"models\",\"label\":\"Choose Model\"},"
                         "{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"}"
                     "]"

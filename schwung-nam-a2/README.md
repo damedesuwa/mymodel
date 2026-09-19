@@ -83,7 +83,6 @@ allocation is forbidden) light.
 | `output_level` | 0.0-1.0 | 0.85 | Output gain after the whole chain |
 | `quality` | Full / Slim / Lite | Full | Model's own tier, then a rate fallback |
 | `cab_bypass` | 0-1 | 0 | Bypass cabinet IR convolution |
-| `cab_length` | 1024 / 2048 / 4096 / 8192 | 1024 | Taps the convolution runs |
 
 ## Move monitors its own line input, and you cannot turn that off from here
 
