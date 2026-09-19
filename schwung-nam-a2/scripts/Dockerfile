@@ -5,6 +5,9 @@ RUN apt-get update && apt-get install -y \
     g++-aarch64-linux-gnu \
     cmake \
     make \
+    python3 \
+    wget \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CROSS_PREFIX=aarch64-linux-gnu-

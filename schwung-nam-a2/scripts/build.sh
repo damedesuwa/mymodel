@@ -158,6 +158,7 @@ cmake -S deps/NeuralAudio -B build/neuralaudio \
     -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/build/aarch64-toolchain.cmake" \
     -DCMAKE_CXX_STANDARD=20 \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DCMAKE_CXX_FLAGS="-Ofast -march=armv8-a -mtune=cortex-a72 -DNDEBUG $SYSROOT_INC" \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DBUILD_UTILS=OFF \
@@ -205,6 +206,48 @@ fi
 echo "Found NeuralAudio: $NA_LIB"
 echo "Found RTNeural: $RT_LIB"
 
+# --- Keep the two phases' preprocessor definitions IDENTICAL --------------
+#
+# The plugin includes NeuralAudio's headers and links its objects, so the
+# two must agree on every macro those headers read. They did not: Phase 1
+# compiled with 17 definitions and this file restated six of them by hand,
+# so the library was built with BUILD_RTNEURAL, NAM_ENABLE_A2_FAST,
+# BUILD_STATIC_INTERNAL_NAMA2, NAM_A2_RING_MODE, RTNEURAL_USE_EIGEN and
+# RTNEURAL_DEFAULT_ALIGNMENT while the plugin's view of the same classes
+# had none of them.
+#
+# That is an ODR violation, and it does not fail to build or to load - the
+# plugin gets a NeuralModel whose members sit at different offsets than the
+# code operating on them expects, so Process() reads and writes the wrong
+# memory and the output is noise. Which is exactly what the device did:
+# white noise on line in, with the module otherwise working.
+#
+# Restating the list correctly would fix it once and break again the next
+# time NeuralAudio adds an option. So the list is not restated: it is read
+# out of the compile command CMake actually used for NeuralModel.cpp, the
+# translation unit that defines the classes this plugin calls into.
+# *_EXPORTS is dropped - that one belongs to a target we do not build into.
+NA_DEFS=$(python3 - "$REPO_ROOT/build/neuralaudio/compile_commands.json" << 'PYEOF'
+import json, re, sys
+entries = json.load(open(sys.argv[1]))
+for e in entries:
+    if e["file"].endswith("NeuralAudio/NeuralModel.cpp"):
+        defs = re.findall(r'-D[^ ]+', e.get("command") or " ".join(e["arguments"]))
+        print(" ".join(d for d in sorted(set(defs)) if not d.endswith("_EXPORTS")))
+        break
+else:
+    sys.exit("ERROR: NeuralModel.cpp not found in compile_commands.json")
+PYEOF
+)
+if [ -z "$NA_DEFS" ]; then
+    echo "ERROR: could not read NeuralAudio's compile definitions."
+    echo "Without them the plugin and the library disagree on class layout,"
+    echo "which builds and loads cleanly and outputs noise."
+    exit 1
+fi
+echo "NeuralAudio definitions carried into the plugin:"
+echo "  $NA_DEFS" | tr ' ' '\n' | sed 's/^/    /' | grep -v '^ *$'
+
 # The compat TU (see src/dsp/glibc_compat.c) supplies the handful of
 # symbols gcc-13's own static libstdc++ reaches for that Move's glibc does
 # not export. It is compiled against the same sysroot as everything else.
@@ -218,13 +261,7 @@ ${CROSS_PREFIX}g++ -Ofast -shared -fPIC \
     -march=armv8-a -mtune=cortex-a72 \
     -fomit-frame-pointer -fno-stack-protector \
     -static-libstdc++ \
-    -DNDEBUG \
-    -DNAM_SAMPLE_FLOAT \
-    -DDSP_SAMPLE_FLOAT \
-    -DLSTM_MATH=FastMath \
-    -DWAVENET_MATH=FastMath \
-    -DWAVENET_MAX_NUM_FRAMES=128 \
-    -DLAYER_ARRAY_BUFFER_PADDING=8 \
+    $NA_DEFS \
     src/dsp/nam_a2_plugin.cpp \
     build/glibc_compat.o \
     -o build/nam-a2.so \

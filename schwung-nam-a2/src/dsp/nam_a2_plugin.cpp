@@ -81,6 +81,24 @@ static inline float clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+/* A NaN survives clampf - both of its comparisons are false, so the value
+ * is returned untouched - and casting a NaN to int16_t is undefined. In
+ * practice it lands as an arbitrary bit pattern, so one NaN per sample is
+ * indistinguishable from white noise. A neural net fed an unexpected model
+ * or a denormal storm can produce them, and this module is built -Ofast,
+ * which is -ffinite-math-only: the compiler is entitled to assume NaN and
+ * Inf never occur, so isnan() and (v != v) may both be folded to false.
+ *
+ * Test the exponent bits instead. That cannot be optimised away, costs a
+ * compare and a branch that predicts perfectly, and turns a model blowing
+ * up into silence rather than into full-scale noise through the speaker. */
+static inline float sanitize_sample(float v) {
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    if ((bits & 0x7F800000u) == 0x7F800000u) return 0.0f;  /* NaN or Inf */
+    return v;
+}
+
 /* ======================================================================== */
 /* WAV reader - minimal parser for cab IR files                              */
 /* ======================================================================== */
@@ -574,6 +592,11 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
 
     inst->loader = new NeuralAudio::NeuralModelLoader();
     inst->loader->SetDefaultMaxAudioBufferSize(FRAMES_PER_BLOCK);
+    /* NeuralModelLoader defaults externalSampleRate to 48000, and Move runs
+     * at 44100. The loader uses it to decide whether a model needs
+     * oversampling (OversampleNAMConfig), so leaving it at the default
+     * describes a host that is not this one. */
+    inst->loader->SetExternalSampleRate((int)SAMPLE_RATE);
 
     strncpy(inst->module_dir, module_dir, MAX_PATH_LEN - 1);
     inst->model = nullptr;
@@ -706,7 +729,7 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     /* Output gain, then back to stereo int16 (mono source written to both) */
     float og = inst->output_gain;
     for (int i = 0; i < n; i++) {
-        float s = clampf(inst->mono_out[i] * og, -1.0f, 1.0f);
+        float s = clampf(sanitize_sample(inst->mono_out[i] * og), -1.0f, 1.0f);
         int16_t sample = (int16_t)(s * 32767.0f);
         audio_inout[i * 2]     = sample;
         audio_inout[i * 2 + 1] = sample;
