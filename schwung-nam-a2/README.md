@@ -76,6 +76,7 @@ allocation is forbidden) light.
 | `quality` | Full / Slim / Lite | Full | Model's own tier, then a rate fallback |
 | `cpu` | 0-100 % | — | Read-only: worst recent block, as % of frame slack |
 | `cab_bypass` | 0-1 | 0 | Bypass cabinet IR convolution |
+| `cab_length` | 1024 / 2048 / 4096 / 8192 | 2048 | Taps the convolution runs |
 
 ## Move monitors its own line input, and you cannot turn that off from here
 
@@ -104,6 +105,39 @@ monitor tracks the guitar's volume knob one for one. Two consequences:
 
 Hence the 0.85 default. The knob maps 0..1 to -24..+12 dB, so the old 0.5
 was -6 dB on top of an amp that already sits near -22 dBFS: simply quiet.
+
+## Cabinet IRs: length is a CPU decision, and the file is resampled
+
+A cab IR file is routinely 500 ms long and 48 kHz. Both facts matter.
+
+**Length.** Direct convolution is O(taps) per sample, and on Move the cost
+stops being linear: 4096 taps is ~287 us per block and 8192 is ~840, a 2.9x
+jump for 2x the length, because the IR and its history stop fitting in
+cache. An FX slot has roughly 1925 us, and a full-quality NAM already takes
+1190 of it. Measured with a real Mesa 4x12 IR and a real amp capture:
+
+| | Move (ARM) |
+|---|------------|
+| Full amp + 8192 taps | ~2037 us — **over budget** |
+| Full amp + 2048 taps | ~1618 us |
+| Slim amp + 2048 taps | ~495 us |
+
+Over budget is heard as crackling, which names nothing and sends you
+looking at the convolution. `cab_length` defaults to **2048** (46 ms) —
+that is a cabinet; past it is the room. Raise it if the meter says you can
+afford to.
+
+**Rate.** The IR is resampled from the file's own rate to 44100. Playing a
+48 kHz IR as it sits stretches the whole response 8.8%, putting the
+cabinet's resonances in the wrong place. Trimming also fades the last
+eighth out, because cutting an IR mid-tail leaves a step, and a step is a
+click smeared across the spectrum.
+
+The load line says what happened:
+
+```
+Nam A2: cab 'mesa' 48000 Hz -> 44100 Hz, 2048 run taps (46 ms), limit 2048
+```
 
 ## The input channel, and why Left is the default
 

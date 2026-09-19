@@ -39,6 +39,11 @@
               "label": "Cab Bypass"
             },
             {
+              "key": "cab_length",
+              "short_name": "CabLen",
+              "label": "Cab Length"
+            },
+            {
               "level": "models",
               "label": "Choose Model"
             },
@@ -135,6 +140,18 @@
         "max": 1,
         "default": 0,
         "step": 1
+      },
+      {
+        "key": "cab_length",
+        "name": "Cab Len",
+        "type": "enum",
+        "options": [
+          "1024",
+          "2048",
+          "4096",
+          "8192"
+        ],
+        "default": 1
       }
     ]
   },

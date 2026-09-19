@@ -62,7 +62,22 @@ extern "C" {
 #define MAX_NAME_LEN 128
 #define MAX_PATH_LEN 512
 #define FRAMES_PER_BLOCK 128
-#define MAX_IR_LEN 8192
+/* What the convolution may run, and what a file may occupy before trimming.
+ *
+ * These are different numbers for a measured reason. Direct convolution is
+ * O(taps) per sample, and on Move the cost is not linear past a point: 4096
+ * taps is ~287 us per block and 8192 is ~840, a 2.9x jump for 2x the length,
+ * because the IR and its history stop fitting in cache. Against the ~1925 us
+ * an FX slot has, a full-quality NAM (1190 us) plus an 8192-tap IR is 2030 us
+ * - over budget, which is heard as crackling rather than as anything that
+ * names itself. So the RUN length is capped and adjustable, defaulting to
+ * 2048 (46 ms), which is a cabinet; past that is the room.
+ *
+ * The READ length is larger because a cab IR is routinely a 500 ms file
+ * (the one that produced the crackle is 24000 frames at 48 kHz) and it has
+ * to be resampled from its own rate before any of it can be trimmed. */
+#define MAX_IR_RUN 8192
+#define MAX_IR_READ 65536
 
 #define SAMPLE_RATE 44100.0f
 
@@ -114,7 +129,8 @@ static inline float sanitize_sample(float v) {
 
 /* Read a mono float IR from a WAV file. Supports PCM16/24/32 and float32/64.
  * Returns number of samples read, or 0 on failure. */
-static int load_wav_ir(const char *path, float *out, int max_samples) {
+static int load_wav_ir(const char *path, float *out, int max_samples,
+                       uint32_t *out_rate) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
 
@@ -191,6 +207,8 @@ static int load_wav_ir(const char *path, float *out, int max_samples) {
 
     fclose(f);
 
+    if (out_rate) *out_rate = sample_rate;
+
     char msg[MAX_PATH_LEN + 128];
     snprintf(msg, sizeof(msg), "Nam A2: loaded cab IR %s (%d samples, %d ch, %d bit, fmt %d)",
              path, read_count, num_channels, bits_per_sample, audio_format);
@@ -227,6 +245,9 @@ typedef struct {
     /* Cabinet IR */
     float *cab_ir;
     int cab_ir_len;
+    /* How many taps the convolution may run. Set from the cab_length enum;
+     * the loaded IR is trimmed to it, so changing it reloads the cab. */
+    int cab_run_len;
     float *cab_history;
     int cab_hist_pos;
     bool cab_bypass;
@@ -421,17 +442,61 @@ static void scan_cabs(nam_a2_instance_t *inst) {
 static void load_cab(nam_a2_instance_t *inst, int index) {
     if (index < 0 || index >= inst->cab_count) return;
 
-    float *new_ir = (float *)calloc(MAX_IR_LEN, sizeof(float));
-    if (!new_ir) return;
+    float *raw = (float *)calloc(MAX_IR_READ, sizeof(float));
+    float *new_ir = (float *)calloc(MAX_IR_RUN, sizeof(float));
+    if (!raw || !new_ir) { free(raw); free(new_ir); return; }
 
-    int ir_len = load_wav_ir(inst->cab_paths[index], new_ir, MAX_IR_LEN);
-    if (ir_len <= 0) {
-        free(new_ir);
+    uint32_t file_rate = 0;
+    int raw_len = load_wav_ir(inst->cab_paths[index], raw, MAX_IR_READ, &file_rate);
+    if (raw_len <= 0) {
+        free(raw); free(new_ir);
         char msg[MAX_PATH_LEN + 64];
         snprintf(msg, sizeof(msg), "Nam A2: failed to load cab IR %s", inst->cab_paths[index]);
         plugin_log(msg);
         return;
     }
+
+    /* Resample to the host rate. Cab IRs are overwhelmingly 48 kHz files and
+     * Move runs at 44100, so playing the samples as they sit stretches the
+     * whole response 8.8% - the cabinet's resonances land in the wrong place.
+     * Linear interpolation is enough here: an IR is already band-limited by
+     * the speaker, and this runs once at load, not per block. */
+    int want = raw_len;
+    if (file_rate > 0 && file_rate != (uint32_t)SAMPLE_RATE) {
+        double ratio = (double)SAMPLE_RATE / (double)file_rate;
+        want = (int)(raw_len * ratio);
+    }
+    if (want > inst->cab_run_len) want = inst->cab_run_len;
+    if (want > MAX_IR_RUN) want = MAX_IR_RUN;
+    if (want < 1) want = 1;
+
+    for (int i = 0; i < want; i++) {
+        double src = (file_rate > 0 && file_rate != (uint32_t)SAMPLE_RATE)
+                   ? (double)i * (double)file_rate / (double)SAMPLE_RATE
+                   : (double)i;
+        int i0 = (int)src;
+        double fr = src - i0;
+        float a = (i0 < raw_len) ? raw[i0] : 0.0f;
+        float b = (i0 + 1 < raw_len) ? raw[i0 + 1] : 0.0f;
+        new_ir[i] = (float)(a + (b - a) * fr);
+    }
+
+    /* Trimming an IR mid-tail leaves a step, which is a click smeared across
+     * the whole spectrum. Fade the last eighth out so the response ends where
+     * it is cut. Only when there IS a tail to cut - a file shorter than the
+     * run length ends on its own. */
+    int resampled_total = (file_rate > 0 && file_rate != (uint32_t)SAMPLE_RATE)
+        ? (int)(raw_len * (double)SAMPLE_RATE / (double)file_rate) : raw_len;
+    if (want < resampled_total) {
+        int fade = want / 8;
+        for (int i = 0; i < fade; i++) {
+            float g = (float)(fade - i) / (float)fade;
+            new_ir[want - fade + i] *= g * g;
+        }
+    }
+
+    free(raw);
+    int ir_len = want;
 
     float *old_ir = inst->cab_ir;
     float *old_hist = inst->cab_history;
@@ -451,7 +516,10 @@ static void load_cab(nam_a2_instance_t *inst, int index) {
     free(old_hist);
 
     char msg[MAX_PATH_LEN + 64];
-    snprintf(msg, sizeof(msg), "Nam A2: loaded cab IR '%s' (%d samples)", inst->cab_name, ir_len);
+    snprintf(msg, sizeof(msg),
+             "Nam A2: cab '%s' %d Hz -> %d Hz, %d run taps (%.0f ms), limit %d",
+             inst->cab_name, (int)file_rate, (int)SAMPLE_RATE, ir_len,
+             1000.0f * ir_len / SAMPLE_RATE, inst->cab_run_len);
     plugin_log(msg);
 }
 
@@ -603,6 +671,7 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     /* Cabinet IR defaults */
     inst->cab_ir = nullptr;
     inst->cab_ir_len = 0;
+    inst->cab_run_len = 2048;   /* 46 ms - a cabinet, not a room */
     inst->cab_history = nullptr;
     inst->cab_hist_pos = 0;
     inst->cab_bypass = false;
@@ -867,6 +936,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             if (i >= 0 && i < inst->cab_count) target_cab = i;
         if (target_cab >= 0 && target_cab != inst->current_cab_index)
             load_cab(inst, target_cab);
+        if (json_get_int(val, "cab_run_len", &i) == 0 && i >= 1024 && i <= MAX_IR_RUN)
+            inst->cab_run_len = i;
         if (json_get_int(val, "cab_bypass", &i) == 0) inst->cab_bypass = (i != 0);
 
 
@@ -899,6 +970,18 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         int idx = atoi(val);
         if (idx >= 0 && idx < inst->cab_count && idx != inst->current_cab_index) {
             load_cab(inst, idx);
+        }
+    } else if (strcmp(key, "cab_length") == 0) {
+        static const int lens[4] = { 1024, 2048, 4096, 8192 };
+        int i = atoi(val);
+        if (i < 0) i = 0; if (i > 3) i = 3;
+        if (lens[i] != inst->cab_run_len) {
+            inst->cab_run_len = lens[i];
+            /* The trim happens at load, so the cab has to be read again.
+             * load_cab allocates - it already did, on this same callback,
+             * when the cab was first chosen - and this is a deliberate user
+             * action rather than something that happens while playing. */
+            if (inst->current_cab_index >= 0) load_cab(inst, inst->current_cab_index);
         }
     } else if (strcmp(key, "cab_bypass") == 0) {
         inst->cab_bypass = (atoi(val) != 0);
@@ -944,11 +1027,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             "{\"input_level\":%.4f,\"output_level\":%.4f,\"quality\":%d,"
             "\"input_mode\":%d,"
             "\"model_index\":%d,\"model_name\":\"%s\","
-            "\"cab_index\":%d,\"cab_name\":\"%s\",\"cab_bypass\":%d}",
+            "\"cab_index\":%d,\"cab_name\":\"%s\",\"cab_bypass\":%d,\"cab_run_len\":%d}",
             inst->input_level, inst->output_level, inst->quality_mode,
             inst->input_mode,
             inst->current_model_index, inst->model_name,
-            inst->current_cab_index, inst->cab_name, inst->cab_bypass ? 1 : 0);
+            inst->current_cab_index, inst->cab_name, inst->cab_bypass ? 1 : 0, inst->cab_run_len);
     }
 
     if (strcmp(key, "input_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->input_level);
@@ -961,7 +1044,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * It stops moving when the slot goes silent, because the shim skips a
      * silent slot's processing - that is the meter telling the truth, not a
      * frozen reading. */
-    if (strcmp(key, "cpu") == 0)
+    if (strcmp(key, "cpu") == 0 || strcmp(key, "cpu:effective") == 0)
         return snprintf(buf, buf_len, "%.1f", 100.0 * inst->cpu_us_peak / FRAME_BUDGET_US);
     if (strcmp(key, "cpu_us") == 0)
         return snprintf(buf, buf_len, "%.0f", inst->cpu_us_peak);
@@ -991,7 +1074,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%s", inst->cab_name[0] ? inst->cab_name : "(none)");
     if (strcmp(key, "cab_count") == 0) return snprintf(buf, buf_len, "%d", inst->cab_count);
     if (strcmp(key, "cab_index") == 0) return snprintf(buf, buf_len, "%d", inst->current_cab_index);
-    if (strcmp(key, "cab_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->cab_bypass ? 1 : 0);
+    if (strcmp(key, "cab_length") == 0) {
+        int i = (inst->cab_run_len <= 1024) ? 0 : (inst->cab_run_len <= 2048) ? 1
+              : (inst->cab_run_len <= 4096) ? 2 : 3;
+        return snprintf(buf, buf_len, "%d", i);
+    }
+    if (strcmp(key, "cab_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->cab_bypass ? 1 : 0, inst->cab_run_len);
 
     if (strcmp(key, "cab_list") == 0) {
         scan_cabs(inst);
@@ -1010,6 +1098,42 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     /* ui_hierarchy - returned dynamically (static shape, but kept alongside
      * the rest of the dynamic get_param handling for a single source of
      * truth with module.json). */
+    /* Served HERE and not left to module.json, because the C side drops two
+     * fields on the way through. chain_param_info_t carries key, name, type,
+     * min, max, default, step, unit, display_format and options - and has no
+     * member for `access` or `live`, so a parser that reads them from
+     * module.json has nowhere to put them and the host's re-serialisation
+     * cannot emit them. The CPU meter came back as an ordinary float knob
+     * sitting at its default, which is exactly what it looked like on the
+     * device.
+     *
+     * chain_host asks the PLUGIN first and returns its answer verbatim when
+     * it is non-empty (chain_params_answer_is_useful), falling back to
+     * module.json only otherwise. So a plugin that serves its own contract
+     * gets every field through, and module.json stays as the fallback for a
+     * host reading the file without loading us. Keep the two in step. */
+    if (strcmp(key, "chain_params") == 0) {
+        return snprintf(buf, buf_len,
+            "["
+              "{\"key\":\"input_level\",\"name\":\"Input\",\"type\":\"float\","
+                "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01},"
+              "{\"key\":\"output_level\",\"name\":\"Output\",\"type\":\"float\","
+                "\"min\":0.0,\"max\":1.0,\"default\":0.85,\"step\":0.01},"
+              "{\"key\":\"cpu\",\"name\":\"CPU\",\"type\":\"float\","
+                "\"min\":0.0,\"max\":100.0,\"default\":0.0,\"step\":0.1,"
+                "\"unit\":\"%%\",\"display_format\":\"%%.0f\","
+                "\"access\":\"read\",\"live\":true},"
+              "{\"key\":\"input_mode\",\"name\":\"Input Ch\",\"type\":\"enum\","
+                "\"options\":[\"Left\",\"Right\",\"Sum L+R\"],\"default\":0},"
+              "{\"key\":\"quality\",\"name\":\"Quality\",\"type\":\"enum\","
+                "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0},"
+              "{\"key\":\"cab_bypass\",\"name\":\"Cab Bypass\",\"type\":\"int\","
+                "\"min\":0,\"max\":1,\"default\":0,\"step\":1},"
+              "{\"key\":\"cab_length\",\"name\":\"Cab Len\",\"type\":\"enum\","
+                "\"options\":[\"1024\",\"2048\",\"4096\",\"8192\"],\"default\":1}"
+            "]");
+    }
+
     if (strcmp(key, "ui_hierarchy") == 0) {
         const char *hierarchy = "{"
             "\"modes\":null,"
@@ -1025,6 +1149,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                         "{\"key\":\"input_mode\",\"short_name\":\"In Ch\",\"label\":\"Input Channel\"},"
                         "{\"key\":\"quality\",\"label\":\"Quality\"},"
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
+                        "{\"key\":\"cab_length\",\"short_name\":\"CabLen\",\"label\":\"Cab Length\"},"
                         "{\"level\":\"models\",\"label\":\"Choose Model\"},"
                         "{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"}"
                     "]"
