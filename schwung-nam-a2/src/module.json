@@ -2,7 +2,7 @@
   "id": "nam-a2",
   "name": "Nam A2",
   "abbrev": "NA2",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Neural Amp Modeler (A2) - neural amp emulation with cabinet IR",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
@@ -13,21 +13,31 @@
     "component_type": "audio_fx",
     "requires_continuous_processing": true,
     "ui_hierarchy": {
+      "modes": null,
       "levels": {
         "root": {
-          "name": "Nam A2",
-          "params": [
+          "label": "Nam A2",
+          "children": null,
+          "knobs": [
             "input_level",
-            "output_level",
+            "output_level"
+          ],
+          "params": [
             {
-              "key": "quality",
-              "short_name": "Qual",
+              "key": "input_level",
+              "label": "Input"
+            },
+            {
+              "key": "output_level",
+              "label": "Output"
+            },
+            {
+              "level": "qualitysel",
               "label": "Quality"
             },
             {
-              "key": "cab_bypass",
-              "short_name": "Bypass",
-              "label": "Cab Bypass"
+              "level": "cabsw",
+              "label": "Cabinet"
             },
             {
               "level": "models",
@@ -37,12 +47,25 @@
               "level": "cabs",
               "label": "Choose Cabinet"
             }
-          ],
-          "knobs": [
-            "input_level",
-            "output_level",
-            "quality"
           ]
+        },
+        "qualitysel": {
+          "label": "Quality",
+          "items_param": "quality_list",
+          "select_param": "quality",
+          "navigate_to": "root",
+          "children": null,
+          "knobs": [],
+          "params": []
+        },
+        "cabsw": {
+          "label": "Cabinet",
+          "items_param": "cab_switch_list",
+          "select_param": "cab_bypass",
+          "navigate_to": "root",
+          "children": null,
+          "knobs": [],
+          "params": []
         },
         "models": {
           "label": "Model",
@@ -53,7 +76,7 @@
           "params": []
         },
         "cabs": {
-          "label": "Cabinet",
+          "label": "Cabinet IR",
           "items_param": "cab_list",
           "select_param": "cab_index",
           "children": null,
@@ -94,12 +117,13 @@
       },
       {
         "key": "cab_bypass",
-        "name": "Cab Bypass",
-        "type": "int",
-        "min": 0,
-        "max": 1,
-        "default": 0,
-        "step": 1
+        "name": "Cabinet",
+        "type": "enum",
+        "options": [
+          "On",
+          "Off"
+        ],
+        "default": 0
       }
     ]
   },

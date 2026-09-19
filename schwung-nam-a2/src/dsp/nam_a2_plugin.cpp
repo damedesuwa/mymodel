@@ -88,7 +88,7 @@ extern "C" {
 /* Stamped into the log at create_instance so a report can be tied to a
  * build. Four rounds of this hunt were spent on reports that may or may not
  * have been from the build being discussed. */
-#define NAM_A2_BUILD_ID "conv-fast"
+#define NAM_A2_BUILD_ID "picker"
 
 #define FRAME_BUDGET_US 2370.0
 
@@ -1229,6 +1229,36 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return written;
     }
 
+    /* PICKER LISTS FOR THE TWO SWITCHES.
+     *
+     * Both of these were cells on the knob grid and neither could say what
+     * it was. A 30px cell cannot print a word, so `quality` drew a number
+     * that needed the enum peek to decode, and `cab_bypass` was declared
+     * `int` - so it had no option names at all and the screen reader read
+     * out "Cab Bypass, 0", which says nothing about a cabinet being on.
+     *
+     * An items level is the same gesture as Choose Model, which already
+     * works here: a full-width list, a cursor, a mark on the current one,
+     * click to commit. The label is the whole point, so it carries the cost
+     * rather than the name - a quality tier is only meaningful next to what
+     * it costs. */
+    if (strcmp(key, "quality_list") == 0) {
+        return snprintf(buf, buf_len,
+            "["
+              "{\"label\":\"Full - best sound\",\"index\":0},"
+              "{\"label\":\"Slim - less CPU\",\"index\":1},"
+              "{\"label\":\"Lite - least CPU\",\"index\":2}"
+            "]");
+    }
+
+    if (strcmp(key, "cab_switch_list") == 0) {
+        return snprintf(buf, buf_len,
+            "["
+              "{\"label\":\"On - cabinet IR\",\"index\":0},"
+              "{\"label\":\"Off - bypass\",\"index\":1}"
+            "]");
+    }
+
     if (strcmp(key, "loading") == 0)
         return snprintf(buf, buf_len, "%d", inst->loading.load(std::memory_order_acquire) ? 1 : 0);
 
@@ -1236,7 +1266,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%s", inst->cab_name[0] ? inst->cab_name : "(none)");
     if (strcmp(key, "cab_count") == 0) return snprintf(buf, buf_len, "%d", inst->cab_count);
     if (strcmp(key, "cab_index") == 0) return snprintf(buf, buf_len, "%d", inst->current_cab_index);
-    if (strcmp(key, "cab_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->cab_bypass ? 1 : 0, inst->cab_run_len);
+    if (strcmp(key, "cab_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->cab_bypass ? 1 : 0);
 
     if (strcmp(key, "cab_list") == 0) {
         scan_cabs(inst);
@@ -1270,51 +1300,29 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * gets every field through, and module.json stays as the fallback for a
      * host reading the file without loading us. Keep the two in step. */
     if (strcmp(key, "chain_params") == 0) {
-        return snprintf(buf, buf_len,
-            "["
-              "{\"key\":\"input_level\",\"name\":\"Input\",\"type\":\"float\","
-                "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01},"
-              "{\"key\":\"output_level\",\"name\":\"Output\",\"type\":\"float\","
-                "\"min\":0.0,\"max\":1.0,\"default\":0.85,\"step\":0.01},"
-              "{\"key\":\"quality\",\"name\":\"Quality\",\"type\":\"enum\","
-                "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0},"
-              "{\"key\":\"cab_bypass\",\"name\":\"Cab Bypass\",\"type\":\"int\","
-                "\"min\":0,\"max\":1,\"default\":0,\"step\":1},"
-            "]");
+        return snprintf(buf, buf_len, "%s",
+            "[{\"key\":\"input_level\",\"name\":\"Input\",\"type\":\"float\",\"min\":0.0,"
+            "\"max\":1.0,\"default\":0.5,\"step\":0.01},{\"key\":\"output_level\",\"name\":\"Output\","
+            "\"type\":\"float\",\"min\":0.0,\"max\":1.0,\"default\":0.85,\"step\":0.01},"
+            "{\"key\":\"quality\",\"name\":\"Quality\",\"type\":\"enum\",\"options\":[\"Full\","
+            "\"Slim\",\"Lite\"],\"default\":0},{\"key\":\"cab_bypass\",\"name\":\"Cabinet\","
+            "\"type\":\"enum\",\"options\":[\"On\",\"Off\"],\"default\":0}]");
     }
 
     if (strcmp(key, "ui_hierarchy") == 0) {
-        const char *hierarchy = "{"
-            "\"modes\":null,"
-            "\"levels\":{"
-                "\"root\":{"
-                    "\"label\":\"Nam A2\","
-                    "\"children\":null,"
-                    "\"knobs\":[\"input_level\",\"output_level\",\"quality\"],"
-                    "\"params\":["
-                        "{\"key\":\"input_level\",\"label\":\"Input\"},"
-                        "{\"key\":\"output_level\",\"label\":\"Output\"},"
-                        "{\"key\":\"quality\",\"label\":\"Quality\"},"
-                        "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
-                        "{\"level\":\"models\",\"label\":\"Choose Model\"},"
-                        "{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"}"
-                    "]"
-                "},"
-                "\"models\":{"
-                    "\"label\":\"Model\","
-                    "\"items_param\":\"model_list\","
-                    "\"select_param\":\"model_index\","
-                    "\"children\":null,\"knobs\":[],\"params\":[]"
-                "},"
-                "\"cabs\":{"
-                    "\"label\":\"Cabinet\","
-                    "\"items_param\":\"cab_list\","
-                    "\"select_param\":\"cab_index\","
-                    "\"children\":null,\"knobs\":[],\"params\":[]"
-                "},"
-            "}"
-            "}"
-        "}";
+        const char *hierarchy =
+            "{\"modes\":null,\"levels\":{\"root\":{\"label\":\"Nam A2\",\"children\":null,"
+            "\"knobs\":[\"input_level\",\"output_level\"],\"params\":[{\"key\":\"input_level\","
+            "\"label\":\"Input\"},{\"key\":\"output_level\",\"label\":\"Output\"},{\"level\":\"qualitysel\","
+            "\"label\":\"Quality\"},{\"level\":\"cabsw\",\"label\":\"Cabinet\"},{\"level\":\"models\","
+            "\"label\":\"Choose Model\"},{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"}]},"
+            "\"qualitysel\":{\"label\":\"Quality\",\"items_param\":\"quality_list\",\"select_param\":\"quality\","
+            "\"navigate_to\":\"root\",\"children\":null,\"knobs\":[],\"params\":[]},\"cabsw\":{\"label\":\"Cabinet\","
+            "\"items_param\":\"cab_switch_list\",\"select_param\":\"cab_bypass\",\"navigate_to\":\"root\","
+            "\"children\":null,\"knobs\":[],\"params\":[]},\"models\":{\"label\":\"Model\","
+            "\"items_param\":\"model_list\",\"select_param\":\"model_index\",\"children\":null,"
+            "\"knobs\":[],\"params\":[]},\"cabs\":{\"label\":\"Cabinet IR\",\"items_param\":\"cab_list\","
+            "\"select_param\":\"cab_index\",\"children\":null,\"knobs\":[],\"params\":[]}}}";
         return snprintf(buf, buf_len, "%s", hierarchy);
     }
 
