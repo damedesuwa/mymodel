@@ -73,41 +73,7 @@ extern "C" {
 
 static const host_api_v1_t *g_host = nullptr;
 
-/* ---- Load-path diagnostics (temporary) --------------------------------
- *
- * The host drops every log line unless /data/UserData/schwung/debug_log_on
- * exists, and on a device reachable only through Schwung Manager's web UI
- * (no SSH, no file browser) there is no way to create that file. So this
- * writes straight to debug.log, which the manager's /system/logs page
- * serves - and creates the flag file on the way past, so the host's own
- * logging comes up too.
- *
- * This is instrumentation for "the module will not load at all", not
- * something to keep: it does file I/O from entry points that run on the
- * SPI audio callback. Remove it once the load path is understood. */
-static void diag(const char *fmt, ...) {
-    FILE *f = fopen("/data/UserData/schwung/debug.log", "a");
-    if (!f) return;
-    time_t t = time(NULL);
-    struct tm tmv;
-    localtime_r(&t, &tmv);
-    fprintf(f, "%02d:%02d:%02d [NAMA2] ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
-}
-
-static void diag_enable_host_log(void) {
-    if (access("/data/UserData/schwung/debug_log_on", F_OK) == 0) return;
-    FILE *f = fopen("/data/UserData/schwung/debug_log_on", "w");
-    if (f) { fputc('1', f); fclose(f); }
-}
-
 static void plugin_log(const char *msg) {
-    diag("%s", msg);
     if (g_host && g_host->log) g_host->log(msg);
 }
 
@@ -602,15 +568,11 @@ typedef audio_fx_api_v2_t* (*audio_fx_init_v2_fn)(const host_api_v1_t *host);
 /* --- create_instance --- */
 static void* v2_create_instance(const char *module_dir, const char *config_json) {
     (void)config_json;
-    diag("create_instance entered, module_dir=%s", module_dir ? module_dir : "(null)");
 
     nam_a2_instance_t *inst = (nam_a2_instance_t *)calloc(1, sizeof(nam_a2_instance_t));
-    if (!inst) { diag("create_instance FAILED: calloc of %zu bytes returned null",
-                      sizeof(nam_a2_instance_t)); return nullptr; }
-    diag("instance allocated (%zu bytes)", sizeof(nam_a2_instance_t));
+    if (!inst) return nullptr;
 
     inst->loader = new NeuralAudio::NeuralModelLoader();
-    diag("NeuralModelLoader constructed");
     inst->loader->SetDefaultMaxAudioBufferSize(FRAMES_PER_BLOCK);
 
     strncpy(inst->module_dir, module_dir, MAX_PATH_LEN - 1);
@@ -643,22 +605,16 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
 
     /* Scan for model/cab files and load the first of each */
     scan_models(inst);
-    diag("scan_models done: %d models", inst->model_count);
     scan_cabs(inst);
-    diag("scan_cabs done: %d cabs", inst->cab_count);
 
     if (inst->model_count > 0) {
         inst->current_model_index = 0;
         load_model_async(inst, inst->model_paths[0]);
-        diag("model load thread started for %s", inst->model_paths[0]);
-    } else {
-        diag("no models found - plugin will pass audio through untouched");
     }
     if (inst->cab_count > 0) {
         load_cab(inst, 0);
     }
 
-    diag("create_instance OK (returning %p)", (void *)inst);
     return inst;
 }
 
@@ -666,7 +622,6 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
 static void v2_destroy_instance(void *instance) {
     nam_a2_instance_t *inst = (nam_a2_instance_t *)instance;
     if (!inst) return;
-    diag("destroy_instance entered");
 
     while (inst->loading.load(std::memory_order_acquire)) {
         struct timespec ts = {0, 10000000}; /* 10ms */
@@ -904,6 +859,34 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     nam_a2_instance_t *inst = (nam_a2_instance_t *)instance;
     if (!inst || !key || !buf) return -1;
 
+    /* The host asks every component for these on entry and keeps asking.
+     * Answering -1 means "not implemented", which js_shadow_get_param turns
+     * into `null` - and `null` does not mean "this module has no preset
+     * name", it means THE READ DID NOT COMPLETE (claim refused, timed out,
+     * answered by someone else). The UI's correct response to that is to
+     * retry, so a module that simply has no preset loops forever: measured
+     * on device at ~11 failed reads per second, each one an IPC round trip
+     * the draw budget has to pay for.
+     *
+     * "Served, and the key produced nothing" is the empty string - a
+     * return of 0. chain_host.c makes exactly this clamp for split_voices
+     * and says why in the same words. Answer it properly instead.
+     *
+     * display_name is deliberately NOT handled the same way. The host
+     * already backs that one off to ~32s for a module that answers -1
+     * (pollFxDisplayName), and it resets the backoff on any non-null
+     * answer - so returning "" there would turn a key that costs almost
+     * nothing into a poll every second, the opposite of this fix.
+     *
+     * Nor is this a catch-all `return 0` for unknown keys: chain_host falls
+     * back to module.json's own chain_params when the plugin answers -1 for
+     * that key, and an empty answer would look authoritative and suppress
+     * the fallback. */
+    if (strcmp(key, "preset_name") == 0) {
+        if (buf_len > 0) buf[0] = '\0';
+        return 0;
+    }
+
     /* Bulk serialization for slot autosave. */
     if (strcmp(key, "state") == 0) {
         return snprintf(buf, buf_len,
@@ -1028,8 +1011,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
 static audio_fx_api_v2_t g_fx_api_v2;
 
 extern "C" audio_fx_api_v2_t* move_audio_fx_init_v2(const host_api_v1_t *host) {
-    diag_enable_host_log();
-    diag("move_audio_fx_init_v2 entered (host=%p)", (void *)host);
     g_host = host;
 
     memset(&g_fx_api_v2, 0, sizeof(g_fx_api_v2));
