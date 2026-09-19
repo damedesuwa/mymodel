@@ -91,6 +91,10 @@ extern "C" {
  * that repaints ~4x/s, short enough to follow a quality change. */
 #define CPU_PEAK_DECAY 0.998
 
+/* Where the warning latches on and off, as a percentage of FRAME_BUDGET_US. */
+#define CPU_WARN_ON  70.0
+#define CPU_WARN_OFF 55.0
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -303,6 +307,10 @@ typedef struct {
      * Peak-held with a slow decay rather than averaged: an average hides
      * exactly the spike that drops a frame. */
     double cpu_us_peak;
+    /* Latched over-budget flag. Hysteresis, because the string this drives is
+     * DRAWN and, on the master and bus rows, SPOKEN - a value sitting on the
+     * threshold would flap the label and talk over itself. */
+    int cpu_warn;
 
     /* DC blocker state (see process_block) */
     float dc_x1;
@@ -724,6 +732,7 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->output_gain = knob_to_gain(inst->output_level);
     inst->quality_mode = 0;   /* Full */
     inst->cpu_us_peak = 0.0;
+    inst->cpu_warn = 0;
 
     inst->model_in_gain = 1.0f;
     inst->model_out_gain = 1.0f;
@@ -865,6 +874,14 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
          * that overruns, which is the only block worth seeing. */
         double decayed = inst->cpu_us_peak * CPU_PEAK_DECAY;
         inst->cpu_us_peak = (us > decayed) ? us : decayed;
+
+        /* Schmitt trigger on the frame budget. Above CPU_WARN_ON the block is
+         * close enough to the whole frame that anything else in the chain
+         * pushes it over, and a missed deadline is heard as a rapid stutter
+         * rather than as anything that names itself. */
+        double pct = 100.0 * inst->cpu_us_peak / FRAME_BUDGET_US;
+        if (pct > CPU_WARN_ON)       inst->cpu_warn = 1;
+        else if (pct < CPU_WARN_OFF) inst->cpu_warn = 0;
     }
 }
 
@@ -1038,6 +1055,28 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * back to module.json's own chain_params when the plugin answers -1 for
      * that key, and an empty answer would look authoritative and suppress
      * the fallback. */
+    /* The chain-edit line draws `<prefix>:name` and re-reads it about twice a
+     * second, which makes it the one string here that is both VISIBLE and
+     * live. So the CPU warning rides on it.
+     *
+     * Serving it at all also stops a retry storm: an unserved key answers -1,
+     * the host turns that into `null` - "the read did not complete" - and a
+     * failed read is never cached, so the device logged ~50 failed reads per
+     * second on fx1:name alone. Same defect as preset_name below.
+     *
+     * The string is STABLE by construction. It carries no percentage, and the
+     * flag behind it has hysteresis, because display_name is SPOKEN on change
+     * and a number on the threshold would talk over itself. */
+    if (strcmp(key, "name") == 0) {
+        return snprintf(buf, buf_len, "%s", inst->cpu_warn ? "Nam A2 CPU!" : "Nam A2");
+    }
+    if (strcmp(key, "display_name") == 0) {
+        /* Only while warning. Answering nothing the rest of the time keeps the
+         * host's backoff on this key, which is what it is for. */
+        if (!inst->cpu_warn) return -1;
+        return snprintf(buf, buf_len, "Nam A2 CPU overload");
+    }
+
     if (strcmp(key, "preset_name") == 0) {
         if (buf_len > 0) buf[0] = '\0';
         return 0;
@@ -1058,15 +1097,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "output_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->output_level);
     if (strcmp(key, "quality") == 0) return snprintf(buf, buf_len, "%d", inst->quality_mode);
 
-    /* Read-only, and declared "live" so the grid re-reads it every tick
-     * instead of once per knob rotation. Percent of Move's per-frame slack.
-     * It stops moving when the slot goes silent, because the shim skips a
-     * silent slot's processing - that is the meter telling the truth, not a
-     * frozen reading. */
-    if (strcmp(key, "cpu") == 0 || strcmp(key, "cpu:effective") == 0)
-        return snprintf(buf, buf_len, "%.1f", 100.0 * inst->cpu_us_peak / FRAME_BUDGET_US);
-    if (strcmp(key, "cpu_us") == 0)
-        return snprintf(buf, buf_len, "%.0f", inst->cpu_us_peak);
 
     if (strcmp(key, "model_name") == 0)
         return snprintf(buf, buf_len, "%s", inst->model_name[0] ? inst->model_name : "(none)");
@@ -1138,17 +1168,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                 "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01},"
               "{\"key\":\"output_level\",\"name\":\"Output\",\"type\":\"float\","
                 "\"min\":0.0,\"max\":1.0,\"default\":0.85,\"step\":0.01},"
-              /* A PLAIN param, deliberately. `access:"read"` plus `live:true`
-               * is the declared way to do this and it did not reach the
-               * screen twice running - the value stayed at its default. An
-               * ordinary float is read on the page's value rotation, which
-               * comes round about four times a second: slower than `live`
-               * promises and fast enough for a load meter, on a path every
-               * other knob already proves works. The knob turns and does
-               * nothing, since set_param ignores the key. */
-              "{\"key\":\"cpu\",\"name\":\"CPU\",\"type\":\"float\","
-                "\"min\":0.0,\"max\":100.0,\"default\":0.0,\"step\":1.0,"
-                "\"unit\":\"%%\",\"display_format\":\"%%.0f\"},"
               "{\"key\":\"quality\",\"name\":\"Quality\",\"type\":\"enum\","
                 "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0},"
               "{\"key\":\"cab_bypass\",\"name\":\"Cab Bypass\",\"type\":\"int\","
@@ -1165,11 +1184,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                 "\"root\":{"
                     "\"label\":\"Nam A2\","
                     "\"children\":null,"
-                    "\"knobs\":[\"input_level\",\"output_level\",\"cpu\",\"quality\",\"cab_length\"],"
+                    "\"knobs\":[\"input_level\",\"output_level\",\"quality\",\"cab_length\"],"
                     "\"params\":["
                         "{\"key\":\"input_level\",\"label\":\"Input\"},"
                         "{\"key\":\"output_level\",\"label\":\"Output\"},"
-                        "{\"key\":\"cpu\",\"short_name\":\"CPU\",\"label\":\"CPU Load\"},"
                         "{\"key\":\"quality\",\"label\":\"Quality\"},"
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
                         "{\"key\":\"cab_length\",\"short_name\":\"CabLen\",\"label\":\"Cab Length\"},"

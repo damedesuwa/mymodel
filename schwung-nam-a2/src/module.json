@@ -19,11 +19,6 @@
             "input_level",
             "output_level",
             {
-              "key": "cpu",
-              "short_name": "CPU",
-              "label": "CPU Load"
-            },
-            {
               "key": "quality",
               "short_name": "Qual",
               "label": "Quality"
@@ -50,7 +45,6 @@
           "knobs": [
             "input_level",
             "output_level",
-            "cpu",
             "quality",
             "cab_length"
           ]
@@ -91,17 +85,6 @@
         "max": 1.0,
         "default": 0.85,
         "step": 0.01
-      },
-      {
-        "key": "cpu",
-        "name": "CPU",
-        "type": "float",
-        "min": 0.0,
-        "max": 100.0,
-        "default": 0.0,
-        "step": 1.0,
-        "unit": "%",
-        "display_format": "%.1f"
       },
       {
         "key": "quality",

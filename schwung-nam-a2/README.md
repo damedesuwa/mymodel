@@ -47,11 +47,20 @@ allocation is forbidden) light.
   x86 ratios. Against Move's ~2370 us frame slack, Full is about half the
   frame on its own.
 
-- **CPU meter.** `cpu` is a read-only, `live` percentage of that frame slack,
-  sitting beside Input and Output on the first page. Peak-held with a slow
-  decay rather than averaged, because an average hides the one block that
-  overruns. It stops moving when the slot goes silent - the shim skips a
-  silent slot - which is the meter being honest, not stuck.
+- **CPU warning.** No live readout - `access:"read"` plus `live:true` is the
+  declared way to publish one and it did not reach the screen twice running,
+  and a number on a knob is not what you want while playing anyway. Instead
+  the block time is peak-held and, once it passes 70% of Move's frame slack,
+  the component's name reads **`Nam A2 CPU!`** on the chain screen (which
+  re-reads that string about twice a second) and `display_name` answers
+  `Nam A2 CPU overload`, which the screen reader speaks once. It latches off
+  again below 55%; the string carries no percentage, because a value sitting
+  on the threshold would flap a drawn label and talk over itself.
+
+  **The warning staying quiet is also an answer.** A missed deadline is
+  heard as a rapid stutter, so a stutter with no warning means the cause is
+  not CPU.
+
 
 - **Cabinet IR convolution**: apply cabinet impulse responses with optional
   bypass.
@@ -73,7 +82,6 @@ allocation is forbidden) light.
 | `input_level` | 0.0-1.0 | 0.5 | Input gain before model processing |
 | `output_level` | 0.0-1.0 | 0.85 | Output gain after the whole chain |
 | `quality` | Full / Slim / Lite | Full | Model's own tier, then a rate fallback |
-| `cpu` | 0-100 % | — | Read-only: worst recent block, as % of frame slack |
 | `cab_bypass` | 0-1 | 0 | Bypass cabinet IR convolution |
 | `cab_length` | 1024 / 2048 / 4096 / 8192 | 1024 | Taps the convolution runs |
 
