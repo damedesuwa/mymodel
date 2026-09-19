@@ -88,7 +88,7 @@ extern "C" {
 /* Stamped into the log at create_instance so a report can be tied to a
  * build. Four rounds of this hunt were spent on reports that may or may not
  * have been from the build being discussed. */
-#define NAM_A2_BUILD_ID "picker"
+#define NAM_A2_BUILD_ID "cpu-meter"
 
 #define FRAME_BUDGET_US 2370.0
 
@@ -1174,11 +1174,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * flag behind it has hysteresis, because display_name is SPOKEN on change
      * and a number on the threshold would talk over itself. */
     if (strcmp(key, "name") == 0) {
-        /* 344 is every block. Appreciably less means the host is not calling
-         * us for some of them, which is a different bug in a different
-         * place. `!` still marks the CPU warning. */
-        return snprintf(buf, buf_len, "%d%s",
-                        (int)(inst->rate_hz + 0.5), inst->cpu_warn ? "!" : "");
+        /* The LOADED MODEL, which is what a header on an amp module should
+         * say. It carried the block rate for as long as the CPU cost had
+         * nowhere else to go - `cpu` is a real parameter now, so the number
+         * belongs on the grid and the name belongs here. `!` stays: the
+         * header is re-read about twice a second, so it is the one place a
+         * warning is seen without looking for it. */
+        return snprintf(buf, buf_len, "%s%s",
+                        inst->model_name[0] ? inst->model_name : "Nam A2",
+                        inst->cpu_warn ? " !" : "");
     }
     if (strcmp(key, "display_name") == 0) {
         /* Only while warning. Answering nothing the rest of the time keeps the
@@ -1188,11 +1192,13 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
 
     if (strcmp(key, "preset_name") == 0) {
-        /* The component editor's header reads preset_name FIRST and falls back
-         * to name, so the rate goes in both - whichever the screen asks for,
-         * it gets the number. Still never -1: see below. */
-        return snprintf(buf, buf_len, "%d%s",
-                        (int)(inst->rate_hz + 0.5), inst->cpu_warn ? "!" : "");
+        /* The component editor's header reads preset_name FIRST and falls
+         * back to name, so both answer the same thing. Still never -1: an
+         * unserved key answers null, which means THE READ DID NOT COMPLETE,
+         * is never cached, and cost ~50 failed reads a second here. */
+        return snprintf(buf, buf_len, "%s%s",
+                        inst->model_name[0] ? inst->model_name : "Nam A2",
+                        inst->cpu_warn ? " !" : "");
     }
 
     /* Bulk serialization for slot autosave. */
@@ -1229,35 +1235,34 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return written;
     }
 
-    /* PICKER LISTS FOR THE TWO SWITCHES.
+    /* THE COST, AS A PERCENTAGE OF THE FRAME.
      *
-     * Both of these were cells on the knob grid and neither could say what
-     * it was. A 30px cell cannot print a word, so `quality` drew a number
-     * that needed the enum peek to decode, and `cab_bypass` was declared
-     * `int` - so it had no option names at all and the screen reader read
-     * out "Cab Bypass, 0", which says nothing about a cabinet being on.
+     * The denominator is the SLACK in an SPI frame (2370 us of the 2902 us
+     * period), not the period, because the rest of the frame is not ours to
+     * spend. The numerator is the decaying PEAK rather than the mean: a
+     * single blown block is what is heard, and a mean over 344 of them hides
+     * it completely.
      *
-     * An items level is the same gesture as Choose Model, which already
-     * works here: a full-width list, a cursor, a mark on the current one,
-     * click to commit. The label is the whole point, so it carries the cost
-     * rather than the name - a quality tier is only meaningful next to what
-     * it costs. */
-    if (strcmp(key, "quality_list") == 0) {
-        return snprintf(buf, buf_len,
-            "["
-              "{\"label\":\"Full - best sound\",\"index\":0},"
-              "{\"label\":\"Slim - less CPU\",\"index\":1},"
-              "{\"label\":\"Lite - least CPU\",\"index\":2}"
-            "]");
+     * Declared `access: "read"` and `"live": true` in chain_params, which is
+     * what makes the grid re-read it every tick instead of once per value
+     * rotation - a rotation stop lands about four times a second and this
+     * number moves faster than that. Both flags travel through chain_params
+     * and NOT through ui_hierarchy: `chain_param_info_t` has no member for
+     * either, but chain_host returns the PLUGIN's chain_params string
+     * verbatim, so a plugin that serves its own contract gets them across. */
+    if (strcmp(key, "cpu") == 0) {
+        double pct = 100.0 * inst->cpu_us_peak / FRAME_BUDGET_US;
+        if (pct < 0.0) pct = 0.0;
+        if (pct > 100.0) pct = 100.0;
+        return snprintf(buf, buf_len, "%d", (int)(pct + 0.5));
     }
 
-    if (strcmp(key, "cab_switch_list") == 0) {
-        return snprintf(buf, buf_len,
-            "["
-              "{\"label\":\"On - cabinet IR\",\"index\":0},"
-              "{\"label\":\"Off - bypass\",\"index\":1}"
-            "]");
-    }
+    /* The entry gate asks `is_loading`, not `loading`. Serving only the
+     * second spelling left the first answering -1 forever, which is `null`,
+     * which is "the read did not complete" - so the gate never got an ending
+     * and the log filled with param_giveup on this key. */
+    if (strcmp(key, "is_loading") == 0)
+        return snprintf(buf, buf_len, "%d", inst->loading.load(std::memory_order_acquire) ? 1 : 0);
 
     if (strcmp(key, "loading") == 0)
         return snprintf(buf, buf_len, "%d", inst->loading.load(std::memory_order_acquire) ? 1 : 0);
@@ -1306,23 +1311,23 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             "\"type\":\"float\",\"min\":0.0,\"max\":1.0,\"default\":0.85,\"step\":0.01},"
             "{\"key\":\"quality\",\"name\":\"Quality\",\"type\":\"enum\",\"options\":[\"Full\","
             "\"Slim\",\"Lite\"],\"default\":0},{\"key\":\"cab_bypass\",\"name\":\"Cabinet\","
-            "\"type\":\"enum\",\"options\":[\"On\",\"Off\"],\"default\":0}]");
+            "\"type\":\"enum\",\"options\":[\"On\",\"Off\"],\"default\":0},{\"key\":\"cpu\","
+            "\"name\":\"CPU\",\"type\":\"int\",\"min\":0,\"max\":100,\"default\":0,\"step\":1,"
+            "\"unit\":\"%\",\"access\":\"read\",\"live\":true}]");
     }
 
     if (strcmp(key, "ui_hierarchy") == 0) {
         const char *hierarchy =
             "{\"modes\":null,\"levels\":{\"root\":{\"label\":\"Nam A2\",\"children\":null,"
-            "\"knobs\":[\"input_level\",\"output_level\"],\"params\":[{\"key\":\"input_level\","
-            "\"label\":\"Input\"},{\"key\":\"output_level\",\"label\":\"Output\"},{\"level\":\"qualitysel\","
-            "\"label\":\"Quality\"},{\"level\":\"cabsw\",\"label\":\"Cabinet\"},{\"level\":\"models\","
+            "\"knobs\":[\"input_level\",\"output_level\",\"quality\",\"cab_bypass\",\"cpu\"],"
+            "\"params\":[{\"key\":\"input_level\",\"label\":\"Input\"},{\"key\":\"output_level\","
+            "\"label\":\"Output\"},{\"key\":\"quality\",\"label\":\"Quality\"},{\"key\":\"cab_bypass\","
+            "\"label\":\"Cabinet\"},{\"key\":\"cpu\",\"label\":\"CPU\"},{\"level\":\"models\","
             "\"label\":\"Choose Model\"},{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"}]},"
-            "\"qualitysel\":{\"label\":\"Quality\",\"items_param\":\"quality_list\",\"select_param\":\"quality\","
-            "\"navigate_to\":\"root\",\"children\":null,\"knobs\":[],\"params\":[]},\"cabsw\":{\"label\":\"Cabinet\","
-            "\"items_param\":\"cab_switch_list\",\"select_param\":\"cab_bypass\",\"navigate_to\":\"root\","
-            "\"children\":null,\"knobs\":[],\"params\":[]},\"models\":{\"label\":\"Model\","
-            "\"items_param\":\"model_list\",\"select_param\":\"model_index\",\"children\":null,"
-            "\"knobs\":[],\"params\":[]},\"cabs\":{\"label\":\"Cabinet IR\",\"items_param\":\"cab_list\","
-            "\"select_param\":\"cab_index\",\"children\":null,\"knobs\":[],\"params\":[]}}}";
+            "\"models\":{\"label\":\"Model\",\"items_param\":\"model_list\",\"select_param\":\"model_index\","
+            "\"navigate_to\":\"root\",\"children\":null,\"knobs\":[],\"params\":[]},\"cabs\":{\"label\":\"Cabinet IR\","
+            "\"items_param\":\"cab_list\",\"select_param\":\"cab_index\",\"navigate_to\":\"root\","
+            "\"children\":null,\"knobs\":[],\"params\":[]}}}";
         return snprintf(buf, buf_len, "%s", hierarchy);
     }
 
