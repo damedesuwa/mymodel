@@ -690,11 +690,6 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     nam_a2_instance_t *inst = (nam_a2_instance_t *)instance;
     if (!inst) return;
 
-    {   /* first block only - proves audio actually reaches the plugin */
-        static int first = 1;
-        if (first) { first = 0; diag("first process_block (frames=%d)", frames); }
-    }
-
     /* Check for newly loaded model (lock-free swap) */
     NeuralAudio::NeuralModel *pending = inst->pending_model.load(std::memory_order_acquire);
     if (pending) {

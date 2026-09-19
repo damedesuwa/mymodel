@@ -53,74 +53,19 @@ mkdir -p build/neuralaudio
 rm -rf dist/nam-a2
 mkdir -p dist/nam-a2
 
-# --- Phase 1: Build NeuralAudio static library via CMake ---
-echo ""
-echo "--- Phase 1: Building NeuralAudio static library ---"
-
-# Create CMake toolchain file for cross-compilation
-cat > build/aarch64-toolchain.cmake << 'TOOLCHAIN_EOF'
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
-set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
-set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-TOOLCHAIN_EOF
-
-cmake -S deps/NeuralAudio -B build/neuralaudio \
-    -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/build/aarch64-toolchain.cmake" \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_FLAGS="-Ofast -march=armv8-a -mtune=cortex-a72 -DNDEBUG" \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DBUILD_UTILS=OFF \
-    -DBUILD_NAMCORE=OFF \
-    -DBUILD_STATIC_RTNEURAL=OFF \
-    -DWAVENET_FRAMES=128 \
-    -DBUFFER_PADDING=8
-
-cmake --build build/neuralaudio -j"$(nproc)"
-
-echo "NeuralAudio static library built."
-
-# --- Phase 2: Compile Nam A2 plugin and link ---
-echo ""
-echo "--- Phase 2: Compiling Nam A2 plugin ---"
-
-# Find the static libraries we need to link
-NA_LIB="build/neuralaudio/NeuralAudio/libNeuralAudio.a"
-RT_LIB=$(find build/neuralaudio -name "libRTNeural.a" | head -1)
-
-# Newer NeuralAudio versions declare the NeuralAudio CMake target as an
-# OBJECT library (no linkable .a of its own - just .o files under
-# CMakeFiles/NeuralAudio.dir/) rather than a STATIC one. Archive those
-# object files ourselves so Phase 2's direct g++ link line keeps working
-# whichever form the pinned deps/NeuralAudio checkout uses.
-if [ ! -f "$NA_LIB" ]; then
-    NA_OBJDIR="build/neuralaudio/NeuralAudio/CMakeFiles/NeuralAudio.dir"
-    NA_OBJS=$(find "$NA_OBJDIR" -name "*.o" 2>/dev/null)
-    if [ -n "$NA_OBJS" ]; then
-        echo "NeuralAudio built as an OBJECT library; archiving its .o files into $NA_LIB"
-        ${CROSS_PREFIX}ar rcs "$NA_LIB" $NA_OBJS
-    fi
-fi
-
-if [ ! -f "$NA_LIB" ]; then
-    echo "ERROR: NeuralAudio library not found: $NA_LIB"
-    find build/neuralaudio -name "*.a" 2>/dev/null
-    exit 1
-fi
-if [ -z "$RT_LIB" ] || [ ! -f "$RT_LIB" ]; then
-    echo "ERROR: RTNeural library not found"
-    find build/neuralaudio -name "*.a" 2>/dev/null
-    exit 1
-fi
-echo "Found NeuralAudio: $NA_LIB"
-echo "Found RTNeural: $RT_LIB"
-
-# --- ABI safety: target the glibc/libstdc++ Move actually runs, not the ---
-# --- build host's. ---
+# --- ABI safety: target the glibc Move actually runs, not the build ---
+# --- host's. This must run BEFORE Phase 1. ---
+#
+# It used to sit between the two phases, so only the plugin's own
+# translation unit got --sysroot and the whole of NeuralAudio was compiled
+# against the host's glibc 2.39 headers. Those headers redirect strtol and
+# friends to __isoc23_strto*, which exist only in glibc 2.38+ - and because
+# a -shared link does not require its undefined symbols to resolve, the
+# build stayed green and emitted a .so carrying five unresolvable
+# references. On the device that is a silent RTLD_NOW failure: the module
+# never loads and nothing anywhere says why. The link line below now also
+# passes -Wl,--no-undefined, and the build ends with an explicit check
+# against Move's GLIBC ceiling, so neither half can regress quietly again.
 #
 # Move's rootfs is close to Ubuntu 22.04 (glibc 2.35) - that's why
 # scripts/Dockerfile pins ubuntu:22.04. Compiling with a newer host's own
@@ -178,16 +123,101 @@ if [ ! -f "/.dockerenv" ]; then
             dpkg-deb -x "$deb" "$JAMMY_SYSROOT"
         done
     fi
-    SYSROOT_FLAGS="--sysroot=$REPO_ROOT/$JAMMY_SYSROOT -B$REPO_ROOT/$JAMMY_SYSROOT/usr/aarch64-linux-gnu/lib"
-    echo "Linking against jammy sysroot: $JAMMY_SYSROOT"
+    # --sysroot alone is not enough for the HEADERS: it makes gcc look in
+    # <sysroot>/usr/include, while libc6-dev-arm64-cross unpacks its headers
+    # to <sysroot>/usr/aarch64-linux-gnu/include. Without the -isystem, gcc
+    # silently falls back to the host's own /usr/aarch64-linux-gnu/include -
+    # which is glibc 2.39's, and that is what emits the __isoc23_strto*
+    # references in the first place. Name it explicitly.
+    JAMMY_INC="$REPO_ROOT/$JAMMY_SYSROOT/usr/aarch64-linux-gnu/include"
+    SYSROOT_FLAGS="--sysroot=$REPO_ROOT/$JAMMY_SYSROOT -isystem $JAMMY_INC -B$REPO_ROOT/$JAMMY_SYSROOT/usr/aarch64-linux-gnu/lib"
+    CMAKE_SYSROOT_LINE="set(CMAKE_SYSROOT $REPO_ROOT/$JAMMY_SYSROOT)"
+    # CMAKE_SYSROOT only passes --sysroot, which does not reach these
+    # headers (see above), so Phase 1 needs the -isystem spelled out too or
+    # NeuralAudio keeps compiling against the host's glibc.
+    SYSROOT_INC="-isystem $JAMMY_INC"
+    echo "Building against jammy sysroot: $JAMMY_SYSROOT"
 fi
+
+echo ""
+echo "--- Phase 1: Building NeuralAudio static library ---"
+
+# Create CMake toolchain file for cross-compilation
+cat > build/aarch64-toolchain.cmake << TOOLCHAIN_EOF
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
+set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+${CMAKE_SYSROOT_LINE}
+TOOLCHAIN_EOF
+
+cmake -S deps/NeuralAudio -B build/neuralaudio \
+    -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/build/aarch64-toolchain.cmake" \
+    -DCMAKE_CXX_STANDARD=20 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS="-Ofast -march=armv8-a -mtune=cortex-a72 -DNDEBUG $SYSROOT_INC" \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+    -DBUILD_UTILS=OFF \
+    -DBUILD_NAMCORE=OFF \
+    -DBUILD_STATIC_RTNEURAL=OFF \
+    -DWAVENET_FRAMES=128 \
+    -DBUFFER_PADDING=8
+
+cmake --build build/neuralaudio -j"$(nproc)"
+
+echo "NeuralAudio static library built."
+
+# --- Phase 2: Compile Nam A2 plugin and link ---
+echo ""
+echo "--- Phase 2: Compiling Nam A2 plugin ---"
+
+# Find the static libraries we need to link
+NA_LIB="build/neuralaudio/NeuralAudio/libNeuralAudio.a"
+RT_LIB=$(find build/neuralaudio -name "libRTNeural.a" | head -1)
+
+# Newer NeuralAudio versions declare the NeuralAudio CMake target as an
+# OBJECT library (no linkable .a of its own - just .o files under
+# CMakeFiles/NeuralAudio.dir/) rather than a STATIC one. Archive those
+# object files ourselves so Phase 2's direct g++ link line keeps working
+# whichever form the pinned deps/NeuralAudio checkout uses.
+if [ ! -f "$NA_LIB" ]; then
+    NA_OBJDIR="build/neuralaudio/NeuralAudio/CMakeFiles/NeuralAudio.dir"
+    NA_OBJS=$(find "$NA_OBJDIR" -name "*.o" 2>/dev/null)
+    if [ -n "$NA_OBJS" ]; then
+        echo "NeuralAudio built as an OBJECT library; archiving its .o files into $NA_LIB"
+        ${CROSS_PREFIX}ar rcs "$NA_LIB" $NA_OBJS
+    fi
+fi
+
+if [ ! -f "$NA_LIB" ]; then
+    echo "ERROR: NeuralAudio library not found: $NA_LIB"
+    find build/neuralaudio -name "*.a" 2>/dev/null
+    exit 1
+fi
+if [ -z "$RT_LIB" ] || [ ! -f "$RT_LIB" ]; then
+    echo "ERROR: RTNeural library not found"
+    find build/neuralaudio -name "*.a" 2>/dev/null
+    exit 1
+fi
+echo "Found NeuralAudio: $NA_LIB"
+echo "Found RTNeural: $RT_LIB"
+
+# The compat TU (see src/dsp/glibc_compat.c) supplies the handful of
+# symbols gcc-13's own static libstdc++ reaches for that Move's glibc does
+# not export. It is compiled against the same sysroot as everything else.
+${CROSS_PREFIX}gcc -O2 -fPIC $SYSROOT_FLAGS \
+    -march=armv8-a -mtune=cortex-a72 \
+    -c src/dsp/glibc_compat.c -o build/glibc_compat.o
 
 ${CROSS_PREFIX}g++ -Ofast -shared -fPIC \
     -std=c++20 \
     $SYSROOT_FLAGS \
     -march=armv8-a -mtune=cortex-a72 \
     -fomit-frame-pointer -fno-stack-protector \
-    -static-libgcc -static-libstdc++ \
+    -static-libstdc++ \
     -DNDEBUG \
     -DNAM_SAMPLE_FLOAT \
     -DDSP_SAMPLE_FLOAT \
@@ -196,6 +226,7 @@ ${CROSS_PREFIX}g++ -Ofast -shared -fPIC \
     -DWAVENET_MAX_NUM_FRAMES=128 \
     -DLAYER_ARRAY_BUFFER_PADDING=8 \
     src/dsp/nam_a2_plugin.cpp \
+    build/glibc_compat.o \
     -o build/nam-a2.so \
     -Isrc/dsp \
     -Ideps/NeuralAudio \
@@ -209,9 +240,51 @@ ${CROSS_PREFIX}g++ -Ofast -shared -fPIC \
     -Ideps/NeuralAudio/deps/NeuralAmpModelerCore \
     "$NA_LIB" \
     "$RT_LIB" \
+    -Wl,--no-undefined \
     -lm -lpthread
 
 echo "Plugin compiled: build/nam-a2.so"
+
+# --- ABI gate -------------------------------------------------------------
+#
+# Move's rootfs tops out at GLIBC_2.34. That number is measured, not
+# assumed: the shipped schwung-nam module loads on the device and its
+# highest versioned reference is @GLIBC_2.34, with no unversioned strong
+# references at all.
+#
+# Both failure modes below are invisible until the device refuses to load
+# the module, and the device has no way to say why - dlopen's error goes to
+# the host's log, which is off by default, and the module's own code never
+# runs to report anything. So they are caught here instead, where the
+# message can name the symbol.
+MAX_GLIBC_MINOR=34
+
+BAD_UNVERSIONED=$(${CROSS_PREFIX}nm -D --undefined-only build/nam-a2.so \
+    | awk '$1 == "U" { print $2 }' | grep -v '@' || true)
+
+BAD_VERSIONED=$(${CROSS_PREFIX}nm -D --undefined-only build/nam-a2.so \
+    | grep -oE '[^ ]+@GLIBC_2\.[0-9]+' \
+    | awk -F'@GLIBC_2.' -v max="$MAX_GLIBC_MINOR" '$2 + 0 > max { print $0 }' || true)
+
+if [ -n "$BAD_UNVERSIONED" ] || [ -n "$BAD_VERSIONED" ]; then
+    echo ""
+    echo "ERROR: build/nam-a2.so cannot load on Move."
+    [ -n "$BAD_UNVERSIONED" ] && {
+        echo "  Unversioned undefined symbols (device libc has no such symbol):"
+        echo "$BAD_UNVERSIONED" | sed 's/^/    /'
+    }
+    [ -n "$BAD_VERSIONED" ] && {
+        echo "  Symbols newer than Move's GLIBC_2.$MAX_GLIBC_MINOR:"
+        echo "$BAD_VERSIONED" | sed 's/^/    /'
+    }
+    echo ""
+    echo "  Add them to src/dsp/glibc_compat.c, or stop pulling in whatever"
+    echo "  reaches for them. Shipping this .so gives a module that is"
+    echo "  installed and selectable and silently never opens."
+    exit 1
+fi
+
+echo "ABI gate: no undefined symbol above GLIBC_2.$MAX_GLIBC_MINOR, none unversioned."
 
 # --- Package ---
 echo ""
