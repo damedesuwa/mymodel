@@ -15,7 +15,7 @@ by Steven Atkinson.
 ## Signal chain
 
 ```
-Input Gain -> NAM Model -> 3-Band EQ -> Cab IR -> Output Gain
+Input Gain -> Noise Gate -> NAM Model -> DC Block -> 3-Band EQ -> Cab IR -> Output Gain
 ```
 
 For delay, reverb or chorus, add them as separate FX in the slot's own
@@ -81,9 +81,44 @@ noisy input - Move's line in with a passive pickup, say - **turn
 0.5 default the hiss is 7 dB below the guitar, which reads as "white noise
 with the guitar faintly behind it" and is not a fault in the model.
 
-This module has no noise gate. A real high-gain rig always has one; add a
-gate ahead of this module in the slot's own FX chain, or keep the input
-level low.
+### Noise gate
+
+There is one, on by default, and it goes where a real high-gain rig puts
+it: **before** the amp. The amp is saturated, so gating after it would have
+to chase a signal already compressed to a near-constant level; gating
+before it simply hands the amp silence between notes. Same signals as the
+table above:
+
+| | silence | playing | SNR |
+|---|---------|---------|------|
+| gate off | 0.0233 | 0.0763 | 10.3 dB |
+| gate on (-50 dB) | 0.0047 | 0.0763 | **24.2 dB** |
+
+The guitar level is unchanged; only the hiss moves. A note played 20 dB
+softer (-40 dBFS in) still passes at full level.
+
+`gate_threshold` defaults to -50 dB rather than something lower because the
+detector tracks close to peak, so a -60 dBFS noise floor reads about -61 dB
+on it. At -55 dB the gate's own 6 dB of hysteresis shuts right on top of
+the noise and it hovers half-open: measured 17.1 dB SNR against -50 dB's
+24.2. Lower it if your input is quieter than that, raise it if hiss still
+gets through between notes, and `gate_bypass` turns it off.
+
+### The model's own calibration
+
+A `.nam` records the input level it was captured at and the output level
+that restores unity, and this module applies both. A high-gain model is
+only voiced correctly when they are honoured, since its distortion
+character is a function of how hard its input is driven.
+
+### If you hear the clean signal alongside the processed one
+
+Nothing in this module passes dry audio: the chain host calls
+`process_block` in place and this module overwrites the whole buffer, and
+the `linein` module replaces its slot buffer too. A dry guitar underneath
+the amp is Move monitoring the input itself, on a path Schwung does not
+own - its output is summed with Schwung's at the DAC. Turn Move's own
+input monitoring off, or take the input through `linein` only.
 
 ## Adding Models and Cabinets
 

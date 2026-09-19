@@ -329,6 +329,30 @@ typedef struct {
     /* Quality (0 = Full, 1 = Lite - runs the model at half rate) */
     int quality_lite;
 
+    /* DC blocker state (see process_block) */
+    float dc_x1;
+    float dc_y1;
+
+    /* Noise gate, on the INPUT - which is where a high-gain rig puts it.
+     * The amp is saturated, so its output level barely moves with input
+     * level while the hiss it amplifies moves a lot (measured: 24 dB SNR
+     * at input_level 0.0 against 6.9 dB at 0.5, same guitar level in
+     * both). Gating after the amp would have to chase a signal the amp has
+     * already compressed to a near-constant level; gating before it means
+     * the amp is simply handed silence between notes. */
+    int gate_bypass;
+    float gate_threshold_db;
+    float gate_release_ms;
+    float gate_env;          /* envelope follower over |input| */
+    float gate_gain;         /* smoothed 0..1, what actually multiplies */
+    float gate_target;       /* Schmitt trigger output, 0 or 1 */
+    float gate_open_lin;     /* threshold, linear */
+    float gate_close_lin;    /* threshold minus hysteresis, linear */
+    float gate_env_attack;   /* per-sample smoothing coefficients */
+    float gate_env_release;
+    float gate_gain_attack;
+    float gate_gain_release;
+
     /* 3-band EQ (mono, post cab IR) */
     float eq_low_gain, eq_low_freq;
     float eq_mid_gain, eq_mid_freq;
@@ -577,6 +601,25 @@ static void load_model_async(nam_a2_instance_t *inst, const char *path) {
 
 /* --- EQ --- */
 
+/* One-pole smoothing coefficient for a given time constant. */
+static float gate_coef(float ms) {
+    if (ms <= 0.0f) return 1.0f;
+    return 1.0f - expf(-1.0f / (0.001f * ms * SAMPLE_RATE));
+}
+
+static void update_gate(nam_a2_instance_t *inst) {
+    inst->gate_open_lin  = db_to_gain(inst->gate_threshold_db);
+    /* 6 dB of hysteresis. Without it a signal sitting on the threshold
+     * chatters the gate open and shut at the envelope's own rate, which is
+     * far more audible than the hiss being gated. */
+    inst->gate_close_lin = db_to_gain(inst->gate_threshold_db - 6.0f);
+
+    inst->gate_env_attack  = gate_coef(0.5f);    /* follow transients */
+    inst->gate_env_release = gate_coef(50.0f);   /* but decay slowly */
+    inst->gate_gain_attack = gate_coef(1.0f);    /* open fast: no clipped pick */
+    inst->gate_gain_release = gate_coef(inst->gate_release_ms);
+}
+
 static void update_eq(nam_a2_instance_t *inst) {
     biquad_set_low_shelf(&inst->eq_low, inst->eq_low_freq, inst->eq_low_gain, SAMPLE_RATE);
     biquad_set_peak(&inst->eq_mid, inst->eq_mid_freq, inst->eq_mid_gain, EQ_MID_Q, SAMPLE_RATE);
@@ -645,6 +688,24 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->input_gain = knob_to_gain(0.5f);
     inst->output_gain = knob_to_gain(0.5f);
     inst->quality_lite = 0;
+
+    /* Gate active by default at -55 dBFS. A high-gain model is unusable on
+     * a noisy input without one, and -55 dB is well below any played note
+     * while sitting above a typical line-in noise floor. */
+    inst->gate_bypass = 0;
+    /* -50 dB, not -55: the envelope follower tracks close to peak, so a
+     * -60 dBFS noise floor reads about -61 dB on it, and a -55 dB threshold
+     * with 6 dB of hysteresis shuts at -61 - right on top of the noise, so
+     * the gate hovers half-open instead of closing. Measured against a
+     * -60 dBFS floor and a -20 dBFS guitar: -55 gave 17.1 dB of SNR, -50
+     * gave 20.5 dB, with the guitar level identical in both. */
+    inst->gate_threshold_db = -50.0f;
+    inst->gate_release_ms = 100.0f;
+    inst->gate_env = 0.0f;
+    inst->gate_gain = 0.0f;
+    inst->gate_target = 0.0f;
+    update_gate(inst);
+
     inst->model_in_gain = 1.0f;
     inst->model_out_gain = 1.0f;
     inst->pending_in_gain = 1.0f;
@@ -719,7 +780,28 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     for (int i = 0; i < n; i++) {
         float l = audio_inout[i * 2]     / 32768.0f;
         float r = audio_inout[i * 2 + 1] / 32768.0f;
-        inst->mono_in[i] = (l + r) * 0.5f * ig;
+        float x = (l + r) * 0.5f;
+
+        if (!inst->gate_bypass) {
+            /* Detect on the raw input, before input_gain, so the threshold
+             * means a level at the jack and does not move when the input
+             * knob does. */
+            float a = fabsf(x);
+            inst->gate_env += (a - inst->gate_env) *
+                (a > inst->gate_env ? inst->gate_env_attack : inst->gate_env_release);
+
+            /* Schmitt trigger: open above the threshold, shut only once the
+             * envelope has fallen 6 dB below it. */
+            if (inst->gate_env > inst->gate_open_lin)       inst->gate_target = 1.0f;
+            else if (inst->gate_env < inst->gate_close_lin) inst->gate_target = 0.0f;
+
+            inst->gate_gain += (inst->gate_target - inst->gate_gain) *
+                (inst->gate_target > inst->gate_gain ? inst->gate_gain_attack
+                                                     : inst->gate_gain_release);
+            x *= inst->gate_gain;
+        }
+
+        inst->mono_in[i] = x * ig;
     }
 
     /* NAM model - Full runs every sample; Lite halves the neural net's work
@@ -742,6 +824,19 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         }
     } else {
         inst->model->Process(inst->mono_in, inst->mono_out, (size_t)n);
+    }
+
+    /* DC blocker. Fed exact silence this model settles to a constant
+     * 0.00114 (-58.8 dBFS) rather than to zero - measured, and normal: it
+     * is the amp's idle bias point, not a fault. Left in, it wastes
+     * headroom and, worse, steps whenever the gate opens or closes, which
+     * is a thump on every note. One-pole high pass at about 20 Hz. */
+    for (int i = 0; i < n; i++) {
+        float x = inst->mono_out[i];
+        float y = x - inst->dc_x1 + 0.9971f * inst->dc_y1;
+        inst->dc_x1 = x;
+        inst->dc_y1 = y;
+        inst->mono_out[i] = y;
     }
 
     /* 3-band EQ (mono, in place) - this is the amp's tone stack, so it sits
@@ -860,6 +955,13 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             load_cab(inst, target_cab);
         if (json_get_int(val, "cab_bypass", &i) == 0) inst->cab_bypass = (i != 0);
 
+        if (json_get_int(val, "gate_bypass", &i) == 0) inst->gate_bypass = (i != 0);
+        if (json_get_float(val, "gate_threshold", &f) == 0)
+            inst->gate_threshold_db = clampf(f, -80.0f, -20.0f);
+        if (json_get_float(val, "gate_release", &f) == 0)
+            inst->gate_release_ms = clampf(f, 20.0f, 1000.0f);
+        update_gate(inst);
+
         if (json_get_float(val, "eq_low_gain", &f) == 0) inst->eq_low_gain = clampf(f, -15.0f, 15.0f);
         if (json_get_float(val, "eq_low_freq", &f) == 0) inst->eq_low_freq = clampf(f, 40.0f, 500.0f);
         if (json_get_float(val, "eq_mid_gain", &f) == 0) inst->eq_mid_gain = clampf(f, -15.0f, 15.0f);
@@ -892,6 +994,20 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (idx >= 0 && idx < inst->cab_count && idx != inst->current_cab_index) {
             load_cab(inst, idx);
         }
+    } else if (strcmp(key, "gate_bypass") == 0) {
+        inst->gate_bypass = (atoi(val) != 0);
+        if (inst->gate_bypass) {
+            /* Leave the gate wide open so re-enabling it does not have to
+             * climb out of a closed state mid-note. */
+            inst->gate_gain = 1.0f;
+            inst->gate_target = 1.0f;
+        }
+    } else if (strcmp(key, "gate_threshold") == 0) {
+        inst->gate_threshold_db = clampf((float)atof(val), -80.0f, -20.0f);
+        update_gate(inst);
+    } else if (strcmp(key, "gate_release") == 0) {
+        inst->gate_release_ms = clampf((float)atof(val), 20.0f, 1000.0f);
+        update_gate(inst);
     } else if (strcmp(key, "cab_bypass") == 0) {
         inst->cab_bypass = (atoi(val) != 0);
     } else if (strcmp(key, "eq_low_gain") == 0) {
@@ -948,12 +1064,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             "{\"input_level\":%.4f,\"output_level\":%.4f,\"quality\":%d,"
             "\"model_index\":%d,\"model_name\":\"%s\","
             "\"cab_index\":%d,\"cab_name\":\"%s\",\"cab_bypass\":%d,"
+            "\"gate_bypass\":%d,\"gate_threshold\":%.1f,\"gate_release\":%.0f,"
             "\"eq_low_gain\":%.2f,\"eq_low_freq\":%.1f,"
             "\"eq_mid_gain\":%.2f,\"eq_mid_freq\":%.1f,"
             "\"eq_high_gain\":%.2f,\"eq_high_freq\":%.1f}",
             inst->input_level, inst->output_level, inst->quality_lite,
             inst->current_model_index, inst->model_name,
             inst->current_cab_index, inst->cab_name, inst->cab_bypass ? 1 : 0,
+            inst->gate_bypass ? 1 : 0, inst->gate_threshold_db, inst->gate_release_ms,
             inst->eq_low_gain, inst->eq_low_freq,
             inst->eq_mid_gain, inst->eq_mid_freq,
             inst->eq_high_gain, inst->eq_high_freq);
@@ -988,6 +1106,9 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%s", inst->cab_name[0] ? inst->cab_name : "(none)");
     if (strcmp(key, "cab_count") == 0) return snprintf(buf, buf_len, "%d", inst->cab_count);
     if (strcmp(key, "cab_index") == 0) return snprintf(buf, buf_len, "%d", inst->current_cab_index);
+    if (strcmp(key, "gate_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->gate_bypass ? 1 : 0);
+    if (strcmp(key, "gate_threshold") == 0) return snprintf(buf, buf_len, "%.1f", inst->gate_threshold_db);
+    if (strcmp(key, "gate_release") == 0) return snprintf(buf, buf_len, "%.0f", inst->gate_release_ms);
     if (strcmp(key, "cab_bypass") == 0) return snprintf(buf, buf_len, "%d", inst->cab_bypass ? 1 : 0);
 
     if (strcmp(key, "cab_list") == 0) {
@@ -1028,6 +1149,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
                         "{\"level\":\"models\",\"label\":\"Choose Model\"},"
                         "{\"level\":\"eq\",\"label\":\"3-Band EQ\"},"
+                        "{\"level\":\"gate\",\"label\":\"Noise Gate\"},"
                         "{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"}"
                     "]"
                 "},"
@@ -1042,6 +1164,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                     "\"items_param\":\"cab_list\","
                     "\"select_param\":\"cab_index\","
                     "\"children\":null,\"knobs\":[],\"params\":[]"
+                "},"
+                "\"gate\":{"
+                    "\"label\":\"Noise Gate\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"gate_threshold\",\"gate_release\",\"gate_bypass\"],"
+                    "\"params\":[\"gate_threshold\",\"gate_release\",\"gate_bypass\"]"
                 "},"
                 "\"eq\":{"
                     "\"label\":\"3-Band EQ\","

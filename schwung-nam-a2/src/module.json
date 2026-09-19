@@ -3,7 +3,7 @@
   "name": "Nam A2",
   "abbrev": "NA2",
   "version": "0.1.0",
-  "description": "Neural Amp Modeler (A2) - neural amp emulation with a 3-band tone stack and cabinet IR",
+  "description": "Neural Amp Modeler (A2) - neural amp emulation with a noise gate, 3-band tone stack and cabinet IR",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
   "dsp": "nam-a2.so",
@@ -28,11 +28,28 @@
               "short_name": "Bypass",
               "label": "Cab Bypass"
             },
-            { "level": "models", "label": "Choose Model" },
-            { "level": "eq", "label": "3-Band EQ" },
-            { "level": "cabs", "label": "Choose Cabinet" }
+            {
+              "level": "models",
+              "label": "Choose Model"
+            },
+            {
+              "level": "gate",
+              "label": "Noise Gate"
+            },
+            {
+              "level": "eq",
+              "label": "3-Band EQ"
+            },
+            {
+              "level": "cabs",
+              "label": "Choose Cabinet"
+            }
           ],
-          "knobs": ["input_level", "output_level", "quality"]
+          "knobs": [
+            "input_level",
+            "output_level",
+            "quality"
+          ]
         },
         "models": {
           "label": "Model",
@@ -53,31 +70,181 @@
         "eq": {
           "label": "3-Band EQ",
           "children": null,
-          "knobs": ["eq_low_gain", "eq_low_freq", "eq_mid_gain", "eq_mid_freq", "eq_high_gain", "eq_high_freq"],
-          "params": ["eq_low_gain", "eq_low_freq", "eq_mid_gain", "eq_mid_freq", "eq_high_gain", "eq_high_freq"]
+          "knobs": [
+            "eq_low_gain",
+            "eq_low_freq",
+            "eq_mid_gain",
+            "eq_mid_freq",
+            "eq_high_gain",
+            "eq_high_freq"
+          ],
+          "params": [
+            "eq_low_gain",
+            "eq_low_freq",
+            "eq_mid_gain",
+            "eq_mid_freq",
+            "eq_high_gain",
+            "eq_high_freq"
+          ]
+        },
+        "gate": {
+          "label": "Noise Gate",
+          "children": null,
+          "knobs": [
+            "gate_threshold",
+            "gate_release",
+            "gate_bypass"
+          ],
+          "params": [
+            "gate_threshold",
+            "gate_release",
+            "gate_bypass"
+          ]
         }
       }
     },
     "chain_params": [
-      { "key": "input_level", "name": "Input", "type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.01 },
-      { "key": "output_level", "name": "Output", "type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.01 },
-      { "key": "quality", "name": "Quality", "type": "enum", "options": ["Full", "Lite"], "default": 0 },
-      { "key": "cab_bypass", "name": "Cab Bypass", "type": "int", "min": 0, "max": 1, "default": 0, "step": 1 },
-
-      { "key": "eq_low_gain", "name": "Low Gain", "type": "float", "min": -15.0, "max": 15.0, "default": 0.0, "step": 0.5, "unit": "dB" },
-      { "key": "eq_low_freq", "name": "Low Freq", "type": "float", "min": 40.0, "max": 500.0, "default": 100.0, "step": 5.0, "unit": "Hz" },
-      { "key": "eq_mid_gain", "name": "Mid Gain", "type": "float", "min": -15.0, "max": 15.0, "default": 0.0, "step": 0.5, "unit": "dB" },
-      { "key": "eq_mid_freq", "name": "Mid Freq", "type": "float", "min": 200.0, "max": 4000.0, "default": 800.0, "step": 25.0, "unit": "Hz" },
-      { "key": "eq_high_gain", "name": "High Gain", "type": "float", "min": -15.0, "max": 15.0, "default": 0.0, "step": 0.5, "unit": "dB" },
-      { "key": "eq_high_freq", "name": "High Freq", "type": "float", "min": 1000.0, "max": 10000.0, "default": 3000.0, "step": 100.0, "unit": "Hz" }
+      {
+        "key": "input_level",
+        "name": "Input",
+        "type": "float",
+        "min": 0.0,
+        "max": 1.0,
+        "default": 0.5,
+        "step": 0.01
+      },
+      {
+        "key": "output_level",
+        "name": "Output",
+        "type": "float",
+        "min": 0.0,
+        "max": 1.0,
+        "default": 0.5,
+        "step": 0.01
+      },
+      {
+        "key": "quality",
+        "name": "Quality",
+        "type": "enum",
+        "options": [
+          "Full",
+          "Lite"
+        ],
+        "default": 0
+      },
+      {
+        "key": "cab_bypass",
+        "name": "Cab Bypass",
+        "type": "int",
+        "min": 0,
+        "max": 1,
+        "default": 0,
+        "step": 1
+      },
+      {
+        "key": "gate_threshold",
+        "name": "Gate Thresh",
+        "type": "float",
+        "min": -80.0,
+        "max": -20.0,
+        "default": -50.0,
+        "step": 1.0,
+        "unit": "dB"
+      },
+      {
+        "key": "gate_release",
+        "name": "Gate Release",
+        "type": "float",
+        "min": 20.0,
+        "max": 1000.0,
+        "default": 100.0,
+        "step": 10.0,
+        "unit": "ms"
+      },
+      {
+        "key": "gate_bypass",
+        "name": "Gate Bypass",
+        "type": "int",
+        "min": 0,
+        "max": 1,
+        "default": 0,
+        "step": 1
+      },
+      {
+        "key": "eq_low_gain",
+        "name": "Low Gain",
+        "type": "float",
+        "min": -15.0,
+        "max": 15.0,
+        "default": 0.0,
+        "step": 0.5,
+        "unit": "dB"
+      },
+      {
+        "key": "eq_low_freq",
+        "name": "Low Freq",
+        "type": "float",
+        "min": 40.0,
+        "max": 500.0,
+        "default": 100.0,
+        "step": 5.0,
+        "unit": "Hz"
+      },
+      {
+        "key": "eq_mid_gain",
+        "name": "Mid Gain",
+        "type": "float",
+        "min": -15.0,
+        "max": 15.0,
+        "default": 0.0,
+        "step": 0.5,
+        "unit": "dB"
+      },
+      {
+        "key": "eq_mid_freq",
+        "name": "Mid Freq",
+        "type": "float",
+        "min": 200.0,
+        "max": 4000.0,
+        "default": 800.0,
+        "step": 25.0,
+        "unit": "Hz"
+      },
+      {
+        "key": "eq_high_gain",
+        "name": "High Gain",
+        "type": "float",
+        "min": -15.0,
+        "max": 15.0,
+        "default": 0.0,
+        "step": 0.5,
+        "unit": "dB"
+      },
+      {
+        "key": "eq_high_freq",
+        "name": "High Freq",
+        "type": "float",
+        "min": 1000.0,
+        "max": 10000.0,
+        "default": 3000.0,
+        "step": 100.0,
+        "unit": "Hz"
+      }
     ]
   },
   "assets": {
     "path": ".",
     "label": "Assets",
-    "extensions": [".nam", ".wav", ".ir"],
+    "extensions": [
+      ".nam",
+      ".wav",
+      ".ir"
+    ],
     "allowFolders": true,
-    "ensure_dirs": ["models", "cabs"],
+    "ensure_dirs": [
+      "models",
+      "cabs"
+    ],
     "description": "Manage NAM models (.nam) and cabinet IRs (.wav)",
     "hint": "Find amp models at",
     "hint_url": "https://tone3000.com",
