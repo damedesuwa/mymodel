@@ -88,7 +88,7 @@ extern "C" {
 /* Stamped into the log at create_instance so a report can be tied to a
  * build. Four rounds of this hunt were spent on reports that may or may not
  * have been from the build being discussed. */
-#define NAM_A2_BUILD_ID "diag-2"
+#define NAM_A2_BUILD_ID "conv-fast"
 
 #define FRAME_BUDGET_US 2370.0
 
@@ -261,7 +261,6 @@ typedef struct {
     int cab_run_len;
     float cab_norm_db;   /* what normalisation cost, for the load line */
     float *cab_history;
-    int cab_hist_pos;
     bool cab_bypass;
     char cab_name[MAX_NAME_LEN];
 
@@ -580,11 +579,9 @@ static void load_cab(nam_a2_instance_t *inst, int index) {
     inst->current_cab_index = index;
     path_to_name(inst->cab_paths[index], inst->cab_name, MAX_NAME_LEN);
 
-    /* Doubled length: apply_cab_ir() writes each sample at BOTH pos and
-     * pos + hist_len so its inner loop can read backward as a contiguous
-     * slice with no wraparound branch - see the comment there. */
-    inst->cab_history = (float *)calloc(2 * (ir_len + FRAMES_PER_BLOCK), sizeof(float));
-    inst->cab_hist_pos = 0;
+    /* [L-1 carried][n new] - see apply_cab_ir. */
+    inst->cab_history = (float *)calloc((size_t)(ir_len - 1) + FRAMES_PER_BLOCK,
+                                        sizeof(float));
 
     free(old_ir);
     free(old_hist);
@@ -598,55 +595,56 @@ static void load_cab(nam_a2_instance_t *inst, int index) {
     plugin_log(msg);
 }
 
-/* Direct time-domain convolution via a DOUBLED circular history buffer.
+/* Direct time-domain convolution, TAP-OUTER.
  *
- * The original (schwung-nam-derived) version kept a single hist_len-sized
- * buffer and stepped the read pointer backward with
- * `if (--p < 0) p = hist_len - 1;` inside the innermost per-tap loop. That
- * branch is evaluated ir_len times per output sample - for a several-
- * thousand-tap cabinet IR that is the hot loop, and a data-dependent
- * branch there defeats auto-vectorization entirely (measured ~7.8x slower
- * than the branch-free version below at -Ofast on a 4096-tap IR - at
- * -Ofast that one branchy loop alone was already ~22% of the 128-sample
- * real-time budget, before the NAM model, EQ or solo FX chain get their
- * share, which is what produced audible crackling with a normal-length
- * cab IR loaded).
+ * The obvious loop nest - for each sample, sum over every tap - is what the
+ * schwung-nam original did and what this module did until the device
+ * measured it. On Move a 1024-tap IR cost 1440 us per 128-frame block
+ * (Slot fx went 1149 -> 2590 us when the cab loaded), against a 2902 us
+ * frame. That is ~91 MMAC/s where the core can do sixty times better, so it
+ * was never compute: it is the memory pattern. Every output sample walked
+ * backwards through a 9 KB history buffer, so the whole working set was
+ * re-read 128 times per block and nothing stayed in L1. Overruns were
+ * climbing 290/s, which is what the crackle was.
  *
- * Fix: `cab_history` is allocated at 2x size (see load_cab) and every
- * sample is written at BOTH pos and pos + hist_len. Reading backward from
- * `&hist[pos + hist_len]` is then always a contiguous, branch-free slice -
- * `h[-k]` for k in [0, ir_len) never needs to wrap, because the mirrored
- * copy is already sitting where the wrapped read would have landed. This
- * changes nothing about the output (verified sample-for-sample identical
- * against the old implementation, aside from float-reassociation-level
- * noise from vectorization, ~1e-5) - it only removes the branch so the
- * compiler can vectorize it.
+ * Inverted, the inner loop runs over SAMPLES with the tap held as a scalar:
+ *
+ *     for k in taps:  c = ir[k]
+ *         for i in samples:  out[i] += c * hist[(L-1)-k + i]
+ *
+ * Both arrays are then read forward and contiguously, the tap broadcasts
+ * into a vector register once, and the window that gets touched is
+ * (L-1 + n) floats - 4.6 KB, which stays in L1 across the whole block.
+ * gcc emits five vector FMAs with a `dup` broadcast where the old shape got
+ * one; the old one vectorised too, which is why this was not visible in the
+ * disassembly alone and needed the device's own number.
+ *
+ * The history is a plain linear window now rather than a doubled circular
+ * buffer: [L-1 carried][n new]. Carrying it is one memmove of L-1 floats
+ * per block, which is 4 KB against the 131072 multiply-adds it feeds.
  */
 static void apply_cab_ir(nam_a2_instance_t *inst, float *audio, int frames) {
     if (!inst->cab_ir || inst->cab_ir_len <= 0 || !inst->cab_history) return;
 
     const float *ir = inst->cab_ir;
-    const int ir_len = inst->cab_ir_len;
+    const int L = inst->cab_ir_len;
     float *hist = inst->cab_history;
-    const int hist_len = ir_len + FRAMES_PER_BLOCK;
-    int pos = inst->cab_hist_pos;
+    const int n = frames;
 
-    for (int i = 0; i < frames; i++) {
-        float x = audio[i];
-        hist[pos] = x;
-        hist[pos + hist_len] = x;
+    /* Slide the tail down, append this block. */
+    memmove(hist, hist + n, (size_t)(L - 1) * sizeof(float));
+    memcpy(hist + (L - 1), audio, (size_t)n * sizeof(float));
 
-        const float *h = &hist[pos + hist_len]; /* h[0] = newest sample, h[-1] = previous, ... */
-        float sum = 0.0f;
-        for (int k = 0; k < ir_len; k++) {
-            sum += ir[k] * h[-k];
-        }
+    float acc[FRAMES_PER_BLOCK];
+    for (int i = 0; i < n; i++) acc[i] = 0.0f;
 
-        audio[i] = sum;
-        if (++pos >= hist_len) pos = 0;
+    for (int k = 0; k < L; k++) {
+        const float c = ir[k];
+        const float *src = hist + (L - 1) - k;
+        for (int i = 0; i < n; i++) acc[i] += c * src[i];
     }
 
-    inst->cab_hist_pos = pos;
+    for (int i = 0; i < n; i++) audio[i] = acc[i];
 }
 
 /* DIAGNOSTICS TO THE LOG.
@@ -788,7 +786,6 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->cab_ir_len = 0;
     inst->cab_run_len = 1024;   /* 23 ms */
     inst->cab_history = nullptr;
-    inst->cab_hist_pos = 0;
     inst->cab_bypass = false;
     inst->cab_name[0] = '\0';
     inst->current_cab_index = -1;
