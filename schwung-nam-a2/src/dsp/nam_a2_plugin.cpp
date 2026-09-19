@@ -248,6 +248,7 @@ typedef struct {
     /* How many taps the convolution may run. Set from the cab_length enum;
      * the loaded IR is trimmed to it, so changing it reloads the cab. */
     int cab_run_len;
+    float cab_norm_db;   /* what normalisation cost, for the load line */
     float *cab_history;
     int cab_hist_pos;
     bool cab_bypass;
@@ -295,24 +296,6 @@ typedef struct {
      * three settings are a real ladder: 1.00x, 0.20x, 0.11x. */
     int quality_mode;
 
-    /* Which channel feeds the model. A NAM model is mono, so something has
-     * to collapse the stereo input, and averaging L+R is the wrong default
-     * for the case this module exists for.
-     *
-     * A mono guitar reaches Move through a TRS jack: tip carries the pickup,
-     * ring is tied to sleeve at the guitar end, so the RIGHT channel is
-     * silent. Averaging then gives (L + 0) / 2 - the amp is driven 6 dB
-     * under the signal that is actually present, while Move's own input
-     * monitoring takes the left channel whole (its setting is literally
-     * "monoFromLeftChannel"). That 6 dB is why a dry monitor path sits
-     * louder against the amp than it should.
-     *
-     * Left is the default because it is correct for both mono cases - a
-     * source on the left alone, and a mono source duplicated to both
-     * channels, where (L+L)/2 and L are the same number. Only a genuinely
-     * stereo source needs Sum, and feeding one to a mono guitar amp is the
-     * unusual case, so it is the option rather than the default. */
-    int input_mode;   /* 0 = Left, 1 = Right, 2 = Sum L+R */
 
     /* Block-time meter. clock_gettime is a vDSO read, not a syscall - the
      * shim times its own callback the same way - so this costs tens of
@@ -495,6 +478,49 @@ static void load_cab(nam_a2_instance_t *inst, int index) {
         }
     }
 
+    /* NORMALISE SO THE CABINET NEVER BOOSTS.
+     *
+     * A cab IR is a recording and its level is an accident of the capture,
+     * but the trap is subtler than a level: the file's ENERGY is already
+     * close to unity here (sum h^2 = 1.18, a 0.7 dB correction) while its
+     * frequency response peaks at +13 dB around 230 Hz, which is a 4x12 with
+     * V30s doing what a 4x12 does. Energy normalisation therefore changed
+     * nothing measurable - tried, and the output rms moved from 0.3373 to
+     * 0.3383 - and the boost went on driving the output into its clamp: at a
+     * -8 dBFS input, 2.31% of samples pinned at full scale, which on an
+     * already-distorted signal is heard as crackling.
+     *
+     * Dividing by max|H(f)| makes the cabinet a filter that only ever cuts,
+     * so it cannot cause clipping at any frequency and the cab switch stops
+     * being a loudness switch. The DFT is coarse on purpose - a speaker's
+     * response is smooth, so 64 log-spaced points across the band a guitar
+     * cab actually shapes find the peak - and it is bounded to 2048 taps
+     * because this runs in load_cab, which is on the SPI callback.
+     *
+     * sum|h| would also guarantee no clipping and needs no transform, but it
+     * is the bound for the worst possible input rather than for this filter:
+     * 13.0 here, a 22.3 dB cut where 13.0 dB is what the response asks for. */
+    {
+        const int an = (want < 2048) ? want : 2048;
+        double peak = 0.0;
+        for (int j = 0; j < 64; j++) {
+            /* 50 Hz .. 8 kHz, log spaced */
+            double f = 50.0 * pow(160.0, j / 63.0);
+            double w = 2.0 * M_PI * f / (double)SAMPLE_RATE;
+            double re = 0.0, im = 0.0;
+            for (int k = 0; k < an; k++) {
+                double ph = w * k;
+                re += new_ir[k] * cos(ph);
+                im -= new_ir[k] * sin(ph);
+            }
+            double mag = sqrt(re * re + im * im);
+            if (mag > peak) peak = mag;
+        }
+        double norm = (peak > 1e-9) ? 1.0 / peak : 1.0;
+        for (int i = 0; i < want; i++) new_ir[i] = (float)(new_ir[i] * norm);
+        inst->cab_norm_db = (float)(20.0 * log10(norm));
+    }
+
     free(raw);
     int ir_len = want;
 
@@ -517,9 +543,10 @@ static void load_cab(nam_a2_instance_t *inst, int index) {
 
     char msg[MAX_PATH_LEN + 64];
     snprintf(msg, sizeof(msg),
-             "Nam A2: cab '%s' %d Hz -> %d Hz, %d run taps (%.0f ms), limit %d",
+             "Nam A2: cab '%s' %d Hz -> %d Hz, %d run taps (%.0f ms), limit %d, gain %+.1f dB",
              inst->cab_name, (int)file_rate, (int)SAMPLE_RATE, ir_len,
-             1000.0f * ir_len / SAMPLE_RATE, inst->cab_run_len);
+             1000.0f * ir_len / SAMPLE_RATE, inst->cab_run_len,
+             inst->cab_norm_db);
     plugin_log(msg);
 }
 
@@ -671,7 +698,7 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     /* Cabinet IR defaults */
     inst->cab_ir = nullptr;
     inst->cab_ir_len = 0;
-    inst->cab_run_len = 2048;   /* 46 ms - a cabinet, not a room */
+    inst->cab_run_len = 1024;   /* 23 ms. See cab_length. */
     inst->cab_history = nullptr;
     inst->cab_hist_pos = 0;
     inst->cab_bypass = false;
@@ -697,7 +724,6 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->output_gain = knob_to_gain(inst->output_level);
     inst->quality_mode = 0;   /* Full */
     inst->cpu_us_peak = 0.0;
-    inst->input_mode = 0;   /* Left */
 
     inst->model_in_gain = 1.0f;
     inst->model_out_gain = 1.0f;
@@ -772,10 +798,13 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     for (int i = 0; i < n; i++) {
         float l = audio_inout[i * 2]     / 32768.0f;
         float r = audio_inout[i * 2 + 1] / 32768.0f;
-        float x = (inst->input_mode == 0) ? l
-                : (inst->input_mode == 1) ? r
-                : (l + r) * 0.5f;
-        inst->mono_in[i] = x * ig;
+        /* LEFT only. A mono guitar reaches Move through a TRS jack with its
+         * ring tied to sleeve, so the right channel is silent - Move's own
+         * setting says `monoFromLeftChannel`. Averaging L+R would drive the
+         * model at (L + 0) / 2. A stereo source into a mono guitar amp is
+         * not a case worth a control. */
+        (void)r;
+        inst->mono_in[i] = l * ig;
     }
 
     /* NAM model - Full runs every sample; Lite halves the neural net's work
@@ -914,10 +943,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->quality_mode = (i < 0) ? 0 : (i > 2) ? 2 : i;
             apply_quality(inst);
         }
-        if (json_get_int(val, "input_mode", &i) == 0)
-            inst->input_mode = (i < 0) ? 0 : (i > 2) ? 2 : i;
-        if (json_get_int(val, "input_mode", &i) == 0)
-            inst->input_mode = (i < 0) ? 0 : (i > 2) ? 2 : i;
 
         int target_model = -1;
         if (json_get_string(val, "model_name", name, sizeof(name)) > 0)
@@ -951,9 +976,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     } else if (strcmp(key, "output_level") == 0) {
         inst->output_level = clampf(atof(val), 0.0f, 1.0f);
         inst->output_gain = knob_to_gain(inst->output_level);
-    } else if (strcmp(key, "input_mode") == 0) {
-        int m = atoi(val);
-        inst->input_mode = (m < 0) ? 0 : (m > 2) ? 2 : m;
     } else if (strcmp(key, "quality") == 0) {
         int m = atoi(val);
         inst->quality_mode = (m < 0) ? 0 : (m > 2) ? 2 : m;
@@ -1025,18 +1047,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "state") == 0) {
         return snprintf(buf, buf_len,
             "{\"input_level\":%.4f,\"output_level\":%.4f,\"quality\":%d,"
-            "\"input_mode\":%d,"
             "\"model_index\":%d,\"model_name\":\"%s\","
             "\"cab_index\":%d,\"cab_name\":\"%s\",\"cab_bypass\":%d,\"cab_run_len\":%d}",
             inst->input_level, inst->output_level, inst->quality_mode,
-            inst->input_mode,
             inst->current_model_index, inst->model_name,
             inst->current_cab_index, inst->cab_name, inst->cab_bypass ? 1 : 0, inst->cab_run_len);
     }
 
     if (strcmp(key, "input_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->input_level);
     if (strcmp(key, "output_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->output_level);
-    if (strcmp(key, "input_mode") == 0) return snprintf(buf, buf_len, "%d", inst->input_mode);
     if (strcmp(key, "quality") == 0) return snprintf(buf, buf_len, "%d", inst->quality_mode);
 
     /* Read-only, and declared "live" so the grid re-reads it every tick
@@ -1119,18 +1138,23 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                 "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01},"
               "{\"key\":\"output_level\",\"name\":\"Output\",\"type\":\"float\","
                 "\"min\":0.0,\"max\":1.0,\"default\":0.85,\"step\":0.01},"
+              /* A PLAIN param, deliberately. `access:"read"` plus `live:true`
+               * is the declared way to do this and it did not reach the
+               * screen twice running - the value stayed at its default. An
+               * ordinary float is read on the page's value rotation, which
+               * comes round about four times a second: slower than `live`
+               * promises and fast enough for a load meter, on a path every
+               * other knob already proves works. The knob turns and does
+               * nothing, since set_param ignores the key. */
               "{\"key\":\"cpu\",\"name\":\"CPU\",\"type\":\"float\","
-                "\"min\":0.0,\"max\":100.0,\"default\":0.0,\"step\":0.1,"
-                "\"unit\":\"%%\",\"display_format\":\"%%.0f\","
-                "\"access\":\"read\",\"live\":true},"
-              "{\"key\":\"input_mode\",\"name\":\"Input Ch\",\"type\":\"enum\","
-                "\"options\":[\"Left\",\"Right\",\"Sum L+R\"],\"default\":0},"
+                "\"min\":0.0,\"max\":100.0,\"default\":0.0,\"step\":1.0,"
+                "\"unit\":\"%%\",\"display_format\":\"%%.0f\"},"
               "{\"key\":\"quality\",\"name\":\"Quality\",\"type\":\"enum\","
                 "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0},"
               "{\"key\":\"cab_bypass\",\"name\":\"Cab Bypass\",\"type\":\"int\","
                 "\"min\":0,\"max\":1,\"default\":0,\"step\":1},"
               "{\"key\":\"cab_length\",\"name\":\"Cab Len\",\"type\":\"enum\","
-                "\"options\":[\"1024\",\"2048\",\"4096\",\"8192\"],\"default\":1}"
+                "\"options\":[\"1024\",\"2048\",\"4096\",\"8192\"],\"default\":0}"
             "]");
     }
 
@@ -1141,12 +1165,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                 "\"root\":{"
                     "\"label\":\"Nam A2\","
                     "\"children\":null,"
-                    "\"knobs\":[\"input_level\",\"output_level\",\"cpu\",\"input_mode\",\"quality\"],"
+                    "\"knobs\":[\"input_level\",\"output_level\",\"cpu\",\"quality\",\"cab_length\"],"
                     "\"params\":["
                         "{\"key\":\"input_level\",\"label\":\"Input\"},"
                         "{\"key\":\"output_level\",\"label\":\"Output\"},"
                         "{\"key\":\"cpu\",\"short_name\":\"CPU\",\"label\":\"CPU Load\"},"
-                        "{\"key\":\"input_mode\",\"short_name\":\"In Ch\",\"label\":\"Input Channel\"},"
                         "{\"key\":\"quality\",\"label\":\"Quality\"},"
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
                         "{\"key\":\"cab_length\",\"short_name\":\"CabLen\",\"label\":\"Cab Length\"},"

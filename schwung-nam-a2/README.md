@@ -15,7 +15,7 @@ by Steven Atkinson.
 ## Signal chain
 
 ```
-Input Channel -> Input Gain -> NAM Model -> DC Block -> Cab IR -> Output Gain
+Input Channel -> Input (left channel) -> Input Gain -> NAM Model -> DC Block -> Cab IR -> Output Gain
 ```
 
 For delay, reverb or chorus, add them as separate FX in the slot's own
@@ -71,12 +71,11 @@ allocation is forbidden) light.
 | Parameter | Range | Default | Description |
 |-----------|-------|---------|-------------|
 | `input_level` | 0.0-1.0 | 0.5 | Input gain before model processing |
-| `input_mode` | Left / Right / Sum L+R | Left | Which channel feeds the mono model |
 | `output_level` | 0.0-1.0 | 0.85 | Output gain after the whole chain |
 | `quality` | Full / Slim / Lite | Full | Model's own tier, then a rate fallback |
 | `cpu` | 0-100 % | — | Read-only: worst recent block, as % of frame slack |
 | `cab_bypass` | 0-1 | 0 | Bypass cabinet IR convolution |
-| `cab_length` | 1024 / 2048 / 4096 / 8192 | 2048 | Taps the convolution runs |
+| `cab_length` | 1024 / 2048 / 4096 / 8192 | 1024 | Taps the convolution runs |
 
 ## Move monitors its own line input, and you cannot turn that off from here
 
@@ -127,6 +126,19 @@ looking at the convolution. `cab_length` defaults to **2048** (46 ms) —
 that is a cabinet; past it is the room. Raise it if the meter says you can
 afford to.
 
+**Gain.** The IR is normalised so the cabinet never boosts at any
+frequency, and the obvious normalisation is the wrong one. This file's
+ENERGY is already near unity (sum h^2 = 1.18, a 0.7 dB correction) while
+its frequency response peaks at **+13 dB around 230 Hz** - a 4x12 with V30s
+doing what a 4x12 does. Energy normalisation was tried and changed nothing
+measurable (output rms 0.3373 -> 0.3383), and the boost went on driving the
+output into its clamp: at a -8 dBFS input, **2.31% of samples pinned at
+full scale**, which on an already-distorted signal is heard as crackling.
+
+Dividing by max|H(f)| instead leaves a filter that only ever cuts. Same
+signal, after: peak 0.26, no clipped sample at any input level tested. The
+load line reports the cut it applied.
+
 **Rate.** The IR is resampled from the file's own rate to 44100. Playing a
 48 kHz IR as it sits stretches the whole response 8.8%, putting the
 cabinet's resonances in the wrong place. Trimming also fades the last
@@ -136,26 +148,16 @@ click smeared across the spectrum.
 The load line says what happened:
 
 ```
-Nam A2: cab 'mesa' 48000 Hz -> 44100 Hz, 2048 run taps (46 ms), limit 2048
+Nam A2: cab 'mesa' 48000 Hz -> 44100 Hz, 1024 run taps (23 ms), limit 1024, gain -12.2 dB
 ```
 
-## The input channel, and why Left is the default
+## The LEFT channel feeds the model
 
 A mono guitar reaches Move through a TRS jack with its ring tied to sleeve,
-so the **right channel is silent** - Move's own setting says as much
-(`lineInRecordingMode: monoFromLeftChannel`). Averaging L+R would drive the
-model at (L + 0) / 2, 6 dB under the signal that is actually there.
-
-Left is the default because it is right for both mono cases: a source on
-the left alone, and a mono source duplicated to both channels, where
-(L+L)/2 and L are the same number - measured identical to 0.00 dB. Only a
-genuinely stereo source needs `Sum L+R`.
-
-Be honest about what this buys: at the **output** it is +0.2 to +0.5 dB,
-not +6, because the amp is saturated and 6 dB more drive does not make 6 dB
-more output. What it fixes is the amp's operating point - a high-gain
-model's character is a function of how hard its input is driven - not the
-level.
+so the right channel is silent - Move's own setting says
+`lineInRecordingMode: monoFromLeftChannel`. Averaging L+R would drive the
+model at (L + 0) / 2. There is no control for this: a stereo source into a
+mono guitar amp is not a case worth a knob.
 
 ## Gain staging on a high-gain model
 

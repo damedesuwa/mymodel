@@ -24,11 +24,6 @@
               "label": "CPU Load"
             },
             {
-              "key": "input_mode",
-              "short_name": "In Ch",
-              "label": "Input Channel"
-            },
-            {
               "key": "quality",
               "short_name": "Qual",
               "label": "Quality"
@@ -56,8 +51,8 @@
             "input_level",
             "output_level",
             "cpu",
-            "input_mode",
-            "quality"
+            "quality",
+            "cab_length"
           ]
         },
         "models": {
@@ -104,22 +99,9 @@
         "min": 0.0,
         "max": 100.0,
         "default": 0.0,
-        "step": 0.1,
+        "step": 1.0,
         "unit": "%",
-        "display_format": "%.1f",
-        "access": "read",
-        "live": true
-      },
-      {
-        "key": "input_mode",
-        "name": "Input Ch",
-        "type": "enum",
-        "options": [
-          "Left",
-          "Right",
-          "Sum L+R"
-        ],
-        "default": 0
+        "display_format": "%.1f"
       },
       {
         "key": "quality",
@@ -151,7 +133,7 @@
           "4096",
           "8192"
         ],
-        "default": 1
+        "default": 0
       }
     ]
   },
