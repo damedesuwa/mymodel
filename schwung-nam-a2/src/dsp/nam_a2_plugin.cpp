@@ -9,16 +9,15 @@
  *   - A "Quality" switch (Full / Lite). Lite halves the neural net's work by
  *     running the model at half the block's sample rate (averaging input
  *     pairs, zero-order-hold on the output) - a CPU/quality tradeoff for
- *     models too heavy to run in real time on Move's ARM core alongside the
- *     cab IR and EQ.
- *   - A 3-band EQ (low/high shelf + mid bell) as the amp's tone stack,
- *     between the model and the cab IR.
+ *     models too heavy to run in real time on Move's ARM core alongside
+ *     the cab IR.
  *
- * A Doubler/Echo/Reverb "solo" FX chain was previously part of this module
- * and has been removed: those stages are better served by the host's own
- * chain FX slots, and their buffers cost ~900 KB of allocation inside
- * create_instance - which runs on the SPI audio callback, where allocation
- * is forbidden.
+ * A 3-band EQ and a Doubler/Echo/Reverb "solo" FX chain were both part of
+ * this module and have been removed. Everything that is not the amp and its
+ * speaker belongs in the host's own chain FX slots instead, where it can be
+ * reordered and bypassed independently - and the solo chain's buffers cost
+ * ~900 KB of allocation inside create_instance, which runs on the SPI audio
+ * callback where allocation is forbidden.
  *
  * Dependencies (all header-only / static, permissive licenses):
  *   NeuralAudio  - MIT      - Mike Oliphant
@@ -28,8 +27,8 @@
  *   nlohmann/json- MIT      - Niels Lohmann
  *
  * Audio: 44100 Hz, 128 frames/block, stereo interleaved int16 in-place.
- * Chain: input gain -> NAM model -> 3-band EQ -> cab IR -> output gain,
- * mirroring real hardware (preamp -> tone stack -> power amp -> speaker).
+ * Chain: input gain -> NAM model -> DC block -> cab IR -> output gain,
+ * mirroring real hardware (preamp -> power amp -> speaker cab).
  * NAM models are mono - we sum L+R to mono, process in mono, then write
  * the result to both output channels.
  */
@@ -191,86 +190,6 @@ static int load_wav_ir(const char *path, float *out, int max_samples) {
 }
 
 /* ======================================================================== */
-/* 3-band EQ - RBJ Audio EQ Cookbook biquads (low/high shelf + mid bell)     */
-/* ======================================================================== */
-
-typedef struct {
-    float b0, b1, b2, a1, a2;
-    float z1, z2; /* Direct Form 2 Transposed state */
-} biquad_t;
-
-static inline void biquad_reset(biquad_t *bq) {
-    bq->z1 = 0.0f;
-    bq->z2 = 0.0f;
-}
-
-static inline float biquad_process(biquad_t *bq, float x) {
-    float y = bq->b0 * x + bq->z1;
-    bq->z1 = bq->b1 * x - bq->a1 * y + bq->z2;
-    bq->z2 = bq->b2 * x - bq->a2 * y;
-    return y;
-}
-
-static void biquad_set_low_shelf(biquad_t *bq, float freq, float gain_db, float sr) {
-    freq = clampf(freq, 10.0f, sr * 0.45f);
-    float A = powf(10.0f, gain_db / 40.0f);
-    float w0 = 2.0f * (float)M_PI * freq / sr;
-    float cosw0 = cosf(w0), sinw0 = sinf(w0);
-    float alpha = sinw0 / 2.0f * sqrtf((A + 1.0f / A) * (1.0f - 1.0f) + 2.0f); /* S = 1 shelf slope */
-    float two_sqrtA_alpha = 2.0f * sqrtf(A) * alpha;
-
-    float b0 = A * ((A + 1.0f) - (A - 1.0f) * cosw0 + two_sqrtA_alpha);
-    float b1 = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cosw0);
-    float b2 = A * ((A + 1.0f) - (A - 1.0f) * cosw0 - two_sqrtA_alpha);
-    float a0 = (A + 1.0f) + (A - 1.0f) * cosw0 + two_sqrtA_alpha;
-    float a1 = -2.0f * ((A - 1.0f) + (A + 1.0f) * cosw0);
-    float a2 = (A + 1.0f) + (A - 1.0f) * cosw0 - two_sqrtA_alpha;
-
-    bq->b0 = b0 / a0; bq->b1 = b1 / a0; bq->b2 = b2 / a0;
-    bq->a1 = a1 / a0; bq->a2 = a2 / a0;
-}
-
-static void biquad_set_high_shelf(biquad_t *bq, float freq, float gain_db, float sr) {
-    freq = clampf(freq, 10.0f, sr * 0.45f);
-    float A = powf(10.0f, gain_db / 40.0f);
-    float w0 = 2.0f * (float)M_PI * freq / sr;
-    float cosw0 = cosf(w0), sinw0 = sinf(w0);
-    float alpha = sinw0 / 2.0f * sqrtf((A + 1.0f / A) * (1.0f - 1.0f) + 2.0f);
-    float two_sqrtA_alpha = 2.0f * sqrtf(A) * alpha;
-
-    float b0 = A * ((A + 1.0f) + (A - 1.0f) * cosw0 + two_sqrtA_alpha);
-    float b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cosw0);
-    float b2 = A * ((A + 1.0f) + (A - 1.0f) * cosw0 - two_sqrtA_alpha);
-    float a0 = (A + 1.0f) - (A - 1.0f) * cosw0 + two_sqrtA_alpha;
-    float a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cosw0);
-    float a2 = (A + 1.0f) - (A - 1.0f) * cosw0 - two_sqrtA_alpha;
-
-    bq->b0 = b0 / a0; bq->b1 = b1 / a0; bq->b2 = b2 / a0;
-    bq->a1 = a1 / a0; bq->a2 = a2 / a0;
-}
-
-/* Fixed-Q peaking (bell) filter for the mid band. */
-#define EQ_MID_Q 0.9f
-
-static void biquad_set_peak(biquad_t *bq, float freq, float gain_db, float q, float sr) {
-    freq = clampf(freq, 10.0f, sr * 0.45f);
-    float A = powf(10.0f, gain_db / 40.0f);
-    float w0 = 2.0f * (float)M_PI * freq / sr;
-    float cosw0 = cosf(w0), sinw0 = sinf(w0);
-    float alpha = sinw0 / (2.0f * q);
-
-    float b0 = 1.0f + alpha * A;
-    float b1 = -2.0f * cosw0;
-    float b2 = 1.0f - alpha * A;
-    float a0 = 1.0f + alpha / A;
-    float a1 = -2.0f * cosw0;
-    float a2 = 1.0f - alpha / A;
-
-    bq->b0 = b0 / a0; bq->b1 = b1 / a0; bq->b2 = b2 / a0;
-    bq->a1 = a1 / a0; bq->a2 = a2 / a0;
-}
-
-/* ======================================================================== */
 /* Instance                                                                  */
 /* ======================================================================== */
 
@@ -332,12 +251,6 @@ typedef struct {
     /* DC blocker state (see process_block) */
     float dc_x1;
     float dc_y1;
-
-    /* 3-band EQ (mono, post cab IR) */
-    float eq_low_gain, eq_low_freq;
-    float eq_mid_gain, eq_mid_freq;
-    float eq_high_gain, eq_high_freq;
-    biquad_t eq_low, eq_mid, eq_high;
 
     /* Audio buffers (avoid per-block allocation) */
     float mono_in[FRAMES_PER_BLOCK];
@@ -579,21 +492,6 @@ static void load_model_async(nam_a2_instance_t *inst, const char *path) {
     pthread_attr_destroy(&attr);
 }
 
-/* --- EQ --- */
-
-static void update_eq(nam_a2_instance_t *inst) {
-    biquad_set_low_shelf(&inst->eq_low, inst->eq_low_freq, inst->eq_low_gain, SAMPLE_RATE);
-    biquad_set_peak(&inst->eq_mid, inst->eq_mid_freq, inst->eq_mid_gain, EQ_MID_Q, SAMPLE_RATE);
-    biquad_set_high_shelf(&inst->eq_high, inst->eq_high_freq, inst->eq_high_gain, SAMPLE_RATE);
-}
-
-static inline float eq_process(nam_a2_instance_t *inst, float x) {
-    float y = biquad_process(&inst->eq_low, x);
-    y = biquad_process(&inst->eq_mid, y);
-    y = biquad_process(&inst->eq_high, y);
-    return y;
-}
-
 /* ======================================================================== */
 /* audio_fx_api_v2 implementation                                            */
 /* ======================================================================== */
@@ -655,11 +553,6 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->pending_in_gain = 1.0f;
     inst->pending_out_gain = 1.0f;
 
-    /* EQ defaults (flat) */
-    inst->eq_low_gain = 0.0f;  inst->eq_low_freq = 100.0f;
-    inst->eq_mid_gain = 0.0f;  inst->eq_mid_freq = 800.0f;
-    inst->eq_high_gain = 0.0f; inst->eq_high_freq = 3000.0f;
-    update_eq(inst);
 
     /* Scan for model/cab files and load the first of each */
     scan_models(inst);
@@ -760,15 +653,6 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         inst->dc_x1 = x;
         inst->dc_y1 = y;
         inst->mono_out[i] = y;
-    }
-
-    /* 3-band EQ (mono, in place) - this is the amp's tone stack, so it sits
-     * BEFORE the cabinet, exactly as on real hardware: preamp -> tone stack
-     * -> power amp -> speaker cab. Running it after the IR instead would let
-     * the EQ boost back the top end the cabinet exists to roll off, which is
-     * where the harshness a real cab removes lives. */
-    for (int i = 0; i < n; i++) {
-        inst->mono_out[i] = eq_process(inst, inst->mono_out[i]);
     }
 
     /* Cab IR convolution - the speaker is the last acoustic stage */
@@ -879,13 +763,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (json_get_int(val, "cab_bypass", &i) == 0) inst->cab_bypass = (i != 0);
 
 
-        if (json_get_float(val, "eq_low_gain", &f) == 0) inst->eq_low_gain = clampf(f, -15.0f, 15.0f);
-        if (json_get_float(val, "eq_low_freq", &f) == 0) inst->eq_low_freq = clampf(f, 40.0f, 500.0f);
-        if (json_get_float(val, "eq_mid_gain", &f) == 0) inst->eq_mid_gain = clampf(f, -15.0f, 15.0f);
-        if (json_get_float(val, "eq_mid_freq", &f) == 0) inst->eq_mid_freq = clampf(f, 200.0f, 4000.0f);
-        if (json_get_float(val, "eq_high_gain", &f) == 0) inst->eq_high_gain = clampf(f, -15.0f, 15.0f);
-        if (json_get_float(val, "eq_high_freq", &f) == 0) inst->eq_high_freq = clampf(f, 1000.0f, 10000.0f);
-        update_eq(inst);
 
         return;
     }
@@ -913,18 +790,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         }
     } else if (strcmp(key, "cab_bypass") == 0) {
         inst->cab_bypass = (atoi(val) != 0);
-    } else if (strcmp(key, "eq_low_gain") == 0) {
-        inst->eq_low_gain = clampf(atof(val), -15.0f, 15.0f); update_eq(inst);
-    } else if (strcmp(key, "eq_low_freq") == 0) {
-        inst->eq_low_freq = clampf(atof(val), 40.0f, 500.0f); update_eq(inst);
-    } else if (strcmp(key, "eq_mid_gain") == 0) {
-        inst->eq_mid_gain = clampf(atof(val), -15.0f, 15.0f); update_eq(inst);
-    } else if (strcmp(key, "eq_mid_freq") == 0) {
-        inst->eq_mid_freq = clampf(atof(val), 200.0f, 4000.0f); update_eq(inst);
-    } else if (strcmp(key, "eq_high_gain") == 0) {
-        inst->eq_high_gain = clampf(atof(val), -15.0f, 15.0f); update_eq(inst);
-    } else if (strcmp(key, "eq_high_freq") == 0) {
-        inst->eq_high_freq = clampf(atof(val), 1000.0f, 10000.0f); update_eq(inst);
     }
 }
 
@@ -966,16 +831,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len,
             "{\"input_level\":%.4f,\"output_level\":%.4f,\"quality\":%d,"
             "\"model_index\":%d,\"model_name\":\"%s\","
-            "\"cab_index\":%d,\"cab_name\":\"%s\",\"cab_bypass\":%d,"
-            "\"eq_low_gain\":%.2f,\"eq_low_freq\":%.1f,"
-            "\"eq_mid_gain\":%.2f,\"eq_mid_freq\":%.1f,"
-            "\"eq_high_gain\":%.2f,\"eq_high_freq\":%.1f}",
+            "\"cab_index\":%d,\"cab_name\":\"%s\",\"cab_bypass\":%d}",
             inst->input_level, inst->output_level, inst->quality_lite,
             inst->current_model_index, inst->model_name,
-            inst->current_cab_index, inst->cab_name, inst->cab_bypass ? 1 : 0,
-            inst->eq_low_gain, inst->eq_low_freq,
-            inst->eq_mid_gain, inst->eq_mid_freq,
-            inst->eq_high_gain, inst->eq_high_freq);
+            inst->current_cab_index, inst->cab_name, inst->cab_bypass ? 1 : 0);
     }
 
     if (strcmp(key, "input_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->input_level);
@@ -1022,12 +881,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return written;
     }
 
-    if (strcmp(key, "eq_low_gain") == 0) return snprintf(buf, buf_len, "%.2f", inst->eq_low_gain);
-    if (strcmp(key, "eq_low_freq") == 0) return snprintf(buf, buf_len, "%.1f", inst->eq_low_freq);
-    if (strcmp(key, "eq_mid_gain") == 0) return snprintf(buf, buf_len, "%.2f", inst->eq_mid_gain);
-    if (strcmp(key, "eq_mid_freq") == 0) return snprintf(buf, buf_len, "%.1f", inst->eq_mid_freq);
-    if (strcmp(key, "eq_high_gain") == 0) return snprintf(buf, buf_len, "%.2f", inst->eq_high_gain);
-    if (strcmp(key, "eq_high_freq") == 0) return snprintf(buf, buf_len, "%.1f", inst->eq_high_freq);
 
     /* ui_hierarchy - returned dynamically (static shape, but kept alongside
      * the rest of the dynamic get_param handling for a single source of
@@ -1046,7 +899,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                         "{\"key\":\"quality\",\"label\":\"Quality\"},"
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"
                         "{\"level\":\"models\",\"label\":\"Choose Model\"},"
-                        "{\"level\":\"eq\",\"label\":\"3-Band EQ\"},"
                         "{\"level\":\"cabs\",\"label\":\"Choose Cabinet\"}"
                     "]"
                 "},"
@@ -1062,14 +914,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                     "\"select_param\":\"cab_index\","
                     "\"children\":null,\"knobs\":[],\"params\":[]"
                 "},"
-                "\"eq\":{"
-                    "\"label\":\"3-Band EQ\","
-                    "\"children\":null,"
-                    "\"knobs\":[\"eq_low_gain\",\"eq_low_freq\",\"eq_mid_gain\","
-                               "\"eq_mid_freq\",\"eq_high_gain\",\"eq_high_freq\"],"
-                    "\"params\":[\"eq_low_gain\",\"eq_low_freq\",\"eq_mid_gain\","
-                                "\"eq_mid_freq\",\"eq_high_gain\",\"eq_high_freq\"]"
-                "}"
+            "}"
             "}"
         "}";
         return snprintf(buf, buf_len, "%s", hierarchy);

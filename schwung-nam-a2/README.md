@@ -2,7 +2,7 @@
 
 Neural Amp Modeler audio effect module for [Schwung](https://github.com/charlesvestal/move-everything)
 on Ableton Move, based on [schwung-nam](https://github.com/charlesvestal/schwung-nam)
-by Charles Vestal. Adds a 3-band EQ and a Full/Lite quality switch.
+by Charles Vestal. Adds a Full/Lite quality switch and the model's own level calibration.
 
 Built on [NeuralAudio](https://github.com/mikeoliphant/NeuralAudio) by Mike
 Oliphant and [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore)
@@ -15,7 +15,7 @@ by Steven Atkinson.
 ## Signal chain
 
 ```
-Input Gain -> NAM Model -> DC Block -> 3-Band EQ -> Cab IR -> Output Gain
+Input Gain -> NAM Model -> DC Block -> Cab IR -> Output Gain
 ```
 
 For delay, reverb or chorus, add them as separate FX in the slot's own
@@ -30,14 +30,11 @@ allocation is forbidden) light.
 - **Full / Lite quality switch**: Lite halves the neural net's per-block
   work (processes at half rate, holds each output sample for two frames) to
   free up CPU headroom on Move's ARM core when a heavy model plus the cab
-  IR and EQ would otherwise miss the real-time budget.
+  IR would otherwise miss the real-time budget.
   Measure with the CPU page (`docs/DIAGNOSTICS.md` in the host repo) before
   relying on it - it's a genuine tradeoff, not free.
 - **Cabinet IR convolution**: apply cabinet impulse responses with optional
   bypass.
-- **3-band EQ**: independent gain + frequency for Low (shelf), Mid (bell)
-  and High (shelf) bands. It is the amp's tone stack, so it sits between
-  the model and the cab - the same place it does on real hardware.
 - **Model / cabinet browsers**: hierarchical file browsers for selecting
   `.nam` model files and `.wav` cabinet IRs.
 - **Input/Output level**: independent gain staging controls.
@@ -57,9 +54,6 @@ allocation is forbidden) light.
 | `output_level` | 0.0-1.0 | 0.5 | Output gain after the whole chain |
 | `quality` | Full / Lite | Full | Neural net CPU/quality tradeoff |
 | `cab_bypass` | 0-1 | 0 | Bypass cabinet IR convolution |
-| `eq_low_gain` / `eq_low_freq` | -15..15 dB / 40..500 Hz | 0 dB / 100 Hz | Low shelf |
-| `eq_mid_gain` / `eq_mid_freq` | -15..15 dB / 200..4000 Hz | 0 dB / 800 Hz | Mid bell |
-| `eq_high_gain` / `eq_high_freq` | -15..15 dB / 1000..10000 Hz | 0 dB / 3000 Hz | High shelf |
 
 ## Gain staging on a high-gain model
 

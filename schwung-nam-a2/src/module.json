@@ -3,7 +3,7 @@
   "name": "Nam A2",
   "abbrev": "NA2",
   "version": "0.1.0",
-  "description": "Neural Amp Modeler (A2) - neural amp emulation with a 3-band tone stack and cabinet IR",
+  "description": "Neural Amp Modeler (A2) - neural amp emulation with cabinet IR",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
   "dsp": "nam-a2.so",
@@ -33,10 +33,6 @@
               "label": "Choose Model"
             },
             {
-              "level": "eq",
-              "label": "3-Band EQ"
-            },
-            {
               "level": "cabs",
               "label": "Choose Cabinet"
             }
@@ -62,26 +58,6 @@
           "children": null,
           "knobs": [],
           "params": []
-        },
-        "eq": {
-          "label": "3-Band EQ",
-          "children": null,
-          "knobs": [
-            "eq_low_gain",
-            "eq_low_freq",
-            "eq_mid_gain",
-            "eq_mid_freq",
-            "eq_high_gain",
-            "eq_high_freq"
-          ],
-          "params": [
-            "eq_low_gain",
-            "eq_low_freq",
-            "eq_mid_gain",
-            "eq_mid_freq",
-            "eq_high_gain",
-            "eq_high_freq"
-          ]
         }
       }
     },
@@ -122,66 +98,6 @@
         "max": 1,
         "default": 0,
         "step": 1
-      },
-      {
-        "key": "eq_low_gain",
-        "name": "Low Gain",
-        "type": "float",
-        "min": -15.0,
-        "max": 15.0,
-        "default": 0.0,
-        "step": 0.5,
-        "unit": "dB"
-      },
-      {
-        "key": "eq_low_freq",
-        "name": "Low Freq",
-        "type": "float",
-        "min": 40.0,
-        "max": 500.0,
-        "default": 100.0,
-        "step": 5.0,
-        "unit": "Hz"
-      },
-      {
-        "key": "eq_mid_gain",
-        "name": "Mid Gain",
-        "type": "float",
-        "min": -15.0,
-        "max": 15.0,
-        "default": 0.0,
-        "step": 0.5,
-        "unit": "dB"
-      },
-      {
-        "key": "eq_mid_freq",
-        "name": "Mid Freq",
-        "type": "float",
-        "min": 200.0,
-        "max": 4000.0,
-        "default": 800.0,
-        "step": 25.0,
-        "unit": "Hz"
-      },
-      {
-        "key": "eq_high_gain",
-        "name": "High Gain",
-        "type": "float",
-        "min": -15.0,
-        "max": 15.0,
-        "default": 0.0,
-        "step": 0.5,
-        "unit": "dB"
-      },
-      {
-        "key": "eq_high_freq",
-        "name": "High Freq",
-        "type": "float",
-        "min": 1000.0,
-        "max": 10000.0,
-        "default": 3000.0,
-        "step": 100.0,
-        "unit": "Hz"
       }
     ]
   },
