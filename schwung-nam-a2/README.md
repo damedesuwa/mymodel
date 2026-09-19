@@ -61,6 +61,30 @@ allocation is forbidden) light.
 | `eq_mid_gain` / `eq_mid_freq` | -15..15 dB / 200..4000 Hz | 0 dB / 800 Hz | Mid bell |
 | `eq_high_gain` / `eq_high_freq` | -15..15 dB / 1000..10000 Hz | 0 dB / 3000 Hz | High shelf |
 
+## Gain staging on a high-gain model
+
+A high-gain amp model is heavily saturated, so its output level barely
+changes with input level - but the noise it amplifies does. Measured here
+with a 90s Dual Rectifier (red channel, 808 in front), a -60 dBFS input
+noise floor and a -20 dBFS guitar:
+
+| `input_level` | noise out | guitar out | SNR |
+|---------------|-----------|------------|------|
+| 0.0 (-24 dB)  | 0.0065    | 0.104      | 24.0 dB |
+| 0.3 (-13 dB)  | 0.023     | 0.106      | 13.3 dB |
+| 0.5 (-6 dB)   | 0.048     | 0.106      | 6.9 dB |
+| 1.0 (+12 dB)  | 0.076     | 0.106      | 2.9 dB |
+
+The guitar is the same level in every row. Only the hiss moves. So on a
+noisy input - Move's line in with a passive pickup, say - **turn
+`input_level` down**, and use `output_level` to make up the volume. At the
+0.5 default the hiss is 7 dB below the guitar, which reads as "white noise
+with the guitar faintly behind it" and is not a fault in the model.
+
+This module has no noise gate. A real high-gain rig always has one; add a
+gate ahead of this module in the slot's own FX chain, or keep the input
+level low.
+
 ## Adding Models and Cabinets
 
 Place `.nam` model files and `.wav` cabinet IRs in the module directory on

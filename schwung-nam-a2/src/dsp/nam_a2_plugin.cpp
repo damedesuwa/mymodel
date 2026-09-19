@@ -314,6 +314,18 @@ typedef struct {
     float input_gain;
     float output_gain;
 
+    /* The model's own calibration. A .nam file records the input level it
+     * was captured at and the output level that restores unity, and a model
+     * is only voiced correctly when they are applied - a high-gain amp's
+     * distortion character is a function of how hard its input is driven,
+     * so ignoring these plays the model at the wrong point on its own
+     * curve. Published by the loader thread alongside pending_model and
+     * adopted by the same swap, so the pair can never be mismatched. */
+    float model_in_gain;
+    float model_out_gain;
+    float pending_in_gain;
+    float pending_out_gain;
+
     /* Quality (0 = Full, 1 = Lite - runs the model at half rate) */
     int quality_lite;
 
@@ -336,6 +348,10 @@ typedef struct {
 /* ======================================================================== */
 
 /* Map 0-1 knob to dB range (-24 to +12), then to linear gain */
+static float db_to_gain(float db) {
+    return powf(10.0f, db / 20.0f);
+}
+
 static float knob_to_gain(float knob) {
     float db = -24.0f + knob * 36.0f;
     return powf(10.0f, db / 20.0f);
@@ -523,6 +539,16 @@ static void *model_loader_thread(void *arg) {
         plugin_log(msg);
     }
 
+    if (new_model) {
+        inst->pending_in_gain  = db_to_gain(new_model->GetRecommendedInputDBAdjustment());
+        inst->pending_out_gain = db_to_gain(new_model->GetRecommendedOutputDBAdjustment());
+    } else {
+        inst->pending_in_gain = 1.0f;
+        inst->pending_out_gain = 1.0f;
+    }
+
+    /* Release-stores the model last, so the two gains above are visible to
+     * any thread that sees the pointer. */
     inst->pending_model.store(new_model, std::memory_order_release);
     inst->loading.store(false, std::memory_order_release);
 
@@ -619,6 +645,10 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->input_gain = knob_to_gain(0.5f);
     inst->output_gain = knob_to_gain(0.5f);
     inst->quality_lite = 0;
+    inst->model_in_gain = 1.0f;
+    inst->model_out_gain = 1.0f;
+    inst->pending_in_gain = 1.0f;
+    inst->pending_out_gain = 1.0f;
 
     /* EQ defaults (flat) */
     inst->eq_low_gain = 0.0f;  inst->eq_low_freq = 100.0f;
@@ -673,6 +703,8 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     if (pending) {
         NeuralAudio::NeuralModel *old = inst->model;
         inst->model = pending;
+        inst->model_in_gain = inst->pending_in_gain;
+        inst->model_out_gain = inst->pending_out_gain;
         inst->pending_model.store(nullptr, std::memory_order_release);
         if (old) delete old;
     }
@@ -683,7 +715,7 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     int n = (frames > FRAMES_PER_BLOCK) ? FRAMES_PER_BLOCK : frames;
 
     /* Deinterleave stereo int16 -> mono float, with input gain */
-    float ig = inst->input_gain;
+    float ig = inst->input_gain * inst->model_in_gain;
     for (int i = 0; i < n; i++) {
         float l = audio_inout[i * 2]     / 32768.0f;
         float r = audio_inout[i * 2 + 1] / 32768.0f;
@@ -727,7 +759,7 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     }
 
     /* Output gain, then back to stereo int16 (mono source written to both) */
-    float og = inst->output_gain;
+    float og = inst->output_gain * inst->model_out_gain;
     for (int i = 0; i < n; i++) {
         float s = clampf(sanitize_sample(inst->mono_out[i] * og), -1.0f, 1.0f);
         int16_t sample = (int16_t)(s * 32767.0f);
