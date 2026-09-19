@@ -1097,8 +1097,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         /* 344 is every block. Appreciably less means the host is not calling
          * us for some of them, which is a different bug in a different
          * place. `!` still marks the CPU warning. */
-        return snprintf(buf, buf_len, "A2 %d%s",
-                        (int)(inst->rate_hz + 0.5), inst->cpu_warn ? " !" : "");
+        return snprintf(buf, buf_len, "%d%s",
+                        (int)(inst->rate_hz + 0.5), inst->cpu_warn ? "!" : "");
     }
     if (strcmp(key, "display_name") == 0) {
         /* Only while warning. Answering nothing the rest of the time keeps the
@@ -1108,8 +1108,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
 
     if (strcmp(key, "preset_name") == 0) {
-        if (buf_len > 0) buf[0] = '\0';
-        return 0;
+        /* The component editor's header reads preset_name FIRST and falls back
+         * to name, so the rate goes in both - whichever the screen asks for,
+         * it gets the number. Still never -1: see below. */
+        return snprintf(buf, buf_len, "%d%s",
+                        (int)(inst->rate_hz + 0.5), inst->cpu_warn ? "!" : "");
     }
 
     /* Bulk serialization for slot autosave. */
