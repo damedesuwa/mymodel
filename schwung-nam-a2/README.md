@@ -83,7 +83,7 @@ with the guitar faintly behind it" and is not a fault in the model.
 
 ### Noise gate
 
-There is one, on by default, and it goes where a real high-gain rig puts
+There is one, **off by default**, and it goes where a real high-gain rig puts
 it: **before** the amp. The amp is saturated, so gating after it would have
 to chase a signal already compressed to a near-constant level; gating
 before it simply hands the amp silence between notes. Same signals as the
@@ -113,12 +113,28 @@ character is a function of how hard its input is driven.
 
 ### If you hear the clean signal alongside the processed one
 
-Nothing in this module passes dry audio: the chain host calls
-`process_block` in place and this module overwrites the whole buffer, and
-the `linein` module replaces its slot buffer too. A dry guitar underneath
-the amp is Move monitoring the input itself, on a path Schwung does not
-own - its output is summed with Schwung's at the DAC. Turn Move's own
-input monitoring off, or take the input through `linein` only.
+Nothing in this module passes dry audio, and nothing between here and the
+speaker mixes any in on purpose. Traced: the chain host calls
+`process_block` in place and this module overwrites the whole buffer; the
+`linein` module replaces its slot buffer rather than adding to it; and the
+shim sums Schwung's ME bus **onto Move's own mailbox**
+(`schwung_shim.c`, `mailbox_audio[i] + scaled_me`). Whatever Move is
+already putting out goes to the DAC with Schwung's output on top of it, and
+if Move is monitoring its line input, that is a dry guitar.
+
+The giveaway is that it is level-dependent in one direction only. A
+saturated amp model's output level barely moves with input level - measured
+above, the same 0.076 at every input setting - while a dry monitor path
+tracks the guitar's volume knob exactly. So turning the guitar up raises
+the dry and not the amp, and the clean "appears" at high volume. It was
+there the whole time.
+
+**Global Settings -> Audio -> `Move->Schwung`** is the switch. It sets
+`rebuild_from_la`, which zeroes the mailbox and rebuilds it from the four
+per-track Link Audio channels, so anything Move mixes at master rather than
+into a track is gone by construction - the same reason Move's metronome
+disappears in that mode. It needs Link enabled in Move's own System
+Settings, and Schwung warns if it is not.
 
 ## Adding Models and Cabinets
 

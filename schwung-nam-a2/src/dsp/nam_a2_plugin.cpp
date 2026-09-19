@@ -689,10 +689,13 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->output_gain = knob_to_gain(0.5f);
     inst->quality_lite = 0;
 
-    /* Gate active by default at -55 dBFS. A high-gain model is unusable on
-     * a noisy input without one, and -55 dB is well below any played note
-     * while sitting above a typical line-in noise floor. */
-    inst->gate_bypass = 0;
+    /* Bypassed by default. The gate measures well (+13.9 dB of SNR with the
+     * guitar level untouched) but it is a second thing changing the signal,
+     * and anything being diagnosed upstream of it should be diagnosed
+     * without it in the way. Turn it on from Noise Gate -> Gate Bypass. */
+    inst->gate_bypass = 1;
+    inst->gate_gain = 1.0f;
+    inst->gate_target = 1.0f;
     /* -50 dB, not -55: the envelope follower tracks close to peak, so a
      * -60 dBFS noise floor reads about -61 dB on it, and a -55 dB threshold
      * with 6 dB of hysteresis shuts at -61 - right on top of the noise, so
