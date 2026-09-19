@@ -2,7 +2,7 @@
   "id": "nam-a2",
   "name": "Nam A2",
   "abbrev": "NA2",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Neural Amp Modeler (A2) - neural amp emulation with cabinet IR",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
