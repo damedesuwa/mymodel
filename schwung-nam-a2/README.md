@@ -15,7 +15,7 @@ by Steven Atkinson.
 ## Signal chain
 
 ```
-Input Gain -> Noise Gate -> NAM Model -> DC Block -> 3-Band EQ -> Cab IR -> Output Gain
+Input Gain -> NAM Model -> DC Block -> 3-Band EQ -> Cab IR -> Output Gain
 ```
 
 For delay, reverb or chorus, add them as separate FX in the slot's own
@@ -81,28 +81,9 @@ noisy input - Move's line in with a passive pickup, say - **turn
 0.5 default the hiss is 7 dB below the guitar, which reads as "white noise
 with the guitar faintly behind it" and is not a fault in the model.
 
-### Noise gate
-
-There is one, **off by default**, and it goes where a real high-gain rig puts
-it: **before** the amp. The amp is saturated, so gating after it would have
-to chase a signal already compressed to a near-constant level; gating
-before it simply hands the amp silence between notes. Same signals as the
-table above:
-
-| | silence | playing | SNR |
-|---|---------|---------|------|
-| gate off | 0.0233 | 0.0763 | 10.3 dB |
-| gate on (-50 dB) | 0.0047 | 0.0763 | **24.2 dB** |
-
-The guitar level is unchanged; only the hiss moves. A note played 20 dB
-softer (-40 dBFS in) still passes at full level.
-
-`gate_threshold` defaults to -50 dB rather than something lower because the
-detector tracks close to peak, so a -60 dBFS noise floor reads about -61 dB
-on it. At -55 dB the gate's own 6 dB of hysteresis shuts right on top of
-the noise and it hovers half-open: measured 17.1 dB SNR against -50 dB's
-24.2. Lower it if your input is quieter than that, raise it if hiss still
-gets through between notes, and `gate_bypass` turns it off.
+There is no noise gate here. On a noisy input, keep `input_level` low as
+above, or put a gate ahead of this module in the slot's own FX chain -
+`linein` has one.
 
 ### The model's own calibration
 

@@ -3,7 +3,7 @@
   "name": "Nam A2",
   "abbrev": "NA2",
   "version": "0.1.0",
-  "description": "Neural Amp Modeler (A2) - neural amp emulation with a noise gate, 3-band tone stack and cabinet IR",
+  "description": "Neural Amp Modeler (A2) - neural amp emulation with a 3-band tone stack and cabinet IR",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
   "dsp": "nam-a2.so",
@@ -31,10 +31,6 @@
             {
               "level": "models",
               "label": "Choose Model"
-            },
-            {
-              "level": "gate",
-              "label": "Noise Gate"
             },
             {
               "level": "eq",
@@ -86,20 +82,6 @@
             "eq_high_gain",
             "eq_high_freq"
           ]
-        },
-        "gate": {
-          "label": "Noise Gate",
-          "children": null,
-          "knobs": [
-            "gate_threshold",
-            "gate_release",
-            "gate_bypass"
-          ],
-          "params": [
-            "gate_threshold",
-            "gate_release",
-            "gate_bypass"
-          ]
         }
       }
     },
@@ -139,35 +121,6 @@
         "min": 0,
         "max": 1,
         "default": 0,
-        "step": 1
-      },
-      {
-        "key": "gate_threshold",
-        "name": "Gate Thresh",
-        "type": "float",
-        "min": -80.0,
-        "max": -20.0,
-        "default": -50.0,
-        "step": 1.0,
-        "unit": "dB"
-      },
-      {
-        "key": "gate_release",
-        "name": "Gate Release",
-        "type": "float",
-        "min": 20.0,
-        "max": 1000.0,
-        "default": 100.0,
-        "step": 10.0,
-        "unit": "ms"
-      },
-      {
-        "key": "gate_bypass",
-        "name": "Gate Bypass",
-        "type": "int",
-        "min": 0,
-        "max": 1,
-        "default": 1,
         "step": 1
       },
       {
