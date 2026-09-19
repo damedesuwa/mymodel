@@ -11,6 +11,7 @@
   "capabilities": {
     "chainable": true,
     "component_type": "audio_fx",
+    "requires_continuous_processing": true,
     "ui_hierarchy": {
       "levels": {
         "root": {
