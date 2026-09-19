@@ -223,6 +223,17 @@ into a track is gone by construction - the same reason Move's metronome
 disappears in that mode. It needs Link enabled in Move's own System
 Settings, and Schwung warns if it is not.
 
+## What ships in the box
+
+The tarball carries one model and one cab, and `create_instance` selects
+both, so the module makes a sound the moment it loads:
+
+- `models/Recto Modern - G8 Tube Spongy - DI.nam` — a SlimmableContainer
+  (A2) capture at 48 kHz, two tiers at 8 and 3 channels, which is what makes
+  `Quality: Slim` meaningful on it.
+- `cabs/TF MESA ST 4X12A V30 57.wav` — 24-bit mono, 48 kHz, 500 ms.
+  Resampled to 44100 and trimmed to `cab_length` at load.
+
 ## Adding Models and Cabinets
 
 Place `.nam` model files and `.wav` cabinet IRs in the module directory on
