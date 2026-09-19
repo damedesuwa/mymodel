@@ -1,0 +1,321 @@
+/*
+ * Nam A2c - the pedalboard face.
+ *
+ * Eight blocks on the bottom pad row, a row of eight boxes on the screen,
+ * and the encoders on whichever block is selected.
+ *
+ *   TAP a pad    stomp it - toggles that block in and out of circuit
+ *   HOLD a pad   select it for editing (the encoders follow)
+ *
+ * Tap is the stomp because that is the gesture the pedal metaphor already
+ * owns; hold is the one you do rarely, which is the right way round for a
+ * thing you step on.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT DO: re-implement the knob grid. The host's
+ * grid is the better editor and it is still there - leaving this screen
+ * returns to it. The encoders here drive a short, fixed list per block type,
+ * which is small precisely because the DSP is ours: a NAM block has two
+ * editable things, a cab has one, a drive has four.
+ */
+
+import { setLED, decodeDelta, invalidateLedCache } from '/data/UserData/schwung/shared/input_filter.mjs';
+
+const NUM_BLOCKS = 8;
+const PAD_BASE = 68;            /* bottom row, notes 68..75 */
+const HOLD_MS = 350;
+
+const CC_KNOB_BASE = 71;        /* knobs 1..8 are CC 71..78 */
+
+const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_DRIVE = 3;
+const TYPE_ABBREV = ['--', 'NAM', 'CAB', 'DRV'];
+
+/* Pad colour says the TYPE; brightness says whether it is in circuit.
+ * Selected blinks, because "which one am I editing" is a different question
+ * from "what is switched on" and one colour cannot answer both. */
+const Black = 0, White = 120;
+const TYPE_LED = [
+    { on: 0,   off: 0   },   /* Off    - dark */
+    { on: 127, off: 68  },   /* NAM    - red / dark red */
+    { on: 3,   off: 70  },   /* Cab    - orange / dark orange */
+    { on: 8,   off: 80  },   /* Drive  - yellow / dark yellow */
+];
+
+/* The encoders, per type. Short because the DSP is ours. Knob 1 is always
+ * Type, so a block can be re-typed without leaving the pedalboard. */
+const KNOBS = {};
+KNOBS[TYPE_OFF]   = [{ key: 'type', label: 'Type', kind: 'enum', n: 4 }];
+KNOBS[TYPE_NAM]   = [{ key: 'type', label: 'Type', kind: 'enum', n: 4 },
+                     { key: 'model', label: 'Model', kind: 'list' },
+                     { key: 'quality', label: 'Qual', kind: 'enum', n: 3,
+                       names: ['Full', 'Slim', 'Lite'] }];
+KNOBS[TYPE_CAB]   = [{ key: 'type', label: 'Type', kind: 'enum', n: 4 },
+                     { key: 'cab', label: 'Cab', kind: 'list' }];
+KNOBS[TYPE_DRIVE] = [{ key: 'type', label: 'Type', kind: 'enum', n: 4 },
+                     { key: 'dmode', label: 'Mode', kind: 'enum', n: 3,
+                       names: ['OD', 'Dist', 'Fuzz'] },
+                     { key: 'drive', label: 'Drive', kind: 'float' },
+                     { key: 'tone', label: 'Tone', kind: 'float' },
+                     { key: 'level', label: 'Level', kind: 'float' }];
+
+let sel = 0;
+let padDownAt = [];             /* when each pad went down, or 0 */
+let padHandled = [];            /* hold already fired, so the release is not a tap */
+let lastPaint = 0;
+
+/* A cache, because an IPC read is ~2.8 ms and a whole page render is 1.68 -
+ * so a read costs more than redrawing the screen. Nothing is read on the
+ * draw path: types and states are refreshed on a slow rotation and written
+ * through immediately when WE change them, which is the only way they can
+ * change while this screen is up. */
+const st = {
+    type: new Array(NUM_BLOCKS).fill(0),
+    on: new Array(NUM_BLOCKS).fill(1),
+    cpu: 0,
+    blockCpu: new Array(NUM_BLOCKS).fill(0),
+    val: {},                    /* "b3_drive" -> number */
+    names: { model: [], cab: [] },
+    rot: 0,
+};
+
+function getp(key) {
+    try { return host_module_get_param(key); } catch (e) { return null; }
+}
+function setp(key, val) {
+    try { host_module_set_param(key, String(val)); } catch (e) { }
+}
+function num(v, dflt) {
+    if (v === null || v === undefined || v === '') return dflt;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : dflt;
+}
+
+/* One read per tick, cycling. Eight blocks x four facts is 32 reads; doing
+ * them every frame would be 90 ms of IPC per second and the screen would
+ * crawl. A stop lands on each fact about twice a second, which is faster
+ * than anything here changes by itself. */
+function rotateRead() {
+    const steps = NUM_BLOCKS * 2 + 1;
+    const i = st.rot % steps;
+    st.rot++;
+    if (i === steps - 1) {
+        st.cpu = num(getp('cpu'), st.cpu);
+        return;
+    }
+    const b = i >> 1;
+    if ((i & 1) === 0) {
+        st.type[b] = num(getp('b' + (b + 1) + '_type'), st.type[b]);
+        st.on[b] = num(getp('b' + (b + 1) + '_on'), st.on[b] ? 0 : 1) === 0 ? 1 : 0;
+    } else {
+        st.blockCpu[b] = num(getp('b' + (b + 1) + '_cpu'), st.blockCpu[b]);
+    }
+}
+
+function selKey(k) { return 'b' + (sel + 1) + '_' + k; }
+
+function knobList() { return KNOBS[st.type[sel]] || KNOBS[TYPE_OFF]; }
+
+function readSelected() {
+    for (const s of knobList()) {
+        const k = selKey(s.key);
+        const v = getp(k);
+        if (v !== null && v !== '') st.val[k] = Number(v);
+    }
+}
+
+/* ------------------------------------------------------------------ draw */
+
+function drawBoxes() {
+    /* Eight boxes across 128 px: 14 wide, 2 apart, starting at 3. */
+    const W = 14, GAP = 2, X0 = 3, Y = 12, H = 20;
+    for (let b = 0; b < NUM_BLOCKS; b++) {
+        const x = X0 + b * (W + GAP);
+        const t = st.type[b];
+        const live = t !== TYPE_OFF && st.on[b];
+
+        if (b === sel) fill_rect(x - 1, Y - 2, W + 2, H + 4, 1);
+
+        if (live) {
+            fill_rect(x, Y, W, H, b === sel ? 0 : 1);
+        } else {
+            draw_rect(x, Y, W, H, b === sel ? 0 : 1);
+        }
+
+        const ink = live ? (b === sel ? 1 : 0) : (b === sel ? 0 : 1);
+        const lbl = TYPE_ABBREV[t];
+        print(x + ((W - text_width(lbl)) >> 1), Y + 3, lbl, ink);
+
+        /* A bypassed block that HAS a type still says so - it is the
+         * difference between "empty" and "switched off", and on a
+         * pedalboard that is the whole point of the picture. */
+        if (t !== TYPE_OFF && !st.on[b]) print(x + ((W - text_width('B')) >> 1), Y + 11, 'B', ink);
+        else if (t !== TYPE_OFF) {
+            const pc = String(Math.round(st.blockCpu[b]));
+            print(x + ((W - text_width(pc)) >> 1), Y + 11, pc, ink);
+        }
+    }
+}
+
+function drawHeader() {
+    const cpu = Math.round(st.cpu);
+    const left = 'A2c  blk ' + (sel + 1);
+    print(2, 1, left, 1);
+    const right = cpu + '%';
+    /* Over budget is the one thing on this screen worth inverting for. */
+    if (cpu >= 70) {
+        fill_rect(126 - text_width(right) - 2, 0, text_width(right) + 4, 9, 1);
+        print(128 - text_width(right) - 2, 1, right, 0);
+    } else {
+        print(128 - text_width(right) - 2, 1, right, 1);
+    }
+}
+
+function drawSelected() {
+    const list = knobList();
+    let x = 2;
+    const y = 40;
+    for (let i = 0; i < list.length && i < 4; i++) {
+        const s = list[i];
+        const v = st.val[selKey(s.key)];
+        let shown;
+        if (s.kind === 'float') shown = (v === undefined) ? '-' : String(Math.round(v * 100));
+        else if (s.kind === 'enum') shown = (v === undefined) ? '-'
+            : (s.names ? s.names[v] : TYPE_ABBREV[v]) || String(v);
+        else shown = (v === undefined) ? '-' : String(v + 1);
+        print(x, y, s.label, 1);
+        print(x, y + 10, shown, 1);
+        x += 32;
+    }
+    print(2, 56, 'tap=stomp  hold=edit', 1);
+}
+
+function draw() {
+    clear_screen();
+    drawHeader();
+    drawBoxes();
+    drawSelected();
+}
+
+/* ------------------------------------------------------------------ LEDs */
+
+function paintLeds() {
+    for (let b = 0; b < NUM_BLOCKS; b++) {
+        const t = st.type[b];
+        let c;
+        if (b === sel && (Date.now() % 700) < 350) c = White;
+        else if (t === TYPE_OFF) c = Black;
+        else c = st.on[b] ? TYPE_LED[t].on : TYPE_LED[t].off;
+        setLED(PAD_BASE + b, c);
+    }
+}
+
+/* ----------------------------------------------------------------- input */
+
+function stomp(b) {
+    const nowOn = st.on[b];
+    st.on[b] = nowOn ? 0 : 1;
+    /* Written through rather than waiting for the rotation to notice: the
+     * pad has to answer under the finger. */
+    setp('b' + (b + 1) + '_on', st.on[b] ? 0 : 1);
+}
+
+function select(b) {
+    sel = b;
+    setp('sel_block', b);
+    readSelected();
+}
+
+function onKnob(idx, ccValue) {
+    const list = knobList();
+    if (idx >= list.length) return;
+    const s = list[idx];
+    const d = decodeDelta(ccValue);
+    if (!d) return;
+    const k = selKey(s.key);
+    let v = st.val[k];
+
+    if (s.kind === 'float') {
+        v = (v === undefined ? 0.5 : v) + d * 0.02;
+        if (v < 0) v = 0;
+        if (v > 1) v = 1;
+        st.val[k] = v;
+        setp(k, v.toFixed(4));
+    } else {
+        const n = (s.kind === 'enum') ? s.n : 64;
+        v = (v === undefined ? 0 : v) + (d > 0 ? 1 : -1);
+        if (v < 0) v = 0;
+        if (s.kind === 'enum' && v > n - 1) v = n - 1;
+        st.val[k] = v;
+        setp(k, v);
+        if (s.key === 'type') {
+            st.type[sel] = v;
+            /* The knob list just changed under the encoders, so what they
+             * are pointing at has to be re-read rather than carried over
+             * from the type that is gone. */
+            readSelected();
+        }
+    }
+}
+
+/* ------------------------------------------------------------ lifecycle */
+
+globalThis.chain_ui = {
+    init() {
+        for (let i = 0; i < NUM_BLOCKS; i++) { padDownAt[i] = 0; padHandled[i] = false; }
+        /* The shim replays Move's own LED state on the way in, so what the
+         * cache believes is stale. Re-emit everything once. */
+        invalidateLedCache();
+        sel = num(getp('sel_block'), 0);
+        for (let b = 0; b < NUM_BLOCKS; b++) {
+            st.type[b] = num(getp('b' + (b + 1) + '_type'), 0);
+            st.on[b] = num(getp('b' + (b + 1) + '_on'), 0) === 0 ? 1 : 0;
+        }
+        st.cpu = num(getp('cpu'), 0);
+        readSelected();
+    },
+
+    tick() {
+        /* RESTATED, never memoised. The shim drops pad_block unilaterally
+         * from four SPI-callback sites that never tell JS, so a mirror
+         * latches and the pads die silently after the first Menu dismiss.
+         * It is idempotent against the SHM, so a per-frame restate is free. */
+        if (typeof host_pad_block === 'function') host_pad_block(1);
+
+        rotateRead();
+
+        /* A hold fires while the finger is still down - waiting for the
+         * release would make selecting feel like a slow tap. */
+        const now = Date.now();
+        for (let b = 0; b < NUM_BLOCKS; b++) {
+            if (padDownAt[b] && !padHandled[b] && now - padDownAt[b] >= HOLD_MS) {
+                padHandled[b] = true;
+                select(b);
+            }
+        }
+
+        paintLeds();
+        if (now - lastPaint >= 33) { lastPaint = now; draw(); }
+    },
+
+    onMidiMessageInternal(data) {
+        if (!data || data.length < 3) return;
+        const status = data[0] & 0xf0;
+        const d1 = data[1], d2 = data[2];
+
+        if (status === 0xb0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
+            onKnob(d1 - CC_KNOB_BASE, d2);
+            return;
+        }
+
+        if (d1 < PAD_BASE || d1 >= PAD_BASE + NUM_BLOCKS) return;
+        const b = d1 - PAD_BASE;
+
+        if (status === 0x90 && d2 > 0) {
+            padDownAt[b] = Date.now();
+            padHandled[b] = false;
+        } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
+            if (padDownAt[b] && !padHandled[b]) stomp(b);
+            padDownAt[b] = 0;
+            padHandled[b] = false;
+        }
+    },
+};

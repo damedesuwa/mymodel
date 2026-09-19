@@ -32,7 +32,7 @@
 
 #include "a2_common.h"
 
-#define NAM_A2C_BUILD_ID "blocks-1"
+#define NAM_A2C_BUILD_ID "pads-1"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
