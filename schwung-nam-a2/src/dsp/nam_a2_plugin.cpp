@@ -66,6 +66,16 @@ extern "C" {
 
 #define SAMPLE_RATE 44100.0f
 
+/* Move's per-frame slack, measured (docs/REALTIME_SAFETY.md and the shim's own
+ * spi_timing tally): the SPI transfer is 389 us of a ~2.37 ms frame, the rest
+ * is idle IRQ wait that our work eats into. The meter reports a percentage of
+ * this, so 100% is "this block alone consumed the whole frame". */
+#define FRAME_BUDGET_US 2370.0
+
+/* ~0.3 s to fall by half at 345 blocks/s: long enough to read off a screen
+ * that repaints ~4x/s, short enough to follow a quality change. */
+#define CPU_PEAK_DECAY 0.998
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -246,7 +256,23 @@ typedef struct {
     float pending_out_gain;
 
     /* Quality (0 = Full, 1 = Lite - runs the model at half rate) */
-    int quality_lite;
+    /* 0 = Full, 1 = Slim, 2 = Lite.
+     *
+     * Full and Slim are the MODEL'S OWN tiers, not ours. An A2 .nam is a
+     * SlimmableContainer: it carries several trained WaveNets and picks one
+     * by quality scale. The user's Dual Rectifier capture carries two, at 8
+     * and 3 channels, and until now this module always got the 8-channel one
+     * because NeuralModelLoader defaults its quality scale to 1.0 and nothing
+     * here ever moved it. Measured, the 3-channel tier costs 0.20x of the
+     * 8-channel one - and it is a properly trained smaller model rather than
+     * a rate hack, so it sounds like the amp rather than like a shortcut.
+     *
+     * Lite is the fallback that works on anything: half rate, zero-order
+     * hold. It is what a plain WaveNet .nam gets, since SetQualityScaleFactor
+     * is a no-op on a model with no tiers (NeuralModel's base implementation
+     * ignores it). Lite also asks for the low tier, so on an A2 model the
+     * three settings are a real ladder: 1.00x, 0.20x, 0.11x. */
+    int quality_mode;
 
     /* Which channel feeds the model. A NAM model is mono, so something has
      * to collapse the stereo input, and averaging L+R is the wrong default
@@ -267,6 +293,13 @@ typedef struct {
      * unusual case, so it is the option rather than the default. */
     int input_mode;   /* 0 = Left, 1 = Right, 2 = Sum L+R */
 
+    /* Block-time meter. clock_gettime is a vDSO read, not a syscall - the
+     * shim times its own callback the same way - so this costs tens of
+     * nanoseconds against a block that costs hundreds of microseconds.
+     * Peak-held with a slow decay rather than averaged: an average hides
+     * exactly the spike that drops a frame. */
+    double cpu_us_peak;
+
     /* DC blocker state (see process_block) */
     float dc_x1;
     float dc_y1;
@@ -284,6 +317,22 @@ typedef struct {
 /* ======================================================================== */
 
 /* Map 0-1 knob to dB range (-24 to +12), then to linear gain */
+/* Quality scale for each mode. Slim and Lite both ask for the model's low
+ * tier; Lite additionally halves the rate in process_block. */
+static float quality_scale_for(int mode) { return (mode == 0) ? 1.0f : 0.5f; }
+
+/* Runs on the SPI callback, so it must not prewarm. With the loader's default
+ * composite mode (LoadAll) every tier is prewarmed when the file is read, so
+ * switching is an atomic index store - IsQualityChangeRealtimeSafe says so,
+ * and is asked rather than assumed. A refusal leaves the tier alone instead
+ * of stalling the callback. */
+static void apply_quality(nam_a2_instance_t *inst) {
+    if (!inst->model) return;
+    float q = quality_scale_for(inst->quality_mode);
+    if (!inst->model->IsQualityChangeRealtimeSafe(q)) return;
+    inst->model->SetQualityScaleFactor(q);
+}
+
 static float db_to_gain(float db) {
     return powf(10.0f, db / 20.0f);
 }
@@ -577,7 +626,8 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
      * pair silently disagreed the moment the output default moved. */
     inst->input_gain  = knob_to_gain(inst->input_level);
     inst->output_gain = knob_to_gain(inst->output_level);
-    inst->quality_lite = 0;
+    inst->quality_mode = 0;   /* Full */
+    inst->cpu_us_peak = 0.0;
     inst->input_mode = 0;   /* Left */
 
     inst->model_in_gain = 1.0f;
@@ -628,11 +678,15 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     nam_a2_instance_t *inst = (nam_a2_instance_t *)instance;
     if (!inst) return;
 
+    struct timespec cpu_t0;
+    clock_gettime(CLOCK_MONOTONIC, &cpu_t0);
+
     /* Check for newly loaded model (lock-free swap) */
     NeuralAudio::NeuralModel *pending = inst->pending_model.load(std::memory_order_acquire);
     if (pending) {
         NeuralAudio::NeuralModel *old = inst->model;
         inst->model = pending;
+        apply_quality(inst);      /* a new model starts at the loader's 1.0 */
         inst->model_in_gain = inst->pending_in_gain;
         inst->model_out_gain = inst->pending_out_gain;
         inst->pending_model.store(nullptr, std::memory_order_release);
@@ -640,7 +694,7 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     }
 
     /* No model loaded - pass through untouched (matches schwung-nam) */
-    if (!inst->model) return;
+    if (!inst->model) { inst->cpu_us_peak *= CPU_PEAK_DECAY; return; }
 
     int n = (frames > FRAMES_PER_BLOCK) ? FRAMES_PER_BLOCK : frames;
 
@@ -658,7 +712,7 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     /* NAM model - Full runs every sample; Lite halves the neural net's work
      * by averaging input pairs, running the model at half rate, and holding
      * each output sample for two frames. */
-    if (inst->quality_lite && n >= 2) {
+    if (inst->quality_mode == 2 && n >= 2) {
         int half = n / 2;
         for (int i = 0; i < half; i++) {
             inst->mono_in_lite[i] = 0.5f * (inst->mono_in[2 * i] + inst->mono_in[2 * i + 1]);
@@ -702,6 +756,17 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         int16_t sample = (int16_t)(s * 32767.0f);
         audio_inout[i * 2]     = sample;
         audio_inout[i * 2 + 1] = sample;
+    }
+
+    {
+        struct timespec cpu_t1;
+        clock_gettime(CLOCK_MONOTONIC, &cpu_t1);
+        double us = (cpu_t1.tv_sec - cpu_t0.tv_sec) * 1e6
+                  + (cpu_t1.tv_nsec - cpu_t0.tv_nsec) / 1e3;
+        /* Peak-hold with a slow decay. An average would hide the one block
+         * that overruns, which is the only block worth seeing. */
+        double decayed = inst->cpu_us_peak * CPU_PEAK_DECAY;
+        inst->cpu_us_peak = (us > decayed) ? us : decayed;
     }
 }
 
@@ -776,7 +841,10 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             inst->output_level = clampf(f, 0.0f, 1.0f);
             inst->output_gain  = knob_to_gain(inst->output_level);
         }
-        if (json_get_int(val, "quality", &i) == 0) inst->quality_lite = (i != 0);
+        if (json_get_int(val, "quality", &i) == 0) {
+            inst->quality_mode = (i < 0) ? 0 : (i > 2) ? 2 : i;
+            apply_quality(inst);
+        }
         if (json_get_int(val, "input_mode", &i) == 0)
             inst->input_mode = (i < 0) ? 0 : (i > 2) ? 2 : i;
         if (json_get_int(val, "input_mode", &i) == 0)
@@ -816,7 +884,9 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         int m = atoi(val);
         inst->input_mode = (m < 0) ? 0 : (m > 2) ? 2 : m;
     } else if (strcmp(key, "quality") == 0) {
-        inst->quality_lite = (atoi(val) != 0);
+        int m = atoi(val);
+        inst->quality_mode = (m < 0) ? 0 : (m > 2) ? 2 : m;
+        apply_quality(inst);
     } else if (strcmp(key, "model_index") == 0) {
         int idx = atoi(val);
         if (idx >= 0 && idx < inst->model_count && idx != inst->current_model_index) {
@@ -875,7 +945,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             "\"input_mode\":%d,"
             "\"model_index\":%d,\"model_name\":\"%s\","
             "\"cab_index\":%d,\"cab_name\":\"%s\",\"cab_bypass\":%d}",
-            inst->input_level, inst->output_level, inst->quality_lite,
+            inst->input_level, inst->output_level, inst->quality_mode,
             inst->input_mode,
             inst->current_model_index, inst->model_name,
             inst->current_cab_index, inst->cab_name, inst->cab_bypass ? 1 : 0);
@@ -884,7 +954,17 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "input_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->input_level);
     if (strcmp(key, "output_level") == 0) return snprintf(buf, buf_len, "%.2f", inst->output_level);
     if (strcmp(key, "input_mode") == 0) return snprintf(buf, buf_len, "%d", inst->input_mode);
-    if (strcmp(key, "quality") == 0) return snprintf(buf, buf_len, "%d", inst->quality_lite);
+    if (strcmp(key, "quality") == 0) return snprintf(buf, buf_len, "%d", inst->quality_mode);
+
+    /* Read-only, and declared "live" so the grid re-reads it every tick
+     * instead of once per knob rotation. Percent of Move's per-frame slack.
+     * It stops moving when the slot goes silent, because the shim skips a
+     * silent slot's processing - that is the meter telling the truth, not a
+     * frozen reading. */
+    if (strcmp(key, "cpu") == 0)
+        return snprintf(buf, buf_len, "%.1f", 100.0 * inst->cpu_us_peak / FRAME_BUDGET_US);
+    if (strcmp(key, "cpu_us") == 0)
+        return snprintf(buf, buf_len, "%.0f", inst->cpu_us_peak);
 
     if (strcmp(key, "model_name") == 0)
         return snprintf(buf, buf_len, "%s", inst->model_name[0] ? inst->model_name : "(none)");
@@ -937,10 +1017,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                 "\"root\":{"
                     "\"label\":\"Nam A2\","
                     "\"children\":null,"
-                    "\"knobs\":[\"input_level\",\"output_level\",\"input_mode\",\"quality\"],"
+                    "\"knobs\":[\"input_level\",\"output_level\",\"cpu\",\"input_mode\",\"quality\"],"
                     "\"params\":["
                         "{\"key\":\"input_level\",\"label\":\"Input\"},"
                         "{\"key\":\"output_level\",\"label\":\"Output\"},"
+                        "{\"key\":\"cpu\",\"short_name\":\"CPU\",\"label\":\"CPU Load\"},"
                         "{\"key\":\"input_mode\",\"short_name\":\"In Ch\",\"label\":\"Input Channel\"},"
                         "{\"key\":\"quality\",\"label\":\"Quality\"},"
                         "{\"key\":\"cab_bypass\",\"label\":\"Cab Bypass\"},"

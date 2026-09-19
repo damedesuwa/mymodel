@@ -27,12 +27,32 @@ allocation is forbidden) light.
 
 - **Neural amp/effect modeling**: run trained `.nam` / `.aidax` models for
   realistic amp and pedal emulation.
-- **Full / Lite quality switch**: Lite halves the neural net's per-block
-  work (processes at half rate, holds each output sample for two frames) to
-  free up CPU headroom on Move's ARM core when a heavy model plus the cab
-  IR would otherwise miss the real-time budget.
-  Measure with the CPU page (`docs/DIAGNOSTICS.md` in the host repo) before
-  relying on it - it's a genuine tradeoff, not free.
+- **Quality: Full / Slim / Lite.** Full and Slim are the *model's* own
+  tiers, not ours. An A2 `.nam` is a SlimmableContainer carrying several
+  trained WaveNets, picked by quality scale - a Dual Rectifier capture here
+  carries two, at 8 and 3 channels. Slim asks for the low tier, which is a
+  properly trained smaller model rather than a rate hack. Lite additionally
+  halves the rate and is the fallback that works on a plain WaveNet `.nam`,
+  where `SetQualityScaleFactor` is a no-op.
+
+  Measured on that capture, per 128-frame block:
+
+  | | x86 | vs Full | Move (ARM) |
+  |---|-----|---------|------------|
+  | Full (q 1.0) | 173 us | 1.00x | **~1190 us** |
+  | Slim (q 0.5) | 32 us | 0.18x | **~219 us** |
+  | Lite (q 0.5 + half rate) | 18 us | 0.10x | ~120 us |
+
+  The Move column is the measured `Slot fx max(us)` for Full, scaled by the
+  x86 ratios. Against Move's ~2370 us frame slack, Full is about half the
+  frame on its own.
+
+- **CPU meter.** `cpu` is a read-only, `live` percentage of that frame slack,
+  sitting beside Input and Output on the first page. Peak-held with a slow
+  decay rather than averaged, because an average hides the one block that
+  overruns. It stops moving when the slot goes silent - the shim skips a
+  silent slot - which is the meter being honest, not stuck.
+
 - **Cabinet IR convolution**: apply cabinet impulse responses with optional
   bypass.
 - **Model / cabinet browsers**: hierarchical file browsers for selecting
@@ -53,7 +73,8 @@ allocation is forbidden) light.
 | `input_level` | 0.0-1.0 | 0.5 | Input gain before model processing |
 | `input_mode` | Left / Right / Sum L+R | Left | Which channel feeds the mono model |
 | `output_level` | 0.0-1.0 | 0.85 | Output gain after the whole chain |
-| `quality` | Full / Lite | Full | Neural net CPU/quality tradeoff |
+| `quality` | Full / Slim / Lite | Full | Model's own tier, then a rate fallback |
+| `cpu` | 0-100 % | — | Read-only: worst recent block, as % of frame slack |
 | `cab_bypass` | 0-1 | 0 | Bypass cabinet IR convolution |
 
 ## Move monitors its own line input, and you cannot turn that off from here
