@@ -85,6 +85,11 @@ extern "C" {
  * spi_timing tally): the SPI transfer is 389 us of a ~2.37 ms frame, the rest
  * is idle IRQ wait that our work eats into. The meter reports a percentage of
  * this, so 100% is "this block alone consumed the whole frame". */
+/* Stamped into the log at create_instance so a report can be tied to a
+ * build. Four rounds of this hunt were spent on reports that may or may not
+ * have been from the build being discussed. */
+#define NAM_A2_BUILD_ID "diag-2"
+
 #define FRAME_BUDGET_US 2370.0
 
 /* ~0.3 s to fall by half at 345 blocks/s: long enough to read off a screen
@@ -658,8 +663,12 @@ static void apply_cab_ir(nam_a2_instance_t *inst, float *audio, int frames) {
  * would be a lock the callback could wait on. */
 static void *diag_thread(void *arg) {
     nam_a2_instance_t *inst = (nam_a2_instance_t *)arg;
+    int first = 1;
     while (!inst->diag_stop) {
-        struct timespec ts = { 2, 0 };
+        /* First line goes out at once: a capture that only covers a few
+         * seconds must still contain one. */
+        struct timespec ts = { first ? 0 : 2, first ? 200000000L : 0 };
+        first = 0;
         nanosleep(&ts, NULL);
         if (inst->diag_stop) break;
 
@@ -814,11 +823,15 @@ static void* v2_create_instance(const char *module_dir, const char *config_json)
     inst->pending_out_gain = 1.0f;
 
 
+    plugin_log("Nam A2 BUILD " NAM_A2_BUILD_ID);
+
     {   /* Detached would race destroy_instance; this one is joined. */
         pthread_attr_t at; pthread_attr_init(&at);
         inst->diag_stop = 0;
         inst->diag_running = (pthread_create(&inst->diag_tid, &at, diag_thread, inst) == 0);
         pthread_attr_destroy(&at);
+        if (!inst->diag_running)
+            plugin_log("Nam A2: diag thread FAILED to start");
     }
 
     /* Scan for model/cab files and load the first of each */
