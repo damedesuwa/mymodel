@@ -57,6 +57,55 @@ int main(int argc, char **argv) {
     }
     if (fx_count < 16) { printf("FAIL fx_list parsed %d pedals\n", fx_count); return 1; }
 
+    /* WHERE EACH KNOB SHOULD SIT FOR A FAIR TEST, asked of the plugin.
+     *
+     * Everything used to go to 0.6, which was fine while every pedal's
+     * third knob was a 0-100 "Level". With real pedals it is not: a 1176's
+     * Output is 0..+24 dB and 0.6 of that is +14 dB, so the harness was
+     * calling four pedals broken for doing exactly what their makeup knob
+     * says on the tin. A knob spanning dB through zero belongs at zero;
+     * one that only adds (a Boost's 0..20 dB) belongs at the bottom;
+     * anything else at 0.6, which is a normal setting rather than a
+     * neutral one. The ranges come from fx_specs, so this cannot drift
+     * away from what the DSP reads. */
+    static char specs[24576];
+    api->get_param(in, "fx_specs", specs, sizeof(specs));
+    static float neutral[64][5];
+    for (int i = 0; i < 64; i++) for (int k = 0; k < 5; k++) neutral[i][k] = 0.6f;
+    {
+        const char *p = specs; int pedal = -1;
+        while (*p) {
+            if (!strncmp(p, "\"k\":[", 5)) {
+                pedal++; p += 5;
+                for (int k = 0; k < 5 && *p; k++) {
+                    while (*p == ' ' || *p == ',') p++;
+                    if (!strncmp(p, "null", 4)) { p += 4; continue; }
+                    const char *end = strchr(p, '}');
+                    if (!end) break;
+                    char unit[8] = "";
+                    const char *u = strstr(p, "\"u\":\"");
+                    if (u && u < end) {
+                        u += 5; int n2 = 0;
+                        while (*u && *u != '"' && n2 < 7) unit[n2++] = *u++;
+                        unit[n2] = 0;
+                    }
+                    float lo = 0, hi = 1;
+                    const char *l = strstr(p, "\"lo\":"), *h = strstr(p, "\"hi\":");
+                    if (l && l < end) lo = (float)atof(l + 5);
+                    if (h && h < end) hi = (float)atof(h + 5);
+                    if (pedal >= 0 && pedal < 64 && !strcmp(unit, "dB")) {
+                        neutral[pedal][k] = (lo < 0 && hi > 0)
+                            ? (0.0f - lo) / (hi - lo)     /* 0 dB */
+                            : (lo >= 0 ? 0.0f : 0.6f);    /* makeup-only: none */
+                    }
+                    p = end + 1;
+                }
+                continue;
+            }
+            p++;
+        }
+    }
+
     printf("%-3s %-12s %8s %8s %8s %6s %7s\n",
            "id", "pedal", "out pk", "out rms", "tail pk", "nan", "us/blk");
 
@@ -65,8 +114,10 @@ int main(int argc, char **argv) {
         char v[8]; snprintf(v, sizeof(v), "%d", id);
         api->set_param(in, "b1_fx", v);
         for (int k = 1; k <= 5; k++) {
-            char kk[12]; snprintf(kk, sizeof(kk), "b1_p%d", k);
-            api->set_param(in, kk, "0.6");
+            char kk[12], vv[16];
+            snprintf(kk, sizeof(kk), "b1_p%d", k);
+            snprintf(vv, sizeof(vv), "%.4f", neutral[id][k - 1]);
+            api->set_param(in, kk, vv);
         }
 
         int16_t a[128 * 2];
@@ -140,7 +191,7 @@ int main(int argc, char **argv) {
         double swing[2] = {0, 0};
         const int BLK = 400;
         for (int which = 0; which < 2; which++) {
-            api->set_param(in, "b1_fx", which ? "14" : "8");   /* Doubler : Chorus */
+            api->set_param(in, "b1_fx", which ? "36" : "23");  /* Doubler : Chorus */
             for (int k = 1; k <= 5; k++) {
                 char kk[12]; snprintf(kk, sizeof(kk), "b1_p%d", k);
                 api->set_param(in, kk, "0.5");
@@ -179,6 +230,51 @@ int main(int argc, char **argv) {
         if (!(swing[1] < swing[0])) {
             printf("   <-- the doubler moves as much as the chorus does\n");
             fails++;
+        }
+    }
+
+    /* ---- THE DOUBLER IS THE ONE STEREO PEDAL -------------------------
+     *
+     * Two mono attempts at it were both reported as unnatural, and the
+     * second report was right: two copies summed to mono ARE a comb
+     * filter on one signal, and no tuning makes a comb filter sound like
+     * a room. Width is the fix, so width is what is asserted - at Width 0
+     * the output must be mono (the collapse has to keep working, it is a
+     * real requirement) and at Width 100 the two channels must differ.
+     */
+    {
+        api->set_param(in, "b1_fx", "36");
+        api->set_param(in, "b1_p1", "0.5");   /* Delay  */
+        api->set_param(in, "b1_p2", "0.4");   /* Detune */
+        api->set_param(in, "b1_p4", "0.8");   /* Level  */
+        double diff[2] = {0, 0};
+        for (int which = 0; which < 2; which++) {
+            api->set_param(in, "b1_p3", which ? "1.0" : "0.0");   /* Width */
+            int16_t a[128 * 2];
+            double d = 0, e = 0;
+            for (int blk = 0; blk < 300; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    double t = (blk * 128.0 + i) / 44100.0;
+                    double env = exp(-fmod(t, 0.7) * 3.0);
+                    a[i * 2] = a[i * 2 + 1] =
+                        (int16_t)(0.35 * env * sin(2 * M_PI * 220.0 * t) * 20000);
+                }
+                api->process_block(in, a, 128);
+                if (blk < 40) continue;                 /* let the line fill */
+                for (int i = 0; i < 128; i++) {
+                    double l = a[i * 2] / 32768.0, r = a[i * 2 + 1] / 32768.0;
+                    d += (l - r) * (l - r);
+                    e += (l + r) * (l + r) * 0.25;
+                }
+            }
+            diff[which] = (e > 1e-12) ? sqrt(d / e) : 0;
+        }
+        printf("doubler L-R: width 0 -> %.4f, width 100 -> %.4f\n", diff[0], diff[1]);
+        if (diff[0] > 1e-6) {
+            printf("   <-- Width 0 does not collapse to mono\n"); fails++;
+        }
+        if (diff[1] < 0.15) {
+            printf("   <-- Width 100 produces no stereo difference\n"); fails++;
         }
     }
 

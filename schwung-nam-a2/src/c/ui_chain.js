@@ -29,135 +29,178 @@ const CC_JOG_TURN = 14;
 const CC_JOG_CLICK = 3;
 
 const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3;
-const TYPE_ABBREV = ['--', 'NAM', 'CAB', 'FX'];
 
-/* THE TREE. Coarse to fine, one knob per level, which is the whole of what
- * was asked for: knob 1 picks what KIND of thing this block is, knob 2 the
- * family, knob 3 the pedal. Sixteen pedals on one knob would be a knob you
- * have to count on.
+/*
+ * ONE KNOB DECIDES WHAT THE BLOCK IS, and it used to take two.
  *
- * The ids are the DSP's flat wire values and the grouping is ours - the
- * plugin does not know these families exist, so adding a pedal is a number
- * in one of these rows plus a case in fx_block_process. */
-const FX_TREE = [
-    { name: 'Drive',   items: [0, 1, 2, 3] },              /* OD Dist Fuzz Boost   */
-    { name: 'Dynamic', items: [4, 5, 25] },                /* Comp Gate Limiter    */
-    { name: 'Filter',  items: [6, 7, 19, 20] },            /* EQ AWah Wah LoFi     */
-    { name: 'Mod',     items: [8, 16, 9, 17, 10, 18] },    /* Cho Fla Pha Vib Tre Rot */
-    { name: 'Time',    items: [11, 12, 23, 13, 24] },      /* Dly Slap Tape Rev Spring */
-    { name: 'Pitch',   items: [14, 15, 21, 22] },          /* Dbl Det Oct Ring     */
+ * Knob 1 was Type (Off / NAM / Cab / FX) and knob 2 was the FX family, so
+ * a block cost three encoders to address - and once the pedals became
+ * real ones, several of them needed FIVE of their own. Three for
+ * navigation plus five for the pedal plus two for the board's levels is
+ * ten knobs on a device with eight.
+ *
+ * Type and family are the same question asked twice, so they are one knob
+ * now: Off, NAM, Cab, and then the six pedal families. That is strictly
+ * fewer concepts AND it frees the encoder the 1176 needed - the two
+ * reasons agree, which is usually the sign that a merge is right rather
+ * than convenient.
+ */
+const CATS = [
+    { name: 'Off',    type: TYPE_OFF },
+    { name: 'NAM',    type: TYPE_NAM },
+    { name: 'Cab',    type: TYPE_CAB },
+    { name: 'OD',     type: TYPE_FX, items: [0, 1, 2, 3, 4] },
+    { name: 'Dist',   type: TYPE_FX, items: [5, 6, 7, 8, 9] },
+    { name: 'Fuzz',   type: TYPE_FX, items: [10, 11] },
+    { name: 'Boost',  type: TYPE_FX, items: [12] },
+    { name: 'Dyn',    type: TYPE_FX, items: [13, 14, 15, 16, 17, 18] },
+    { name: 'Filter', type: TYPE_FX, items: [19, 20, 21, 22] },
+    { name: 'Mod',    type: TYPE_FX, items: [23, 24, 25, 26, 27, 28, 29] },
+    { name: 'Time',   type: TYPE_FX, items: [30, 31, 32, 33, 34, 35] },
+    { name: 'Pitch',  type: TYPE_FX, items: [36, 37, 38, 39] },
 ];
 
-/* What each pedal's five knobs are called. Unnamed ones are not offered -
- * a knob that does nothing is worse than a knob that is not there. */
-const FX_PARAM_NAMES = [
-    ['Drive', 'Tone', 'Level'],      /* 0  Overdrive  */
-    ['Dist', 'Tone', 'Level'],       /* 1  Distortion */
-    ['Fuzz', 'Tone', 'Level'],       /* 2  Fuzz       */
-    ['Boost', 'Tone', 'Level'],      /* 3  Boost      */
-    ['Thresh', 'Ratio', 'Makeup'],   /* 4  Compressor */
-    ['Thresh', 'Release'],           /* 5  Gate       */
-    ['Bass', 'Mid', 'Treble'],       /* 6  EQ         */
-    ['Sens', 'Range', 'Mix'],        /* 7  Auto Wah   */
-    ['Rate', 'Depth', 'Mix'],        /* 8  Chorus     */
-    ['Rate', 'Depth', 'Mix'],        /* 9  Phaser     */
-    ['Rate', 'Depth'],               /* 10 Tremolo    */
-    ['Time', 'Fdbk', 'Mix'],         /* 11 Delay      */
-    ['Time', 'Fdbk', 'Mix'],         /* 12 Slapback   */
-    ['Size', 'Damp', 'Mix'],         /* 13 Reverb     */
-    ['Spread', 'Drift', 'Level'],    /* 14 Doubler    */
-    ['Amount', '', 'Mix'],           /* 15 Detune     */
-    ['Rate', 'Depth', 'Fdbk'],       /* 16 Flanger    */
-    ['Rate', 'Depth'],               /* 17 Vibrato    */
-    ['Speed', 'Depth', 'Mix'],       /* 18 Rotary     */
-    ['Pedal', 'Q', 'Mix'],           /* 19 Wah        */
-    ['Bits', 'Rate', 'Mix'],         /* 20 Lo-Fi      */
-    ['Sub', 'Tone', 'Mix'],          /* 21 Octave     */
-    ['Freq', '', 'Mix'],             /* 22 Ring Mod   */
-    ['Time', 'Fdbk', 'Mix'],         /* 23 Tape Echo  */
-    ['Decay', 'Tone', 'Mix'],        /* 24 Spring     */
-    ['Ceil', 'Rel'],                 /* 25 Limiter    */
-];
-
-function fxCategoryOf(id) {
-    for (let c = 0; c < FX_TREE.length; c++)
-        if (FX_TREE[c].items.indexOf(id) >= 0) return c;
-    return 0;
+function catOfBlock(b) {
+    const t = st.type[b];
+    if (t !== TYPE_FX) return (t === TYPE_NAM) ? 1 : (t === TYPE_CAB) ? 2 : 0;
+    const id = st.fx[b] | 0;
+    for (let c = 3; c < CATS.length; c++)
+        if (CATS[c].items.indexOf(id) >= 0) return c;
+    return 3;
 }
 
-/* Pad colour says the TYPE; brightness says whether it is in circuit.
- * Selected blinks, because "which one am I editing" is a different question
- * from "what is switched on" and one colour cannot answer both. */
+/* Pad colour says the CATEGORY; brightness says whether it is in circuit.
+ * Selected blinks, because "which one am I editing" is a different
+ * question from "what is switched on" and one colour cannot answer both. */
 const Black = 0, White = 120;
 const TYPE_LED = [
-    { on: 0,   off: 0   },   /* Off    - dark */
-    { on: 127, off: 68  },   /* NAM    - red / dark red */
-    { on: 3,   off: 70  },   /* Cab    - orange / dark orange */
-    { on: 8,   off: 80  },   /* Drive  - yellow / dark yellow */
+    { on: 0,   off: 0   },   /* Off  - dark */
+    { on: 127, off: 68  },   /* NAM  - red */
+    { on: 3,   off: 70  },   /* Cab  - orange */
+    { on: 8,   off: 80  },   /* FX   - yellow */
 ];
 
-/* The encoders, per type. Short because the DSP is ours. Knob 1 is always
- * Type, so a block can be re-typed without leaving the pedalboard. */
-const TYPE_KNOB = { key: 'type', label: 'Type', kind: 'enum', n: 4 };
-
-/* KNOBS 7 AND 8 ARE THE BOARD'S, not the block's.
+/*
+ * KNOBS 7 AND 8 ARE THE BOARD'S - except that a five-knob pedal needs one
+ * of them, so only ONE of them is.
  *
- * Nothing here ever needs more than six: a pedal is Type, Group, Pedal and
- * at most three of its own. So the last two encoders are free on every
- * screen, permanently, and the two controls that belong to the whole board
- * rather than to one block go there - where they are always in the same
- * place and never scroll.
- *
- * This is also the answer to "there is no input or output level": the
- * plugin has had in_level and out_level since the first build, but with no
- * hierarchy there is no host grid to show them, so they were reachable
- * from nowhere. */
-const GLOBAL_KNOBS = [
-    { key: 'in_level',  label: 'In',  kind: 'float', global: true },
-    { key: 'out_level', label: 'Out', kind: 'float', global: true },
-];
+ * Out is the level you ride, so it keeps a fixed encoder. In is a
+ * set-once control and lives on the menu, where it costs a jog click and
+ * cannot be nudged by accident mid-take.
+ */
+const OUT_KNOB = { key: 'out_level', label: 'Out', kind: 'float', global: true };
 const GAP_KNOB = { key: '', label: '', kind: 'gap' };
 const NUM_KNOBS = 8;
 
-/* Which param a spec actually addresses. A block's keys are prefixed with
- * its number; the board's are not, and using selKey on one writes
- * `b3_in_level`, which nothing serves and nothing reports. */
 function fullKey(spec) { return spec.global ? spec.key : selKey(spec.key); }
 
-/* Built per block rather than declared, because past knob 3 the list is a
- * property of the PEDAL and there are twenty-six of them. */
+/* ------------------------------------------------- the served knob table */
+
+/*
+ * WHAT A KNOB MEANS COMES FROM THE PLUGIN, not from a copy here.
+ *
+ * `fx_specs` is FX_PEDALS in a2_fx.h, serialised - every knob's name,
+ * unit, ends and curve, read once at load exactly as the model and cab
+ * lists are. Formatting happens here; the MAPPING does not. That matters
+ * because the screen now prints real quantities - "480ms", "-6.0dB" - and
+ * a second copy of those ranges in JavaScript would be a number that
+ * looks authoritative and is not the one the delay line is using. This
+ * module has already paid for one fact living in two places.
+ */
+function specKnob(spec, i) {
+    if (!spec || !spec.k) return null;
+    const kn = spec.k[i];
+    if (!kn) return null;
+    /* A switch can change what a neighbouring knob asks: the delay's Time
+     * is milliseconds until Mode says Note. The alternate travels in the
+     * same table, so the label and the number cannot disagree. */
+    if (kn.a && spec.aw >= 0) {
+        const sw = spec.k[spec.aw];
+        if (sw && specValue(sw, st.val[selKey('p' + (spec.aw + 1))]) >= 1) return kn.a;
+    }
+    return kn;
+}
+
+function specValue(kn, p) {
+    if (p === undefined || !Number.isFinite(p)) p = 0;
+    if (p < 0) p = 0;
+    if (p > 1) p = 1;
+    if (kn.c === 2) {
+        const n = Math.max(1, kn.hi | 0);
+        return Math.round(p * (n - 1));
+    }
+    if (kn.c === 1) return kn.lo * Math.pow(kn.hi / kn.lo, p);
+    return kn.lo + (kn.hi - kn.lo) * p;
+}
+
+/* Six characters is what a 31 px cell holds, so the unit rides with the
+ * number and neither gets a space. */
+function specText(kn, p) {
+    if (kn.c === 2) {
+        const opts = String(kn.o || '').split('|');
+        const i = specValue(kn, p);
+        return opts[i] || String(i);
+    }
+    const v = specValue(kn, p);
+    const u = kn.u || '';
+    if (u === 'dB')   return (v >= 0 ? '+' : '') + v.toFixed(1);
+    if (u === '%')    return Math.round(v) + '%';
+    if (u === 'cent') return Math.round(v) + 'c';
+    if (u === 'Hz')   return (v >= 1000) ? (v / 1000).toFixed(1) + 'k' : Math.round(v) + 'Hz';
+    if (u === 'ms') {
+        /* THE UNIT RIDES ON THE VALUE, NOT THE LABEL. It was on the label
+         * - "Rate ms" - which is seven characters against a cell that
+         * holds about six, so it clipped to "Rate " and the unit was the
+         * part that got cut. The value is shorter and the unit is the half
+         * that carries the meaning: "480ms" is a rate you can set against
+         * a tempo and "480" is not. Seconds past a second, for the same
+         * reason: "1.20s" fits where "1200ms" does not. */
+        if (v < 1)    return v.toFixed(2) + 'm';
+        if (v < 10)   return v.toFixed(1) + 'm';
+        if (v < 1000) return Math.round(v) + 'ms';
+        return (v / 1000).toFixed(2) + 's';
+    }
+    return String(Math.round(v));
+}
+
+function specLabel(kn) { return kn.n; }
+
+/* Built per block rather than declared: past the first two encoders the
+ * list is a property of the PEDAL and there are forty of them. */
 function knobsFor(type, fxId) {
+    const CAT_KNOB = { key: 'cat', label: 'Block', kind: 'cat' };
     if (type === TYPE_NAM)
-        return [TYPE_KNOB,
+        return [CAT_KNOB,
                 { key: 'model', label: 'Model', kind: 'list' },
                 { key: 'quality', label: 'Qual', kind: 'enum', n: 3,
                   names: ['Full', 'Slim', 'Lite'] }];
     if (type === TYPE_CAB)
-        return [TYPE_KNOB, { key: 'cab', label: 'Cab', kind: 'list' }];
+        return [CAT_KNOB, { key: 'cab', label: 'Cab', kind: 'list' }];
     if (type === TYPE_FX) {
-        const out = [TYPE_KNOB,
-                     { key: 'fx', label: 'Group', kind: 'fxcat' },
-                     { key: 'fx', label: 'Pedal', kind: 'fxid' }];
-        const names = FX_PARAM_NAMES[fxId] || [];
-        for (let i = 0; i < names.length; i++) {
-            if (!names[i]) continue;
-            out.push({ key: 'p' + (i + 1), label: names[i], kind: 'float' });
+        const out = [CAT_KNOB, { key: 'fx', label: 'Pedal', kind: 'fxid' }];
+        const spec = st.specs[fxId];
+        for (let i = 0; i < 5; i++) {
+            const kn = spec ? specKnob(spec, i) : null;
+            if (!kn) continue;
+            out.push({ key: 'p' + (i + 1), label: specLabel(kn),
+                       kind: 'spec', kn: kn });
         }
         return out;
     }
-    return [TYPE_KNOB];
+    return [CAT_KNOB];
 }
 
-/* The block's knobs, then blanks, then the board's two - so In and Out are
- * always encoders 7 and 8 whatever is loaded. A blank claims its encoder
- * and does nothing with it, which is the point: an unused knob between the
- * pedal and the levels must not shift the levels onto it. */
+/* The block's knobs, then blanks, then Out on encoder 8 - so the level is
+ * in the same place whatever is loaded. A blank claims its encoder and
+ * does nothing with it, which is the point: an unused knob between the
+ * pedal and the level must not shift the level onto it. */
 function padToBoard(list) {
-    const out = list.slice(0, NUM_KNOBS - GLOBAL_KNOBS.length);
-    while (out.length < NUM_KNOBS - GLOBAL_KNOBS.length) out.push(GAP_KNOB);
-    for (const g of GLOBAL_KNOBS) out.push(g);
+    const out = list.slice(0, NUM_KNOBS - 1);
+    while (out.length < NUM_KNOBS - 1) out.push(GAP_KNOB);
+    out.push(OUT_KNOB);
     return out;
 }
+
 
 let sel = 0;
 /* THE HOST'S OWN MENU, borrowed.
@@ -233,6 +276,7 @@ const st = {
     blockCpu: new Array(NUM_BLOCKS).fill(0),
     val: {},                    /* "b3_drive" -> number */
     names: { model: [], cab: [], fx: [] },
+    specs: [],                  /* fx_specs, read once - see specKnob */
     build: '?',
     rot: 0,
 };
@@ -246,6 +290,15 @@ function loadLists() {
             if (j) st.names[k] = JSON.parse(j);
         } catch (e) { st.names[k] = []; }
     }
+    /* The knob table. ONE read, like the lists, and for the same reason:
+     * it cannot change while this screen is up, and an IPC read is ~2.8 ms
+     * against a 1.68 ms whole-page render. A pedal whose spec is missing
+     * falls back to no knobs rather than to invented ones - an invented
+     * range is a number on screen that is not the number in the DSP. */
+    try {
+        const j = getp('fx_specs');
+        if (j) st.specs = JSON.parse(j);
+    } catch (e) { st.specs = []; }
 }
 
 function listNameFor(key, idx) {
@@ -346,6 +399,14 @@ function openMenu() {
      * that works - and it is the one people need. */
     if (haveSwap) menuRows.push({ label: 'Swap / Remove...', action: SWAP_ROW });
 
+    /* THE BOARD'S INPUT LEVEL LIVES HERE, and that is a decision rather
+     * than an overflow. Out keeps encoder 8 because it is the one you ride
+     * mid-take; In is set once against the guitar and then wants to be
+     * somewhere it cannot be nudged. The jog edits it in place - no click,
+     * no sub-screen - so it is still two gestures away. */
+    menuRows.push({ label: 'Input', action: null, edit: 'in_level' });
+    menuRows.push({ label: 'Output', action: null, edit: 'out_level' });
+
     try { console.log('A2c menu: ' + why + ', ' + menuRows.length + ' rows'); } catch (e) {}
 
     menuRows.push({ label: 'Close', action: null });
@@ -387,7 +448,16 @@ function drawMenu() {
         if (idx >= menuRows.length) break;
         const y = 14 + i * 10;
         if (idx === menuCursor) fill_rect(0, y - 1, 128, 10, 1);
-        ptext(2, y, menuRows[idx].label, idx === menuCursor ? 0 : 1, 124);
+        const row = menuRows[idx];
+        const ink = idx === menuCursor ? 0 : 1;
+        if (row.edit) {
+            const v = st.val[row.edit];
+            ptext(2, y, row.label, ink, 80);
+            pright(126, y, (v === undefined) ? '-'
+                   : (Math.round(v * 100) + '%'), ink, 44);
+        } else {
+            ptext(2, y, row.label, ink, 124);
+        }
     }
     /* The picker's FIRST row is None, and picking it is how a module is
      * removed on this host. Saying "Swap / Remove" without saying where the
@@ -396,6 +466,8 @@ function drawMenu() {
     const cur = menuRows[menuCursor];
     if (cur && cur.action === SWAP_ROW)
         ptext(2, 55, 'pick None (top) to remove', 1, 124);
+    else if (cur && cur.edit)
+        ptext(2, 55, 'turn any knob to set', 1, 124);
 }
 
 function selKey(k) { return 'b' + (sel + 1) + '_' + k; }
@@ -457,6 +529,13 @@ function blockLabel(b) {
     if (t === TYPE_NAM) return 'NAM';
     if (t === TYPE_CAB) return 'CAB';
     return '';
+}
+
+/* Which LED palette a block wears. The pad says the CATEGORY, so it is
+ * indexed by type rather than by the twelve-entry knob list. */
+function ledTypeOf(b) {
+    const t = st.type[b];
+    return (t < 0 || t > 3) ? 0 : t;
 }
 
 function drawHeader() {
@@ -521,11 +600,12 @@ function drawCells() {
 
         let shown;
         const v = st.val[fullKey(spec)];
-        if (spec.kind === 'fxcat')      shown = FX_TREE[fxCategoryOf(st.fx[sel])].name;
+        if (spec.kind === 'cat')        shown = CATS[catOfBlock(sel)].name;
         else if (spec.kind === 'fxid')  shown = st.names.fx[st.fx[sel]] || String(st.fx[sel]);
+        else if (spec.kind === 'spec')  shown = (v === undefined) ? '-' : specText(spec.kn, v);
         else if (spec.kind === 'float') shown = (v === undefined) ? '-' : String(Math.round(v * 100));
         else if (spec.kind === 'enum')  shown = (v === undefined) ? '-'
-            : ((spec.names ? spec.names[v] : TYPE_ABBREV[v]) || String(v));
+            : ((spec.names ? spec.names[v] : String(v)) || String(v));
         else                            shown = (v === undefined) ? '-' : listNameFor(spec.key, v);
 
         ptext(x + 1, CELL_Y, spec.label, ink, CELL_W - 2);
@@ -548,11 +628,11 @@ function drawFooter(list) {
      * four in Filter, and that is the sentence the screen now prints. */
     if (st.type[sel] === TYPE_FX) {
         const id = st.fx[sel] | 0;
-        const cat = fxCategoryOf(id);
-        const items = FX_TREE[cat].items;
+        const c = catOfBlock(sel);
+        const items = CATS[c].items || [id];
         const at = items.indexOf(id);
         ptext(1, FOOT_Y, (st.names.fx[id] || String(id)) + '  ' +
-              FX_TREE[cat].name + ' ' + (at + 1) + '/' + items.length, 1, 126);
+              CATS[c].name + ' ' + (at + 1) + '/' + items.length, 1, 126);
         return;
     }
     const full = list.find(k => k.kind === 'list');
@@ -608,17 +688,16 @@ const ringCache = new Array(NUM_KNOBS).fill(-1);
  * that may not exist. */
 function knobFill(spec) {
     if (!spec || spec.kind === 'gap') return null;
-    if (spec.kind === 'fxcat')
-        return FX_TREE.length < 2 ? 1
-             : fxCategoryOf(st.fx[sel]) / (FX_TREE.length - 1);
+    if (spec.kind === 'cat')
+        return catOfBlock(sel) / (CATS.length - 1);
     if (spec.kind === 'fxid') {
-        const items = FX_TREE[fxCategoryOf(st.fx[sel])].items;
+        const items = CATS[catOfBlock(sel)].items || [];
         const i = items.indexOf(st.fx[sel] | 0);
         return (items.length < 2 || i < 0) ? 1 : i / (items.length - 1);
     }
     const v = st.val[fullKey(spec)];
     if (v === undefined || !Number.isFinite(v)) return null;
-    if (spec.kind === 'float') return v;
+    if (spec.kind === 'float' || spec.kind === 'spec') return v;
     const n = (spec.kind === 'enum') ? spec.n
         : Math.max(1, ((spec.key === 'model') ? st.names.model
                                               : st.names.cab).length);
@@ -653,7 +732,7 @@ function paintLeds() {
         let c;
         if (b === sel && (Date.now() % 700) < 350) c = White;
         else if (t === TYPE_OFF) c = Black;
-        else c = st.on[b] ? TYPE_LED[t].on : TYPE_LED[t].off;
+        else c = st.on[b] ? TYPE_LED[ledTypeOf(b)].on : TYPE_LED[ledTypeOf(b)].off;
         setLED(PAD_BASE + b, c);
     }
 }
@@ -689,35 +768,73 @@ function onKnob(idx, ccValue) {
     const k = fullKey(s);
     let v = st.val[k];
 
-    if (s.kind === 'fxcat' || s.kind === 'fxid') {
+    if (s.kind === 'cat') {
         const step = knobSteps(idx, d);
         if (!step) return;
-        const cur = st.fx[sel] | 0;
-        const cat = fxCategoryOf(cur);
-        let want;
-        if (s.kind === 'fxcat') {
-            /* A family, not a pedal: land on its first. Carrying the
-             * position across would mean turning one knob changed two
-             * things, and the second one invisibly. */
-            let c = cat + step;
-            if (c < 0) c = 0;
-            if (c > FX_TREE.length - 1) c = FX_TREE.length - 1;
-            if (c === cat) return;
-            want = FX_TREE[c].items[0];
-        } else {
-            const items = FX_TREE[cat].items;
-            let i = items.indexOf(cur) + step;
-            if (i < 0) i = 0;
-            if (i > items.length - 1) i = items.length - 1;
-            want = items[i];
+        let c = catOfBlock(sel) + step;
+        if (c < 0) c = 0;
+        if (c > CATS.length - 1) c = CATS.length - 1;
+        if (c === catOfBlock(sel)) return;
+        const cat = CATS[c];
+        /* Writing the pedal BEFORE the type, because the type write is
+         * what makes the plugin reach for a default - and a block that
+         * lands on its default for a frame is a block that makes a
+         * different noise for a frame. */
+        if (cat.items) {
+            st.fx[sel] = cat.items[0];
+            st.val[selKey('fx')] = cat.items[0];
+            setp(selKey('fx'), cat.items[0]);
         }
-        if (want === cur) return;
+        st.type[sel] = cat.type;
+        st.val[selKey('type')] = cat.type;
+        setp(selKey('type'), cat.type);
+        readSelected();
+        return;
+    }
+
+    if (s.kind === 'fxid') {
+        const step = knobSteps(idx, d);
+        if (!step) return;
+        const items = CATS[catOfBlock(sel)].items || [];
+        const cur = st.fx[sel] | 0;
+        let i = items.indexOf(cur) + step;
+        if (i < 0) i = 0;
+        if (i > items.length - 1) i = items.length - 1;
+        const want = items[i];
+        if (want === undefined || want === cur) return;
         st.fx[sel] = want;
         st.val[selKey('fx')] = want;
         setp(selKey('fx'), want);
         /* The pedal changed, so its knobs are a different set - what they
          * are pointing at has to be re-read rather than carried over. */
         readSelected();
+        return;
+    }
+
+    if (s.kind === 'spec') {
+        /* A SWITCH STEPS, A CONTINUOUS KNOB SLIDES, and which it is comes
+         * from the served table rather than from anything here. */
+        if (s.kn.c === 2) {
+            const step = knobSteps(idx, d);
+            if (!step) return;
+            const n = Math.max(1, s.kn.hi | 0);
+            let cur = Math.round((v === undefined ? 0 : v) * (n - 1)) + step;
+            if (cur < 0) cur = 0;
+            if (cur > n - 1) cur = n - 1;
+            const nv = (n < 2) ? 0 : cur / (n - 1);
+            if (nv === v) return;
+            st.val[k] = nv;
+            setp(k, nv.toFixed(4));
+            /* A mode switch re-labels its neighbours, so the row has to be
+             * rebuilt rather than redrawn. */
+            lastPaint = 0;
+        } else {
+            let nv = (v === undefined ? 0.5 : v) + d * FLOAT_STEP;
+            if (nv < 0) nv = 0;
+            if (nv > 1) nv = 1;
+            st.val[k] = nv;
+            setp(k, nv.toFixed(4));
+        }
         return;
     }
 
@@ -738,13 +855,6 @@ function onKnob(idx, ccValue) {
         if (v === st.val[k]) return;
         st.val[k] = v;
         setp(k, v);
-        if (s.key === 'type') {
-            st.type[sel] = v;
-            /* The knob list just changed under the encoders, so what they
-             * are pointing at has to be re-read rather than carried over
-             * from the type that is gone. */
-            readSelected();
-        }
     }
 }
 
@@ -767,9 +877,9 @@ globalThis.chain_ui = {
             st.fx[b] = num(getp('b' + (b + 1) + '_fx'), 0);
         }
         st.cpu = num(getp('cpu'), 0);
-        for (const g of GLOBAL_KNOBS) {
-            const v = getp(g.key);
-            if (v !== null && v !== '') st.val[g.key] = Number(v);
+        for (const key of ['in_level', 'out_level']) {
+            const v = getp(key);
+            if (v !== null && v !== '') st.val[key] = Number(v);
         }
         readSelected();
     },
@@ -844,9 +954,30 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
             return;
         }
         /* While the menu is up the encoders and pads are ITS business, not
-         * the pedalboard's - a stomp landing behind an open menu is a change
-         * you cannot see. */
-        if (menuOpen) return;
+         * the pedalboard's - a stomp landing behind an open menu is a
+         * change you cannot see, and a knob turn is a block edit you are
+         * not looking at.
+         *
+         * ITS business includes the two rows that hold a value: with the
+         * cursor on Input or Output, ANY encoder sets it. No new gesture
+         * and no sub-screen - the row is already highlighted, so the thing
+         * a knob would obviously do is the thing it does. */
+        if (menuOpen) {
+            if (status === 0xb0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
+                const row = menuRows[menuCursor];
+                const dd = decodeDelta(d2);
+                if (row && row.edit && dd) {
+                    let v = st.val[row.edit];
+                    v = (v === undefined ? 0.5 : v) + dd * FLOAT_STEP;
+                    if (v < 0) v = 0;
+                    if (v > 1) v = 1;
+                    st.val[row.edit] = v;
+                    setp(row.edit, v.toFixed(4));
+                    lastPaint = 0;
+                }
+            }
+            return;
+        }
 
         if (status === 0xb0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
             onKnob(d1 - CC_KNOB_BASE, d2);

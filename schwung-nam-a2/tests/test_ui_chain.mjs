@@ -13,13 +13,25 @@ const src = fs.readFileSync(path.join(here, '..', 'src', 'c', 'ui_chain.js'), 'u
     .replace(/^import .*$/m, '');
 
 /* --- the module's world ------------------------------------------------ */
+const SPECS_FIXTURE = path.join(here, 'fixtures', 'fx_specs.json');
+let specsRaw;
+try { specsRaw = fs.readFileSync(SPECS_FIXTURE, 'utf8').trim(); }
+catch (e) {
+    console.log('FAIL ' + SPECS_FIXTURE + ' missing - run tests/run_contract_test.sh first');
+    process.exit(1);
+}
+
 const params = {
     sel_block: '0', cpu: '41', build: 'test',
     model_list: JSON.stringify(['OCD', 'Recto']),
     cab_list: JSON.stringify(['TF MESA']),
-    fx_list: JSON.stringify(['Overdrive', 'Distortion', 'Fuzz', 'Boost',
-        'Compressor', 'Gate', 'EQ', 'Auto Wah', 'Chorus', 'Phaser',
-        'Tremolo', 'Delay', 'Slapback', 'Reverb', 'Doubler', 'Detune']),
+    /* THE PEDAL TABLE COMES FROM THE PLUGIN, not from a copy written out
+     * here. tests/run_contract_test.sh compiles the real plugin and writes
+     * what it serves into the fixture; this reads it. A hand-written table
+     * would pass this test while disagreeing with the binary, which is the
+     * exact failure the served spec exists to prevent. */
+    fx_list: JSON.stringify(JSON.parse(specsRaw).map(p => p.n)),
+    fx_specs: specsRaw,
 };
 for (let b = 1; b <= 8; b++) {
     params[`b${b}_type`] = b <= 2 ? '1' : (b === 3 ? '2' : '0');
@@ -31,6 +43,9 @@ for (let b = 1; b <= 8; b++) {
     params[`b${b}_fx`] = '0';
     for (let k = 1; k <= 5; k++) params[`b${b}_p${k}`] = '0.5';
 }
+
+
+
 
 const writes = [];
 const drawn = [];
@@ -142,91 +157,144 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(writes.some(([k, v]) => k === 'sel_block' && v === '3'), 'tree: pad 4 selected');
 
     /* ONE STEP IS THREE DETENTS on every discrete control - the encoders
-     * are not detented and the shim coalesces, so a message carries however
-     * many ticks arrived in that audio frame. Every discrete turn below
-     * spends three, which is what the screen costs. */
+     * are not detented and the shim coalesces, so a message carries
+     * however many ticks arrived in that audio frame. */
     const STEP = 3;
     const turn = (cc, dir, steps = 1) => {
         for (let i = 0; i < steps * STEP; i++)
             ui.onMidiMessageInternal([0xb0, cc, dir > 0 ? 1 : 127]);
     };
+    const K1 = 71, K2 = 72, K3 = 73, K4 = 74, K5 = 75, K6 = 76, K7 = 77, K8 = 78;
+    /* Off NAM Cab OD Dist Fuzz Boost Dyn Filter Mod Time Pitch */
+    const CAT = { OFF:0, NAM:1, CAB:2, OD:3, DIST:4, FUZZ:5, BOOST:6,
+                  DYN:7, FILTER:8, MOD:9, TIME:10, PITCH:11 };
+    const gotoCat = (c) => { turn(K1, -1, 12); turn(K1, +1, c); };
 
     /* The sensitivity itself, which is the thing that was wrong: two
      * detents must move NOTHING, and the third must move exactly one. */
+    turn(K1, -1, 12);                                /* park on Off */
     writes.length = 0;
-    ui.onMidiMessageInternal([0xb0, 71, 1]);
-    ui.onMidiMessageInternal([0xb0, 71, 1]);
+    ui.onMidiMessageInternal([0xb0, K1, 1]);
+    ui.onMidiMessageInternal([0xb0, K1, 1]);
     ok(writes.length === 0, 'knob: two detents do not make a step');
-    ui.onMidiMessageInternal([0xb0, 71, 1]);
-    ok(params['b4_type'] === '1', 'knob: the third detent makes exactly one step');
+    ui.onMidiMessageInternal([0xb0, K1, 1]);
+    ok(params['b4_type'] === '1', 'knob: the third detent makes exactly one step (Off->NAM)');
 
-    /* And a fast spin is still proportional - the coalesced magnitude is
-     * spent, not thrown away, so six ticks in one message is two steps. */
-    writes.length = 0;
-    ui.onMidiMessageInternal([0xb0, 71, 6]);
-    ok(params['b4_type'] === '3', 'knob: a coalesced spin spends every tick');
+    /* ONE KNOB NOW DECIDES WHAT THE BLOCK IS. Type and family were two
+     * encoders and are one, which is what freed the fifth parameter slot
+     * the 1176 and the Dual Delay need. */
+    gotoCat(CAT.OD);
+    ok(params['b4_type'] === '3' && params['b4_fx'] === '0',
+       'cat: OD sets type=FX and lands on the first pedal');
+    turn(K2, +1, 4);
+    ok(params['b4_fx'] === '4', 'cat: knob 2 walks to Centaur, the last OD');
+    turn(K2, +1);
+    ok(params['b4_fx'] === '4', 'cat: it stops at the end of its own family');
+    gotoCat(CAT.DIST);
+    ok(params['b4_fx'] === '5', 'cat: Dist starts at the RAT');
 
-    /* Knob 2 walks families and lands on each one's FIRST pedal. */
-    const famFirst = [];
-    for (let i = 0; i < 5; i++) {
-        turn(72, +1);
-        famFirst.push(Number(params['b4_fx']));
+    /* THE KNOBS ARE THE REAL PEDAL'S, read from the served table. */
+    gotoCat(CAT.DYN);
+    ok(params['b4_fx'] === '13', 'dyn: starts at the 1176');
+    /* Four cells, eight encoders: the row follows the knob last touched,
+     * so reaching the fifth control is what brings it on screen. */
+    for (const [cc, label] of [[K3, 'Input'], [K4, 'Attac'], [K5, 'Relea'],
+                               [K6, 'Ratio'], [K7, 'Outpu']]) {
+        ui.onMidiMessageInternal([0xb0, cc, 0]);     /* claim, move nothing */
+        drawn.length = 0; ui.tick();
+        ok(drawn.some(t => String(t).startsWith(label)),
+           `1176: the panel names ${label}`);
     }
-    ok(JSON.stringify(famFirst) === JSON.stringify([4, 6, 8, 11, 14]),
-       'tree: knob 2 steps Drive->Dynamic->Filter->Mod->Time->Pitch');
 
-    /* Knob 3 walks inside the family it is already in, and stops at its end. */
-    turn(73, +1);
-    ok(params['b4_fx'] === '15', 'tree: knob 3 moves within Pitch');
-    turn(73, +1, 4);
-    ok(params['b4_fx'] === '22', 'tree: knob 3 stops at the end of its family');
-
-    /* Back to Time, and the knobs past the tree are that pedal's. */
-    turn(72, -1);                                    /* knob 2 down -> Time */
-    ok(params['b4_fx'] === '11', 'tree: knob 2 back to Time = Delay');
-    drawn.length = 0;
-    ui.onMidiMessageInternal([0xb0, 76, 1]);         /* knob 6 = Mix */
-    ui.tick();
-    ok(drawn.includes('Mix'), 'tree: Delay exposes Time/Fdbk/Mix past the tree');
-    /* WHERE YOU ARE, spelled out. The group cell clips at 31 px, so the
-     * footer is the only place the family name survives in full - and the
-     * n/N is what says there is more of it to turn to. */
-    ok(drawn.some(t => String(t) === 'Delay  Time 1/5'),
-       'footer: names the pedal, its family and its place in it');
-    ok(Number(params['b4_p3']) > 0.5, 'tree: turning it writes that pedal param');
-
-    /* A pedal with fewer knobs does not offer the ones it lacks - but the
-     * encoder is still CLAIMED, and writes nothing. Gate has two knobs, so
-     * encoder 6 is past its end and before the board's own two. */
-    turn(72, -1, 3);                                 /* -> Dynamic / Compressor */
-    ok(params['b4_fx'] === '4', 'tree: back round to Compressor');
-    turn(73, +1);                                    /* -> Gate */
-    ok(params['b4_fx'] === '5', 'tree: knob 3 reaches Gate');
+    /* FIVE PARAMETERS FIT. This is the whole reason the type knob was
+     * merged away - the 1176 has five controls and a five-knob pedal plus
+     * two navigation knobs plus the output level is exactly eight. */
     writes.length = 0;
-    ui.onMidiMessageInternal([0xb0, 76, 1]);         /* knob 6: past the end */
-    ok(writes.length === 0, 'tree: a knob the pedal has no use for is inert');
-
-    /* THE BOARD'S OWN TWO. Knobs 7 and 8 are In and Out on every screen,
-     * whatever is loaded, and they address the plain keys - not b4_. */
+    ui.onMidiMessageInternal([0xb0, K7, 1]);
+    ok(writes.some(([k]) => k === 'b4_p5'), '1176: its fifth knob reaches p5');
     writes.length = 0;
-    ui.onMidiMessageInternal([0xb0, 77, 1]);
-    ok(writes.some(([k]) => k === 'in_level'), 'board: knob 7 is Input');
+    ui.onMidiMessageInternal([0xb0, K8, 1]);
+    ok(writes.some(([k]) => k === 'out_level'), 'board: knob 8 is Output, always');
     ok(!writes.some(([k]) => k.indexOf('b4_') === 0), 'board: it is not a block key');
-    writes.length = 0;
-    ui.onMidiMessageInternal([0xb0, 78, 1]);
-    ok(writes.some(([k]) => k === 'out_level'), 'board: knob 8 is Output');
-    drawn.length = 0;
-    ui.tick();
-    ok(drawn.includes('In') && drawn.includes('Out'),
-       'board: the levels are on screen once a level knob is touched');
 
-    /* THE RINGS. A knob that does something is lit; one that does not is
-     * dark. Colour 0 is the reserved "nothing here". */
-    ok(buttonLeds[76] === 0, 'rings: an unbound encoder is dark');
-    ok(buttonLeds[77] !== 0 && buttonLeds[77] !== undefined,
-       'rings: Input is lit');
-    ok(buttonLeds[71] !== 0 && buttonLeds[71] !== undefined,
-       'rings: Type is lit');
+    /* A SWITCH STEPS AND PRINTS ITS POSITION, not a number. */
+    params['b4_p4'] = '0';
+    ui.init();
+    drawn.length = 0; ui.tick();
+    ok(drawn.some(t => String(t) === '4:1'), 'enum: Ratio draws its option, not 0');
+
+    /* MS IS PRINTED AS MS. A rate that reads 37 is a rate you cannot set
+     * against a tempo, which is the whole of what was asked for. */
+    gotoCat(CAT.MOD);
+    ok(params['b4_fx'] === '23', 'mod: starts at the Chorus');
+    params['b4_p1'] = '0.5';
+    ui.init();
+    drawn.length = 0; ui.tick();
+    ui.onMidiMessageInternal([0xb0, K3, 0]);
+    drawn.length = 0; ui.tick();
+    ok(drawn.some(t => /^[\d.]+(ms|s|m)$/.test(String(t))),
+       'ms: the rate cell prints a period with its unit, not a percentage');
+
+    /* A ONE-KNOB PEDAL HAS ONE KNOB. */
+    turn(K2, +1, 3);
+    ok(params['b4_fx'] === '26', 'mod: reaches the Phase 90');
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, K4, 1]);
+    ok(writes.length === 0, 'Phase 90: encoder 4 is claimed and does nothing');
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, K3, 1]);
+    ok(writes.some(([k]) => k === 'b4_p1'), 'Phase 90: encoder 3 is its Speed');
+
+    /* MODE RE-LABELS ITS NEIGHBOUR. The delay's Time is milliseconds until
+     * Mode says Note, and then the same encoder is a division - which is
+     * only safe because the alternate travels in the plugin's own table. */
+    gotoCat(CAT.TIME);
+    ok(params['b4_fx'] === '30', 'time: starts at the Digital Delay');
+    params['b4_p1'] = '0.5'; params['b4_p4'] = '0';
+    ui.init();
+    drawn.length = 0; ui.tick();
+    ui.onMidiMessageInternal([0xb0, K3, 0]);
+    drawn.length = 0; ui.tick();
+    ok(drawn.some(t => String(t).startsWith('Time')), 'delay: ms mode names it Time');
+    ok(drawn.some(t => /^[\d.]+(ms|s|m)$/.test(String(t))), 'delay: and prints a time');
+    params['b4_p4'] = '1';
+    ui.init();
+    ui.onMidiMessageInternal([0xb0, K3, 0]);
+    drawn.length = 0; ui.tick();
+    ok(drawn.some(t => String(t) === 'Note'), 'delay: Note mode re-labels the same encoder');
+    ok(drawn.some(t => String(t).indexOf('/') > 0),
+       'delay: and it now draws a division');
+
+    /* THE FOOTER SAYS WHERE YOU ARE. Forty pedals behind two knobs is a
+     * place you can be lost in. */
+    ok(drawn.some(t => String(t) === 'Digital Dly  Time 1/6'),
+       'footer: names the pedal, its family and its place in it');
+
+    /* THE RINGS SAY WHICH ENCODERS DO SOMETHING. */
+    ok(buttonLeds[K8] !== 0 && buttonLeds[K8] !== undefined, 'rings: Output is lit');
+    ok(buttonLeds[K1] !== 0 && buttonLeds[K1] !== undefined, 'rings: Block is lit');
+    ok(buttonLeds[K7] === 0, 'rings: an encoder past the pedal is dark');
+
+    /* INPUT LIVES ON THE MENU, and a knob sets it there. Out keeps an
+     * encoder because it is the one you ride; In is set once against the
+     * guitar and wants to be somewhere it cannot be nudged mid-take. */
+    ui.onMidiMessageInternal([0xb0, 3, 127]);        /* jog click: open */
+    /* Counted from the BOTTOM - Close is last, then Output, then Input -
+     * because how many rows the HOST offers above them varies by host and
+     * this test also runs against three that offer none. */
+    for (let i = 0; i < 40; i++) ui.onMidiMessageInternal([0xb0, 14, 1]);
+    ui.onMidiMessageInternal([0xb0, 14, 127]);
+    ui.onMidiMessageInternal([0xb0, 14, 127]);
+    drawn.length = 0; ui.tick();
+    ok(drawn.some(t => String(t) === 'Input'), 'menu: the cursor is on Input');
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, K1, 1]);
+    ok(writes.some(([k]) => k === 'in_level'), 'menu: a knob sets Input in place');
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, K1, 1]);
+    ok(!writes.some(([k]) => k.indexOf('b4_') === 0),
+       'menu: and it does not reach the block behind it');
+    ui.onMidiMessageInternal([0xb0, 3, 127]);        /* close */
 }
 
 /* --- the host refusing to answer -------------------------------------- */
@@ -248,8 +316,13 @@ for (const [what, impl] of [
     h2.print = (x, y, t) => seen.push(String(t));
     h2.clear_screen = () => {};
     const n2 = Object.keys(h2);
-    const ui2 = new Function('globalThis', 'leds', ...n2,
-        stubs + src + '\nreturn globalThis.chain_ui;')({}, {}, ...n2.map(n => h2[n]));
+    /* buttonLeds has to be here too: the stub closes over it, so leaving
+     * it out is a ReferenceError inside tick() - which tickBody catches
+     * and paints as an error screen, AFTER the menu has already been
+     * drawn. The assertions below would still pass while the module was
+     * throwing on every frame. */
+    const ui2 = new Function('globalThis', 'leds', 'buttonLeds', ...n2,
+        stubs + src + '\nreturn globalThis.chain_ui;')({}, {}, {}, ...n2.map(n => h2[n]));
     ui2.init();
     ui2.onMidiMessageInternal([0xb0, 3, 127]);       /* open */
 
@@ -265,10 +338,11 @@ for (const [what, impl] of [
     ok(found, `host gives ${what} -> Swap / Remove is reachable`);
 
     /* Land ON it: run to the end (the cursor clamps at Close, the last
-     * row) and come back one. Scrolling only until the row is DRAWN leaves
-     * the cursor wherever the fold put it. */
+     * row) and come back THREE - Close, Output, Input, then Swap.
+     * Scrolling only until the row is DRAWN leaves the cursor wherever
+     * the fold put it. */
     for (let i = 0; i < 20; i++) ui2.onMidiMessageInternal([0xb0, 14, 1]);
-    ui2.onMidiMessageInternal([0xb0, 14, 127]);   /* one detent CCW */
+    for (let i = 0; i < 3; i++) ui2.onMidiMessageInternal([0xb0, 14, 127]);
     ui2.onMidiMessageInternal([0xb0, 3, 127]);
     ok(ran.includes('__swap'), `host gives ${what} -> Swap / Remove opens the picker`);
 }
@@ -285,8 +359,8 @@ for (const [what, impl] of [
     h3.print = (x, y, t) => seen.push(String(t));
     h3.clear_screen = () => {};
     const n3 = Object.keys(h3);
-    const ui3 = new Function('globalThis', 'leds', ...n3,
-        stubs + src + '\nreturn globalThis.chain_ui;')({}, {}, ...n3.map(n => h3[n]));
+    const ui3 = new Function('globalThis', 'leds', 'buttonLeds', ...n3,
+        stubs + src + '\nreturn globalThis.chain_ui;')({}, {}, {}, ...n3.map(n => h3[n]));
     ui3.init();
     ui3.onMidiMessageInternal([0xb0, 3, 127]);
     ui3.tick();
@@ -318,8 +392,8 @@ for (const [what, impl] of [
     h4.draw_rect = h4.fill_rect;
     h4.clear_screen = () => {};
     const n4 = Object.keys(h4);
-    const mk = () => new Function('globalThis', 'leds', ...n4,
-        stubs + src + '\nreturn globalThis.chain_ui;')({}, {}, ...n4.map(n => h4[n]));
+    const mk = () => new Function('globalThis', 'leds', 'buttonLeds', ...n4,
+        stubs + src + '\nreturn globalThis.chain_ui;')({}, {}, {}, ...n4.map(n => h4[n]));
 
     const ui4 = mk();
     ui4.init();

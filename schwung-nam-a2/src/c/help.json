@@ -1,5 +1,5 @@
 {
-  "title": "Nam A2c",
+  "title": "Nam A2",
   "sections": [
     {
       "title": "Eight blocks",
@@ -12,15 +12,40 @@
       ]
     },
     {
-      "title": "Choosing a block",
+      "title": "The encoders",
       "lines": [
-        "Knob 1  Off / NAM / Cab / FX",
-        "Knob 2  the family (Drive, Dynamic,",
-        "        Filter, Mod, Time, Pitch)",
-        "Knob 3  the pedal - 26 of them",
-        "Knob 4-6  that pedal's controls",
-        "Knob 7  In level   Knob 8  Out level",
-        "A lit ring = that knob does something."
+        "1  Block: Off / NAM / Cab, then",
+        "   OD Dist Fuzz Boost Dyn",
+        "   Filter Mod Time Pitch",
+        "2  which model, cab or pedal",
+        "3-7  that pedal's own controls",
+        "8  board output level",
+        "A lit ring = the knob does",
+        "something. Input is on the menu."
+      ]
+    },
+    {
+      "title": "Real knobs",
+      "lines": [
+        "The pedals carry the controls",
+        "the real ones have, with real",
+        "units: 480ms, -6.0dB, 1.2k.",
+        "Modulation rate is a PERIOD in",
+        "ms, so you can match a tempo.",
+        "Delays do ms or Note - set Mode",
+        "and the Time knob becomes a",
+        "division at the host's tempo."
+      ]
+    },
+    {
+      "title": "Doubler",
+      "lines": [
+        "It is the one STEREO pedal, so",
+        "put it LAST - blocks after it",
+        "see the centre only.",
+        "Width 0 collapses it to mono.",
+        "Detune 0 is plain double-track;",
+        "turn it up for the shimmer."
       ]
     },
     {
@@ -28,16 +53,17 @@
       "lines": [
         "A frame has ~2370us of room.",
         "NAM Full ~1200us, Slim ~250us.",
-        "Cab ~60us. A pedal 20-40us.",
-        "So: one amp, and seven pedals.",
-        "The CPU cell on the header is real."
+        "Cab ~60us. A pedal 5-11us.",
+        "So: one amp, and seven pedals."
       ]
     },
     {
       "title": "Files",
       "lines": [
-        "Models in models/, cabs in cabs/.",
-        "Drop them in at move.local:7700."
+        "models/  .nam captures",
+        "cabs/    .wav impulse responses",
+        "Drop them in with the web",
+        "manager at move.local:7700."
       ]
     }
   ]

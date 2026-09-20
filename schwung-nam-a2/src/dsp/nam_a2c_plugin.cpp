@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "fx26b"
+#define NAM_A2C_BUILD_ID "real40"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -50,26 +50,15 @@
  * and hide that two of them do not fit in a frame. */
 enum { BLK_OFF = 0, BLK_NAM = 1, BLK_CAB = 2, BLK_FX = 3, BLK_TYPES = 4 };
 
-/* One list, used for chain_params' enum and by the UI's own tree. The INDEX
- * is the wire value, so this is appended to and never reordered. */
-static const char *FX_NAMES[FX_COUNT] = {
-    "Overdrive", "Distortion", "Fuzz", "Boost",
-    "Compressor", "Gate",
-    "EQ", "Auto Wah",
-    "Chorus", "Phaser", "Tremolo",
-    "Delay", "Slapback", "Reverb",
-    "Doubler", "Detune",
-    "Flanger", "Vibrato", "Rotary",
-    "Wah", "Lo-Fi",
-    "Octave", "Ring Mod",
-    "Tape Echo", "Spring",
-    "Limiter",
-};
-/* The table and the enum are one fact in two places, and a table one entry
- * short is a read past its end on the highest pedal - which is a pedal that
- * works in the DSP and crashes the picker. */
-static_assert(sizeof(FX_NAMES) / sizeof(FX_NAMES[0]) == FX_COUNT,
-              "FX_NAMES must name every pedal in the enum");
+/* THE NAME COLUMN OF FX_PEDALS, not a second list.
+ *
+ * There used to be a `FX_NAMES[]` here beside the enum in a2_fx.h, which
+ * is one fact in two files and exactly the shape that has already cost
+ * this module four builds elsewhere. The pedal table carries the name, so
+ * this reads it. */
+static inline const char *fx_name(int id) {
+    return (id >= 0 && id < FX_COUNT) ? FX_PEDALS[id].name : "?";
+}
 
 static const char *block_type_name(int t) {
     switch (t) {
@@ -145,6 +134,14 @@ typedef struct {
     int  sel_block;               /* which block the grid is editing */
 
     float in_level, out_level;
+    /* THE ONE STEREO THING IN A MONO CHAIN.
+     *
+     * Every block processes `mono` in place; `side` is the left-minus-right
+     * difference, zeroed every block and written only by the doubler, whose
+     * whole character is the width (see fx_doubler). At the output the two
+     * recombine as L = mono + side, R = mono - side, so a board with no
+     * doubler on it is bit-identical to before and costs one memset. */
+    float side[FRAMES_PER_BLOCK];
     float in_gain,  out_gain;
 
     /* Shared lists, scanned once. A model or a cab belongs to the module,
@@ -440,7 +437,7 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
         new (&s->amp[i].loading) std::atomic<bool>(false);
         s->cab[i].index = -1;
         s->cab[i].run_cap = IR_RUN_TAPS;
-        s->fx[i].id = FX_OVERDRIVE;
+        s->fx[i].id = FX_TS808;
         for (int k = 0; k < FX_PARAMS; k++) s->fx[i].p[k] = 0.5f;
     }
     new (&s->reqs.head) std::atomic<unsigned>(0);
@@ -524,7 +521,15 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         if (al > s->in_peak_l) s->in_peak_l = al;
         if (ar > s->in_peak_r) s->in_peak_r = ar;
         s->mono[i] = l * ig;
+        s->side[i] = 0.0f;
     }
+
+    /* Tempo for the delays' Note mode, read ONCE per block rather than per
+     * pedal: get_bpm walks a fallback chain (MIDI clock -> set tempo ->
+     * settings -> 120) and eight blocks asking it eight times a block is
+     * eight times the work for one answer. A host that does not offer the
+     * callback at all leaves this 0 and fx_time_ms falls back itself. */
+    const float bpm = (g_host && g_host->get_bpm) ? g_host->get_bpm() : 0.0f;
 
     for (int b = 0; b < NUM_BLOCKS; b++) {
         int t = s->type[b];
@@ -553,8 +558,10 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
                 ir_block_process(&s->cab[b], s->mono, n);
                 break;
             case BLK_FX:
-                if (s->fx[b].line && s->fx[b].rv)
-                    fx_block_process(&s->fx[b], s->mono, n);
+                if (s->fx[b].line && s->fx[b].rv) {
+                    s->fx[b].bpm = bpm;
+                    fx_block_process(&s->fx[b], s->mono, s->side, n);
+                }
                 break;
             default: break;
         }
@@ -566,15 +573,20 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
 
     const float og = s->out_gain;
     for (int i = 0; i < n; i++) {
-        float v = sanitize_sample(s->mono[i] * og);
-        if (v != s->mono[i] * og) s->nan_samples++;
-        float a = v < 0 ? -v : v;
+        float m = sanitize_sample(s->mono[i] * og);
+        if (m != s->mono[i] * og) s->nan_samples++;
+        float sd = sanitize_sample(s->side[i] * og);
+        float a = m < 0 ? -m : m;
         if (a > s->out_peak) s->out_peak = a;
-        int32_t q = (int32_t)lrintf(v * 32767.0f);
-        if (q > 32767) q = 32767;
-        if (q < -32768) q = -32768;
-        audio_inout[i * 2]     = (int16_t)q;
-        audio_inout[i * 2 + 1] = (int16_t)q;
+        float lv = m + sd, rv = m - sd;
+        int32_t ql = (int32_t)lrintf(lv * 32767.0f);
+        int32_t qr = (int32_t)lrintf(rv * 32767.0f);
+        if (ql > 32767) ql = 32767;
+        if (ql < -32768) ql = -32768;
+        if (qr > 32767) qr = 32767;
+        if (qr < -32768) qr = -32768;
+        audio_inout[i * 2]     = (int16_t)ql;
+        audio_inout[i * 2 + 1] = (int16_t)qr;
     }
 
     struct timespec t1;
@@ -795,11 +807,55 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return emit_options(buf, buf_len, s->model_names, s->model_count);
     if (strcmp(key, "cab_list") == 0)
         return emit_options(buf, buf_len, s->cab_names, s->cab_count);
+    /* THE KNOB TABLE, SERVED ONCE.
+     *
+     * The screen has to print "480 ms" and "-6.0 dB" rather than "37", and
+     * the only honest way to do that is for the number it formats and the
+     * number the DSP reads to come from the same row. So the UI reads this
+     * at load, exactly as it reads the model and cab lists, and formats
+     * locally - no per-cell IPC, and no second copy of any range in
+     * JavaScript.
+     *
+     * Index is the wire value throughout: a knob the pedal does not have
+     * is `null` at its own position, never a compaction, because `p3` is
+     * p3 whether or not p2 exists. */
+    if (strcmp(key, "fx_specs") == 0) {
+        int w = 0;
+        w += snprintf(buf + w, buf_len - w, "[");
+        for (int i = 0; i < FX_COUNT && w < buf_len - 512; i++) {
+            const fx_pedal_t *pd = &FX_PEDALS[i];
+            w += snprintf(buf + w, buf_len - w, "%s{\"n\":\"%s\",\"aw\":%d,\"k\":[",
+                          i ? "," : "", pd->name, pd->alt_when);
+            for (int k = 0; k < FX_PARAMS; k++) {
+                if (k) w += snprintf(buf + w, buf_len - w, ",");
+                const fx_knob_t *kn = &pd->knob[k];
+                if (!kn->name) { w += snprintf(buf + w, buf_len - w, "null"); continue; }
+                w += snprintf(buf + w, buf_len - w,
+                    "{\"n\":\"%s\",\"u\":\"%s\",\"lo\":%g,\"hi\":%g,\"c\":%d",
+                    kn->name, kn->unit, (double)kn->lo, (double)kn->hi, (int)kn->curve);
+                if (kn->opts)
+                    w += snprintf(buf + w, buf_len - w, ",\"o\":\"%s\"", kn->opts);
+                if (kn->alt) {
+                    const fx_knob_t *al = kn->alt;
+                    w += snprintf(buf + w, buf_len - w,
+                        ",\"a\":{\"n\":\"%s\",\"u\":\"%s\",\"lo\":%g,\"hi\":%g,"
+                        "\"c\":%d,\"o\":\"%s\"}",
+                        al->name, al->unit, (double)al->lo, (double)al->hi,
+                        (int)al->curve, al->opts ? al->opts : "");
+                }
+                w += snprintf(buf + w, buf_len - w, "}");
+            }
+            w += snprintf(buf + w, buf_len - w, "]}");
+        }
+        w += snprintf(buf + w, buf_len - w, "]");
+        return w;
+    }
+
     if (strcmp(key, "fx_list") == 0) {
         int w = 0;
         w += snprintf(buf + w, buf_len - w, "[");
         for (int i = 0; i < FX_COUNT; i++)
-            w += snprintf(buf + w, buf_len - w, "%s\"%s\"", i ? "," : "", FX_NAMES[i]);
+            w += snprintf(buf + w, buf_len - w, "%s\"%s\"", i ? "," : "", fx_name(i));
         w += snprintf(buf + w, buf_len - w, "]");
         return w;
     }
@@ -825,7 +881,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         fw += snprintf(fxopts + fw, sizeof(fxopts) - fw, "[");
         for (int i = 0; i < FX_COUNT; i++)
             fw += snprintf(fxopts + fw, sizeof(fxopts) - fw, "%s\"%s\"",
-                           i ? "," : "", FX_NAMES[i]);
+                           i ? "," : "", fx_name(i));
         snprintf(fxopts + fw, sizeof(fxopts) - fw, "]");
 
         /* The per-block cost is two option lists plus the pedal list plus

@@ -27,7 +27,24 @@ mkdir -p "$FIX/models" "$FIX/cabs"
 echo "--- running ---"
 /tmp/a2c_dump_contract "$FIX" > /tmp/a2c_contract.txt
 
+# The pedal table as the BINARY serves it, for tests/test_ui_chain.mjs to
+# drive the screen against. Generated rather than committed by hand: a
+# hand-written copy would let the UI test pass while disagreeing with the
+# plugin, which is the failure the served spec exists to prevent.
+python3 - <<'GENPY'
+import re, json, os
+txt = open('/tmp/a2c_contract.txt').read()
+m = re.search(r'===fx_specs===\n(.*?)(?=\n===|\Z)', txt, re.S)
+if m:
+    raw = m.group(1).strip()
+    json.loads(raw)
+    os.makedirs('tests/fixtures', exist_ok=True)
+    open('tests/fixtures/fx_specs.json', 'w').write(raw + '\n')
+    print("ok   fx_specs fixture written (%d bytes)" % len(raw))
+GENPY
+
 python3 - <<'PY'
+
 import json, re, sys
 txt = open('/tmp/a2c_contract.txt').read()
 fail = 0
@@ -84,44 +101,68 @@ fxl = section('fx_list')
 if fxl in (None, '(unserved)'):
     print("FAIL fx_list: not served, so the tree has no names"); fail = 1
 else:
-    # The FIRST SIXTEEN are pinned by NAME AND POSITION, because a board
-    # saved before 0.5.0 stores the number: reordering them re-points every
-    # pedal on every saved board, silently. Anything after them is appended
-    # and only has to exist.
-    ORIGINAL = ['Overdrive', 'Distortion', 'Fuzz', 'Boost',
-                'Compressor', 'Gate', 'EQ', 'Auto Wah',
-                'Chorus', 'Phaser', 'Tremolo',
-                'Delay', 'Slapback', 'Reverb', 'Doubler', 'Detune']
+    # WHAT IS PINNED IS THE COVER, NOT THE ORDER.
+    #
+    # The list was an append-only wire format and the first sixteen names
+    # were pinned in place, because a saved board stores the NUMBER. 0.6.0
+    # replaced the generic pedals with modelled ones and renumbered, which
+    # that pin exists to catch - so the reason it is allowed here has to be
+    # written down rather than just overridden: every release of this
+    # module ships under a NEW module id (an in-place .so overwrite gets
+    # ETXTBSY and silently does not land), and a new id is a new component
+    # with no state to carry, so there is no board on any device reading
+    # these numbers. The pin returns below as a cover check, which is the
+    # invariant that survives a renumber.
     try:
         names = json.loads(fxl)
-        if names[:16] != ORIGINAL:
-            print("FAIL fx_list: the first 16 moved - every saved board "
-                  "re-points. got %s" % names[:16]); fail = 1
-        elif len(names) < 16:
-            print("FAIL fx_list: %d entries" % len(names)); fail = 1
+        if len(names) != len(set(names)):
+            dupes = sorted({n for n in names if names.count(n) > 1})
+            print("FAIL fx_list: two pedals share a name: %s" % dupes); fail = 1
         else:
-            print("ok   fx_list: %d pedals, the original 16 pinned in place"
-                  % len(names))
+            print("ok   fx_list: %d pedals, all distinct" % len(names))
 
-        # AND THE UI'S TREE MUST COVER IT. The plugin serves a flat list and
-        # ui_chain.js groups it by hand; a pedal missing from the tree is a
-        # pedal that ships, works, and is unreachable, with nothing to say
-        # so. A duplicate is two rows that are the same pedal.
-        tree = open('src/c/ui_chain.js').read()
-        m = re.search(r'const FX_TREE = \[(.*?)\n\];', tree, re.S)
+        # THE UI'S CATEGORIES MUST COVER IT. The plugin serves a flat list
+        # and ui_chain.js groups it by hand; a pedal missing from the
+        # categories is a pedal that ships, works, and is unreachable, with
+        # nothing to say so. A duplicate is two rows that are one pedal.
+        ui = open('src/c/ui_chain.js').read()
+        m = re.search(r'const CATS = \[(.*?)\n\];', ui, re.S)
         if not m:
-            print("FAIL fx tree: FX_TREE not found in ui_chain.js"); fail = 1
+            print("FAIL fx cats: CATS not found in ui_chain.js"); fail = 1
         else:
-            ids = [int(x) for x in re.findall(r'items:\s*\[([^\]]*)\]', m.group(1))
-                             for x in x.split(',') if x.strip()]
+            ids = [int(x) for grp in re.findall(r'items:\s*\[([^\]]*)\]', m.group(1))
+                          for x in grp.split(',') if x.strip()]
             if sorted(ids) != list(range(len(names))):
                 missing = sorted(set(range(len(names))) - set(ids))
                 dupes = sorted({i for i in ids if ids.count(i) > 1})
-                print("FAIL fx tree: missing %s, duplicated %s"
+                print("FAIL fx cats: missing %s, duplicated %s"
                       % ([names[i] for i in missing], [names[i] for i in dupes]))
                 fail = 1
             else:
-                print("ok   fx tree: every pedal reachable, exactly once")
+                print("ok   fx cats: every pedal reachable, exactly once")
+
+        # AND THE SPEC TABLE MUST DESCRIBE EVERY ONE OF THEM, with the same
+        # names. Two lists built from one C table cannot disagree - but the
+        # emitters are two functions and this is what says so.
+        specs = json.loads(section('fx_specs'))
+        if [p['n'] for p in specs] != names:
+            print("FAIL fx_specs: names disagree with fx_list"); fail = 1
+        else:
+            bad = []
+            for sp in specs:
+                if len(sp['k']) != 5: bad.append(sp['n'] + ': not 5 slots')
+                for kk in sp['k']:
+                    if not kk: continue
+                    if kk['c'] == 1 and (kk['lo'] <= 0 or kk['hi'] <= 0):
+                        bad.append(sp['n'] + '/' + kk['n'] + ': exp curve through zero')
+                    if kk['c'] == 2 and len(str(kk.get('o','')).split('|')) < int(kk['hi']):
+                        bad.append(sp['n'] + '/' + kk['n'] + ': fewer options than positions')
+                if sp['aw'] >= 0 and not sp['k'][sp['aw']]:
+                    bad.append(sp['n'] + ': alt_when points at a knob it does not have')
+            if bad:
+                print("FAIL fx_specs: " + "; ".join(bad[:4])); fail = 1
+            else:
+                print("ok   fx_specs: %d pedals described, curves sane" % len(specs))
     except Exception as e:
         print("FAIL fx_list: %s" % e); fail = 1
 
