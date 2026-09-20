@@ -125,5 +125,44 @@ drawn.length = 0;
 ui.tick();
 ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
 
+/* --- the host refusing to answer -------------------------------------- */
+/* Three ways the binding can come back useless. The menu has to stay usable
+ * in all of them, because it is the only way to remove the module from its
+ * own screen. */
+for (const [what, impl] of [
+    ['empty list', () => []],
+    ['a throw',    () => { throw new Error('state read failed'); }],
+    ['no binding', null],
+]) {
+    const h2 = Object.assign({}, host);
+    if (impl) h2.shadow_component_trailing_menus = impl;
+    else delete h2.shadow_component_trailing_menus;
+    const ran = [];
+    h2.shadow_component_run_action = (a) => { ran.push(a); return true; };
+    const seen = [];
+    h2.print = (x, y, t) => seen.push(String(t));
+    h2.clear_screen = () => {};
+    const n2 = Object.keys(h2);
+    const ui2 = new Function('globalThis', 'leds', ...n2,
+        stubs + src + '\nreturn globalThis.chain_ui;')({}, {}, ...n2.map(n => h2[n]));
+    ui2.init();
+    ui2.onMidiMessageInternal([0xb0, 3, 127]);       /* open */
+
+    /* Scroll to the bottom: Remove Module is the last action row, below a
+     * five-row fold, exactly as it is in the host's own menu. */
+    let found = false;
+    for (let i = 0; i < 10 && !found; i++) {
+        seen.length = 0;
+        ui2.tick();
+        found = seen.includes('Remove Module');
+        if (!found) ui2.onMidiMessageInternal([0xb0, 14, 1]);
+    }
+    ok(found, `host gives ${what} -> Remove Module is reachable`);
+
+    /* And it runs. The cursor is on it when the scan stopped. */
+    ui2.onMidiMessageInternal([0xb0, 3, 127]);
+    ok(ran.includes('remove_module'), `host gives ${what} -> Remove Module runs`);
+}
+
 console.log(fails ? 'FAILED' : 'PASS');
 process.exit(fails ? 1 : 0);

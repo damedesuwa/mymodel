@@ -150,21 +150,60 @@ function rotateRead() {
     }
 }
 
+/* WHAT TO OFFER WHEN THE HOST WILL NOT SAY.
+ *
+ * `shadow_component_trailing_menus()` builds its rows from the chain config,
+ * the user preset store and a blocking `<prefix>:state` read, and on the
+ * device it came back with nothing - so the menu drew its Close row and
+ * nothing else, which is a menu that cannot remove the module it is a menu
+ * for.
+ *
+ * The ACTIONS are a different binding and a much simpler one: it takes a
+ * key and runs a case. The keys are fixed in the host's own switch
+ * (runComponentActionFromGrid / moduleMenuEntries), so the rows can be
+ * stated here and the door still opens. The host's list is still preferred
+ * when it answers - it knows which preset is loaded and whether the module
+ * ships help - but it is no longer the only way in. */
+const FALLBACK_ROWS = [
+    ['Preset...',     'up_load'],
+    ['Save As',       'up_save_as'],
+    ['Add to List',   'module_lists'],
+    ['Module Help',   'module_help'],
+    ['Swap Module',   'swap_module'],
+    ['Remove Module', 'remove_module'],
+];
+
 function openMenu() {
     menuRows = [];
+    let why;
     try {
-        const secs = (typeof shadow_component_trailing_menus === 'function')
-            ? (shadow_component_trailing_menus() || []) : [];
-        for (const sec of secs) {
-            for (const e of (sec.entries || [])) {
-                if (!e || !e.label) continue;
-                menuRows.push({
-                    label: e.value ? (e.label + ': ' + e.value) : e.label,
-                    action: e.action || null,
-                });
+        if (typeof shadow_component_trailing_menus !== 'function') {
+            why = 'no binding';
+        } else {
+            const secs = shadow_component_trailing_menus() || [];
+            why = secs.length + ' sections';
+            for (const sec of secs) {
+                for (const e of (sec.entries || [])) {
+                    if (!e || !e.label) continue;
+                    menuRows.push({
+                        label: e.value ? (e.label + ': ' + e.value) : e.label,
+                        action: e.action || null,
+                    });
+                }
             }
         }
-    } catch (err) { /* a host without the binding just gets Close */ }
+    } catch (err) {
+        why = 'threw: ' + ((err && err.message) ? err.message : String(err));
+    }
+
+    if (menuRows.length === 0) {
+        for (const r of FALLBACK_ROWS) menuRows.push({ label: r[0], action: r[1] });
+        why += ' -> fallback';
+    }
+    /* Says WHICH of the three happened, so "only Close" stops being one
+     * report covering an absent binding, an empty answer and a throw. */
+    try { console.log('A2c menu: ' + why + ', ' + menuRows.length + ' rows'); } catch (e) {}
+
     menuRows.push({ label: 'Close', action: null });
     menuCursor = 0;
     menuTop = 0;
