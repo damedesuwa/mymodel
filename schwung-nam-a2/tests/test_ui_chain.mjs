@@ -76,7 +76,10 @@ ok(typeof ui.tick === 'function', 'chain_ui exports init/tick/onMidiMessageInter
 
 ui.tick();
 ok(padBlock === 1, 'tick() raises host_pad_block(1)');
-ok(drawn.some(t => t.includes('test')), 'header carries the build id');
+/* The build id moved off the pedalboard header - it was clutter on the one
+ * line you read while playing - and onto the menu, which is where you go
+ * when you are asking questions about the module. */
+ok(!drawn.some(t => String(t).includes('test')), 'pedalboard header is not carrying the build id');
 ok(drawn.some(t => t === 'NAM'), 'pedalboard draws block types');
 
 /* A pad TAP stomps. */
@@ -239,6 +242,56 @@ for (const [what, impl] of [
     ok(!seen.includes('Save As'), 'old host -> no inert rows offered');
     ui3.onMidiMessageInternal([0xb0, 3, 127]);
     ok(ran.includes('__swap'), 'old host -> it opens the picker');
+}
+
+/* --- nothing may be drawn off the screen ------------------------------ */
+/* The overlap the user reported was arithmetic on assumed text widths. The
+ * only way to keep it fixed is to check every print, in every state. */
+{
+    const bad = [];
+    const h4 = Object.assign({}, host);
+    h4.text_width = (t) => String(t).length * 6;     /* a WIDER font than
+                                                        the stub's, so the
+                                                        clipping is the
+                                                        thing under test */
+    h4.print = (x, y, t) => {
+        const w = String(t).length * 6;
+        if (x < 0 || y < 0 || x + w > 128 || y + 8 > 64)
+            bad.push(`"${t}" at ${x},${y} (w=${w})`);
+    };
+    h4.fill_rect = (x, y, w, h) => {
+        if (x < 0 || y < 0 || x + w > 128 || y + h > 64)
+            bad.push(`fill ${x},${y} ${w}x${h}`);
+    };
+    h4.draw_rect = h4.fill_rect;
+    h4.clear_screen = () => {};
+    const n4 = Object.keys(h4);
+    const mk = () => new Function('globalThis', 'leds', ...n4,
+        stubs + src + '\nreturn globalThis.chain_ui;')({}, {}, ...n4.map(n => h4[n]));
+
+    const ui4 = mk();
+    ui4.init();
+    /* Every block type, every pedal, every knob column, and the menu. */
+    for (let b = 0; b < 8; b++) {
+        params[`b${b + 1}_type`] = String(b % 4);
+        params[`b${b + 1}_on`] = String(b % 2);
+    }
+    for (let fx = 0; fx < 16; fx++) {
+        params.b1_type = '3';
+        params.b1_fx = String(fx);
+        const u = mk();
+        u.init();
+        for (let k = 0; k < 8; k++) {
+            u.onMidiMessageInternal([0xb0, 71 + k, 1]);
+            u.tick();
+        }
+    }
+    const u5 = mk();
+    u5.init();
+    u5.onMidiMessageInternal([0xb0, 3, 127]);
+    for (let i = 0; i < 8; i++) { u5.tick(); u5.onMidiMessageInternal([0xb0, 14, 1]); }
+    ok(bad.length === 0, 'nothing is drawn outside 128x64' +
+        (bad.length ? ' -- ' + bad.slice(0, 4).join('; ') : ''));
 }
 
 console.log(fails ? 'FAILED' : 'PASS');

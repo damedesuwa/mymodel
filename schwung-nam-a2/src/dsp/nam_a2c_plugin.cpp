@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "pedals"
+#define NAM_A2C_BUILD_ID "ui2"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -450,39 +450,14 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     if (!s->worker_running) plugin_log("Nam A2c: worker FAILED to start");
     { load_req_t r; memset(&r, 0, sizeof(r)); r.kind = REQ_ALLOC_FX; req_push(&s->reqs, &r); }
 
-    /* THE DEFAULT CHAIN IS BUILT TO FIT, not just to be non-empty.
+    /* NOTHING IS LOADED. An empty board is what "eight blocks you fill"
+     * means, and choosing the first two files on the card for somebody is a
+     * guess that also costs 1500 us of the frame before they have asked for
+     * anything. The pickers are one knob away.
      *
-     * A module that makes no sound on install reads as broken, and one that
-     * crackles on install reads as worse. The bundle is a pedal capture and
-     * an amp capture with the SAME architecture, so both cost ~1200 us at
-     * Full and two of them is 2400 of a 2370 us frame - over, before the
-     * cabinet. So the first model goes in at Slim (~250 us) and the second
-     * at Full:
-     *
-     *     [1] OCD   NAM  Slim   ~250 us
-     *     [2] Recto NAM  Full  ~1200 us
-     *     [3] Cab   1024 taps   ~60 us      total ~1510 of 2370
-     *
-     * With one model on the card there is nothing to make room for, so it
-     * gets Full. The rule is positional rather than by name - matching
-     * "Recto" would work for this tarball and for nothing else. */
-    int b = 0;
-    if (s->model_count > 0) {
-        s->type[b] = BLK_NAM;
-        s->amp[b].quality = (s->model_count > 1) ? 1 : 0;
-        request_load(s, b, BLK_NAM, 0);
-        b++;
-    }
-    if (s->model_count > 1) {
-        s->type[b] = BLK_NAM;
-        s->amp[b].quality = 0;
-        request_load(s, b, BLK_NAM, 1);
-        b++;
-    }
-    if (s->cab_count > 0) {
-        s->type[b] = BLK_CAB;
-        request_load(s, b, BLK_CAB, 0);
-    }
+     * It used to build OCD -> Recto -> Cab so a fresh install made a sound
+     * rather than reading as broken; the pedalboard picture answers that
+     * now - eight empty boxes are visibly eight empty boxes. */
 
     s->diag_stop = 0;
     s->diag_running = start_low_prio_thread(&s->diag_tid, diag_thread, s, 0);

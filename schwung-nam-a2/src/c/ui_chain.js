@@ -296,7 +296,8 @@ function runMenuRow() {
 
 function drawMenu() {
     clear_screen();
-    print(2, 1, 'Nam A2c  ' + st.build, 1);
+    ptext(1, 1, 'Nam A2c', 1, 80);
+    pright(126, 1, st.build, 1, 44);
     fill_rect(0, 10, 128, 1, 1);
     if (menuCursor < menuTop) menuTop = menuCursor;
     if (menuCursor >= menuTop + MENU_VISIBLE) menuTop = menuCursor - MENU_VISIBLE + 1;
@@ -305,9 +306,15 @@ function drawMenu() {
         if (idx >= menuRows.length) break;
         const y = 14 + i * 10;
         if (idx === menuCursor) fill_rect(0, y - 1, 128, 10, 1);
-        const t = menuRows[idx].label;
-        print(2, y, t.length > 24 ? t.slice(0, 24) : t, idx === menuCursor ? 0 : 1);
+        ptext(2, y, menuRows[idx].label, idx === menuCursor ? 0 : 1, 124);
     }
+    /* The picker's FIRST row is None, and picking it is how a module is
+     * removed on this host. Saying "Swap / Remove" without saying where the
+     * Remove is leaves you scrolling a list of thirty modules looking for
+     * a row that is above all of them. */
+    const cur = menuRows[menuCursor];
+    if (cur && cur.action === SWAP_ROW)
+        ptext(2, 55, 'pick None (top) to remove', 1, 124);
 }
 
 function selKey(k) { return 'b' + (sel + 1) + '_' + k; }
@@ -324,96 +331,136 @@ function readSelected() {
 
 /* ------------------------------------------------------------------ draw */
 
-function drawBoxes() {
-    /* Eight boxes across 128 px: 14 wide, 2 apart, starting at 3. */
-    const W = 14, GAP = 2, X0 = 3, Y = 12, H = 20;
-    for (let b = 0; b < NUM_BLOCKS; b++) {
-        const x = X0 + b * (W + GAP);
-        const t = st.type[b];
-        const live = t !== TYPE_OFF && st.on[b];
+/*
+ * THE SCREEN IS 128 x 64 AND EVERY STRING HERE IS VARIABLE.
+ *
+ * The first cut positioned text by arithmetic on assumed character widths
+ * and let it run off the end: the footer hint was 30 characters against a
+ * 128 px line, eight 14 px boxes with a 2 px gap came to 129 px, and a
+ * three-character label centred in a 14 px box started at a negative
+ * offset and spilled into its neighbour. Nothing clips itself.
+ *
+ * So there is no arithmetic on text anywhere below. Everything goes
+ * through these three, which ask text_width() and SHORTEN until it fits.
+ * A name that does not fit is cut; nothing is ever drawn over.
+ */
+function clipTo(t, w) {
+    let str = String(t === undefined || t === null ? '' : t);
+    while (str.length > 1 && text_width(str) > w) str = str.slice(0, -1);
+    return str;
+}
+function ptext(x, y, t, ink, w) { print(x, y, clipTo(t, w), ink); }
+function pcenter(x, w, y, t, ink) {
+    const str = clipTo(t, w);
+    print(x + Math.max(0, (w - text_width(str)) >> 1), y, str, ink);
+}
+function pright(xr, y, t, ink, w) {
+    const str = clipTo(t, w);
+    print(xr - text_width(str), y, str, ink);
+}
 
-        if (b === sel) fill_rect(x - 1, Y - 2, W + 2, H + 4, 1);
+/* The layout, in one place, so a change to one band cannot silently land on
+ * top of another. */
+const BOX_Y = 12, BOX_H = 18, BOX_W = 15, BOX_GAP = 1;   /* 8*15 + 7*1 = 127 */
+const SELBAR_Y = BOX_Y + BOX_H + 2;                      /*  32            */
+const CELL_Y = 36, CELL_H = 19, CELL_W = 31;             /* 4 * 32 = 128    */
+const FOOT_Y = 56;   /* 56 + 8 = 64 exactly; 57 runs a pixel off the bottom */
 
-        if (live) {
-            fill_rect(x, Y, W, H, b === sel ? 0 : 1);
-        } else {
-            draw_rect(x, Y, W, H, b === sel ? 0 : 1);
-        }
-
-        const ink = live ? (b === sel ? 1 : 0) : (b === sel ? 0 : 1);
-        let lbl = TYPE_ABBREV[t];
-        if (t === TYPE_FX) {
-            const nm = st.names.fx[st.fx[b]];
-            lbl = nm ? nm.slice(0, 3) : 'FX';
-        }
-        print(x + ((W - text_width(lbl)) >> 1), Y + 3, lbl, ink);
-
-        /* A bypassed block that HAS a type still says so - it is the
-         * difference between "empty" and "switched off", and on a
-         * pedalboard that is the whole point of the picture. */
-        if (t !== TYPE_OFF && !st.on[b]) print(x + ((W - text_width('B')) >> 1), Y + 11, 'B', ink);
-        else if (t !== TYPE_OFF) {
-            const pc = String(Math.round(st.blockCpu[b]));
-            print(x + ((W - text_width(pc)) >> 1), Y + 11, pc, ink);
-        }
-    }
+function blockLabel(b) {
+    const t = st.type[b];
+    if (t === TYPE_FX)  return st.names.fx[st.fx[b]] || 'FX';
+    if (t === TYPE_NAM) return 'NAM';
+    if (t === TYPE_CAB) return 'CAB';
+    return '';
 }
 
 function drawHeader() {
-    const cpu = Math.round(st.cpu);
-    const left = 'A2c ' + st.build + ' blk' + (sel + 1);
-    print(2, 1, left, 1);
-    const right = cpu + '%';
-    /* Over budget is the one thing on this screen worth inverting for. */
-    if (cpu >= 70) {
-        fill_rect(126 - text_width(right) - 2, 0, text_width(right) + 4, 9, 1);
-        print(128 - text_width(right) - 2, 1, right, 0);
+    const cpu = Math.round(st.cpu) + '%';
+    const cw = text_width(cpu) + 3;
+    if (Math.round(st.cpu) >= 70) {
+        fill_rect(128 - cw, 0, cw, 9, 1);
+        pright(126, 1, cpu, 0, cw);
     } else {
-        print(128 - text_width(right) - 2, 1, right, 1);
+        pright(126, 1, cpu, 1, cw);
+    }
+    /* What is selected and what it is - the one line worth reading first. */
+    const what = blockLabel(sel);
+    ptext(1, 1, 'B' + (sel + 1) + (what ? ' ' + what : ' --'), 1, 128 - cw - 2);
+    fill_rect(0, 10, 128, 1, 1);
+}
+
+function drawBoxes() {
+    for (let b = 0; b < NUM_BLOCKS; b++) {
+        const x = b * (BOX_W + BOX_GAP);
+        const t = st.type[b];
+        const live = t !== TYPE_OFF && st.on[b];
+
+        if (live) fill_rect(x, BOX_Y, BOX_W, BOX_H, 1);
+        else      draw_rect(x, BOX_Y, BOX_W, BOX_H, 1);
+        const ink = live ? 0 : 1;
+
+        if (t === TYPE_OFF) {
+            pcenter(x, BOX_W, BOX_Y + 6, '-', ink);
+        } else {
+            pcenter(x, BOX_W, BOX_Y + 2, blockLabel(b), ink);
+            /* A block that is switched off says so; one that is on shows
+             * what it costs. Empty and bypassed have to be tellable apart -
+             * that is most of what the picture is for. */
+            pcenter(x, BOX_W, BOX_Y + 10,
+                    st.on[b] ? String(Math.round(st.blockCpu[b])) : 'B', ink);
+        }
+
+        /* Selection is a bar UNDER the box, not a border around it: a border
+         * needs a pixel on each side and there is not one to spare. */
+        if (b === sel) fill_rect(x, SELBAR_Y, BOX_W, 2, 1);
     }
 }
 
-function drawSelected() {
+function drawCells() {
     const list = knobList();
-    let x = 2;
-    const y = 40;
-    /* Eight knobs, four cells across 128 px: the row follows the last knob
-     * you touched rather than always showing the first four. A pedal with
-     * three controls past the tree would otherwise have them off screen. */
+    /* Four cells across; the row follows the knob last touched, so a
+     * pedal's own controls are never off the end of the tree. */
     let first = 0;
     if (lastKnob >= 4) first = Math.min(lastKnob - 3, Math.max(0, list.length - 4));
+
     for (let i = first; i < list.length && i < first + 4; i++) {
-        const s = list[i];
-        const v = st.val[selKey(s.key)];
+        const col = i - first;
+        const x = col * 32;
+        const spec = list[i];
+        const on = (i === lastKnob);
+        if (on) fill_rect(x, CELL_Y - 2, CELL_W, CELL_H, 1);
+        const ink = on ? 0 : 1;
+
         let shown;
-        if (s.kind === 'fxcat') shown = FX_TREE[fxCategoryOf(st.fx[sel])].name;
-        else if (s.kind === 'fxid') shown = st.names.fx[st.fx[sel]] || String(st.fx[sel]);
-        else if (s.kind === 'float') shown = (v === undefined) ? '-' : String(Math.round(v * 100));
-        else if (s.kind === 'enum') shown = (v === undefined) ? '-'
-            : (s.names ? s.names[v] : TYPE_ABBREV[v]) || String(v);
-        else shown = (v === undefined) ? '-' : listNameFor(s.key, v);
-        if (i === lastKnob) fill_rect(x - 1, y - 1, 30, 19, 1);
-        print(x, y, s.label, i === lastKnob ? 0 : 1);
-        /* A model name is longer than a cell, so the cell gets a clipped
-         * form and the full one goes on the line below - which is empty
-         * whenever nothing on this page is a list. */
-        print(x, y + 9, shown.length > 5 ? shown.slice(0, 5) : shown,
-              i === lastKnob ? 0 : 1);
-        x += 32;
+        const v = st.val[selKey(spec.key)];
+        if (spec.kind === 'fxcat')      shown = FX_TREE[fxCategoryOf(st.fx[sel])].name;
+        else if (spec.kind === 'fxid')  shown = st.names.fx[st.fx[sel]] || String(st.fx[sel]);
+        else if (spec.kind === 'float') shown = (v === undefined) ? '-' : String(Math.round(v * 100));
+        else if (spec.kind === 'enum')  shown = (v === undefined) ? '-'
+            : ((spec.names ? spec.names[v] : TYPE_ABBREV[v]) || String(v));
+        else                            shown = (v === undefined) ? '-' : listNameFor(spec.key, v);
+
+        ptext(x + 1, CELL_Y, spec.label, ink, CELL_W - 2);
+        ptext(x + 1, CELL_Y + 9, shown, ink, CELL_W - 2);
     }
-    /* The full name of whatever the row had to clip. */
-    const full = list.find(s => s.kind === 'list' || s.kind === 'fxid');
+    return list;
+}
+
+function drawFooter(list) {
+    /* One line, and it prefers the thing that had to be cut above: a model
+     * or pedal name is longer than a 31 px cell and is the one string here
+     * you actually need in full. */
+    const full = list.find(k => k.kind === 'list' || k.kind === 'fxid');
     if (full) {
         const v = (full.kind === 'fxid') ? st.fx[sel] : st.val[selKey(full.key)];
         if (v !== undefined) {
-            const nm = (full.kind === 'fxid')
-                ? (st.names.fx[v] || String(v))
-                : listNameFor(full.key, v);
-            print(2, 56, nm.length > 24 ? nm.slice(0, 24) : nm, 1);
+            ptext(1, FOOT_Y, (full.kind === 'fxid')
+                    ? (st.names.fx[v] || String(v))
+                    : listNameFor(full.key, v), 1, 126);
             return;
         }
     }
-    print(2, 56, 'tap=stomp hold=edit click=menu', 1);
+    ptext(1, FOOT_Y, 'tap:stomp  hold:edit', 1, 126);
 }
 
 function draw() {
@@ -421,7 +468,7 @@ function draw() {
     clear_screen();
     drawHeader();
     drawBoxes();
-    drawSelected();
+    drawFooter(drawCells());
 }
 
 /* ------------------------------------------------------------------ LEDs */
