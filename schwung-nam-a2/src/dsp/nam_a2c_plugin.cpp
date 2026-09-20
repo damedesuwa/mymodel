@@ -32,7 +32,7 @@
 
 #include "a2_common.h"
 
-#define NAM_A2C_BUILD_ID "pads-2"
+#define NAM_A2C_BUILD_ID "pads-3"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -315,6 +315,64 @@ static void request_load(a2c_t *s, int block, int kind, int index) {
     req_push(&s->reqs, &r);
 }
 
+/* WHAT IS ACTUALLY ON THE CARD, reported at load.
+ *
+ * The pads need ui_chain.js; ui_chain.js is only loaded when the module
+ * declares NO ui_hierarchy (enterComponentEdit returns early when it finds
+ * one); and the host reads that declaration out of module.json ON DISK,
+ * with a plain strstr for the literal "ui_hierarchy"
+ * (chain_params.c:824). So three facts decide whether the pads exist, all
+ * three live in the install rather than in this binary, and none of them
+ * says anything when it is wrong - the grid simply comes up and the pads
+ * are silently not a feature.
+ *
+ * Two rounds of this hunt were spent on a device whose files did not match
+ * the tarball that was being discussed. So the module reads its own
+ * install and says what it found. */
+static void report_install(a2c_t *s) {
+    char path[MAX_PATH_LEN];
+    char msg[MAX_PATH_LEN + 192];
+
+    snprintf(path, sizeof(path), "%s/module.json", s->module_dir);
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        snprintf(msg, sizeof(msg), "Nam A2c INSTALL: no module.json at %s", path);
+        plugin_log(msg);
+        return;
+    }
+    static char buf[65536];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+
+    int has_hier = strstr(buf, "\"ui_hierarchy\"") != NULL;
+
+    char ver[32] = "?";
+    const char *v = strstr(buf, "\"version\"");
+    if (v) {
+        v = strchr(v + 9, '"');
+        if (v) {
+            v++;
+            int i = 0;
+            while (*v && *v != '"' && i < (int)sizeof(ver) - 1) ver[i++] = *v++;
+            ver[i] = '\0';
+        }
+    }
+
+    snprintf(path, sizeof(path), "%s/ui_chain.js", s->module_dir);
+    int has_ui = access(path, R_OK) == 0;
+
+    snprintf(msg, sizeof(msg),
+             "Nam A2c INSTALL: module.json v%s | ui_hierarchy %s | ui_chain.js %s | PADS %s",
+             ver,
+             has_hier ? "PRESENT" : "absent",
+             has_ui ? "present" : "MISSING",
+             (!has_hier && has_ui) ? "OK"
+                 : has_hier ? "DEAD - stale module.json, the host grid wins"
+                 : "DEAD - ui_chain.js did not install");
+    plugin_log(msg);
+}
+
 static void *v2_create_instance(const char *module_dir, const char *config_json) {
     (void)config_json;
     a2c_t *s = (a2c_t *)calloc(1, sizeof(a2c_t));
@@ -348,6 +406,7 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     s->out_gain = knob_to_gain(s->out_level);
     s->sel_block = 0;
 
+    report_install(s);
     scan_lists(s);
 
     s->worker_stop = 0;
