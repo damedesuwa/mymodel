@@ -32,7 +32,7 @@
 
 #include "a2_common.h"
 
-#define NAM_A2C_BUILD_ID "pads-3"
+#define NAM_A2C_BUILD_ID "denorm"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -191,6 +191,16 @@ static void *worker_thread(void *arg) {
             continue;
         }
         if (r.block < 0 || r.block >= NUM_BLOCKS) continue;
+
+        /* SUPERSEDED? Turning the Model knob queues one request per detent,
+         * and the device log has a block reloading OCD, Recto, OCD, Recto
+         * six times in two seconds - six full .nam parses, of which five are
+         * thrown away, delaying the one that matters by a second. The
+         * producer writes `index` at request time, so a request whose index
+         * is no longer the block's current one has already been overtaken.
+         * A plain int read; the ring stays single-producer. */
+        if (r.kind == BLK_NAM && s->amp[r.block].index != r.index) continue;
+        if (r.kind == BLK_CAB && s->cab[r.block].index != r.index) continue;
 
         if (r.kind == BLK_NAM) {
             nam_block_t *b = &s->amp[r.block];

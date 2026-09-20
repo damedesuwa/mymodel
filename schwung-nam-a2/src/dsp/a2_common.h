@@ -94,6 +94,29 @@ static inline float clampf(float v, float lo, float hi) {
  * Test the exponent bits instead. That cannot be optimised away, costs a
  * compare and a branch that predicts perfectly, and turns a model blowing
  * up into silence rather than into full-scale noise through the speaker. */
+/* FLUSH A DENORMAL TO ZERO.
+ *
+ * Every recursive filter here decays toward zero when the input goes quiet,
+ * and on the way it passes through the subnormal range, where the FPU traps
+ * to microcode. Measured on the device, from the diag line's own numbers:
+ *
+ *     signal present (in pk > 0.05)   18 us avg, 25 max
+ *     near silence   (in pk <= 0.001) 388 us avg, 891 max
+ *
+ * Fifty times, on a block whose whole budget is a few microseconds - and it
+ * costs the frame exactly when nothing is playing, so it reads as a random
+ * dropout rather than as a load. It pushed `Slot fx` to 2627 us against a
+ * 2370 us budget and took `blocks/s` from 345 down to 326.
+ *
+ * Two compares, no library call, and correct under -ffinite-math-only
+ * (this is a magnitude test, not a NaN test, so -Ofast cannot fold it).
+ * Setting FPCR.FZ would be cheaper still, but this runs on the HOST's SPI
+ * callback thread and that flag is per-thread state belonging to somebody
+ * else. */
+static inline float flush_denormal(float v) {
+    return (v > -1e-20f && v < 1e-20f) ? 0.0f : v;
+}
+
 static inline int sample_is_zero(float v) { return v == 0.0f; }
 
 static inline float sanitize_sample(float v) {
@@ -362,7 +385,7 @@ static void ir_block_process(ir_block_t *b, float *audio, int frames) {
     const int n = frames;
 
     memmove(hist, hist + n, (size_t)(L - 1) * sizeof(float));
-    memcpy(hist + (L - 1), audio, (size_t)n * sizeof(float));
+    for (int i = 0; i < n; i++) hist[(L - 1) + i] = flush_denormal(audio[i]);
 
     float acc[FRAMES_PER_BLOCK];
     for (int i = 0; i < n; i++) acc[i] = 0.0f;
@@ -528,8 +551,8 @@ static void drive_block_process(drive_block_t *d, float *audio, int frames) {
 
         if (hp_a > 0.0f) {
             float y = x - d->hp_x1 + hp_a * d->hp_y1;
-            d->hp_x1 = x;
-            d->hp_y1 = y;
+            d->hp_x1 = flush_denormal(x);
+            d->hp_y1 = flush_denormal(y);
             x = y;
         }
 
@@ -553,7 +576,7 @@ static void drive_block_process(drive_block_t *d, float *audio, int frames) {
             }
         }
 
-        d->lp_y1 += lp_a * (x - d->lp_y1);
+        d->lp_y1 = flush_denormal(d->lp_y1 + lp_a * (x - d->lp_y1));
         x = d->lp_y1 + (x - d->lp_y1) * d->tone;
 
         audio[i] = sanitize_sample(x * out * 0.35f);
@@ -637,8 +660,8 @@ static void nam_block_process(nam_block_t *b, float *mono, float *scratch,
     for (int i = 0; i < frames; i++) {
         float x = mono[i];
         float y = x - b->dc_x1 + 0.9971f * b->dc_y1;
-        b->dc_x1 = x;
-        b->dc_y1 = y;
+        b->dc_x1 = flush_denormal(x);
+        b->dc_y1 = flush_denormal(y);
         mono[i] = sanitize_sample(y);
     }
 }
