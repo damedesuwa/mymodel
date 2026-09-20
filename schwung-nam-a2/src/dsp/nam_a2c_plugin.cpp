@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "ui2"
+#define NAM_A2C_BUILD_ID "fx26"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -59,7 +59,17 @@ static const char *FX_NAMES[FX_COUNT] = {
     "Chorus", "Phaser", "Tremolo",
     "Delay", "Slapback", "Reverb",
     "Doubler", "Detune",
+    "Flanger", "Vibrato", "Rotary",
+    "Wah", "Lo-Fi",
+    "Octave", "Ring Mod",
+    "Tape Echo", "Spring",
+    "Limiter",
 };
+/* The table and the enum are one fact in two places, and a table one entry
+ * short is a read past its end on the highest pedal - which is a pedal that
+ * works in the DSP and crashes the picker. */
+static_assert(sizeof(FX_NAMES) / sizeof(FX_NAMES[0]) == FX_COUNT,
+              "FX_NAMES must name every pedal in the enum");
 
 static const char *block_type_name(int t) {
     switch (t) {
@@ -732,7 +742,13 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                         s->cpu_warn ? " !" : "");
     }
     if (strcmp(key, "display_name") == 0) {
-        if (!s->cpu_warn) return -1;
+        /* EMPTY, NEVER -1. -1 is the wire's "the read did not complete",
+         * which the host retries and then reports as a give-up: the device
+         * log carried `param_giveup ... last_key=fx1:display_name` every
+         * eight seconds for as long as this answered -1, because the chain
+         * line polls this key and nothing was ever going to answer it. An
+         * empty string is the honest "served, and there is nothing here". */
+        if (!s->cpu_warn) { if (buf_len > 0) buf[0] = 0; return 0; }
         return snprintf(buf, buf_len, "Nam A2c CPU overload");
     }
     if (strcmp(key, "is_loading") == 0 || strcmp(key, "loading") == 0) {
@@ -812,7 +828,16 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                            i ? "," : "", FX_NAMES[i]);
         snprintf(fxopts + fw, sizeof(fxopts) - fw, "]");
 
-        for (int i = 1; i <= NUM_BLOCKS && w < buf_len - 3072; i++) {
+        /* The per-block cost is two option lists plus the pedal list plus
+         * the fixed text, so the headroom to check is MEASURED rather than
+         * guessed at. It was a flat 3072 while one iteration can write over
+         * 8 KB with a full card - snprintf truncates safely, but a truncated
+         * array is invalid JSON, which is silently rejected and falls back
+         * to module.json, which is how `access` and `live` went missing for
+         * four builds. */
+        const int per_block = (int)(strlen(models) * 1 + strlen(cabs) * 1 +
+                                    strlen(fxopts) + 1024);
+        for (int i = 1; i <= NUM_BLOCKS && w + per_block < buf_len; i++) {
             w += snprintf(buf + w, buf_len - w,
                 ",{\"key\":\"b%d_type\",\"name\":\"Type\",\"type\":\"enum\","
                   "\"options\":[\"Off\",\"NAM\",\"Cab\",\"FX\"],\"default\":0}"

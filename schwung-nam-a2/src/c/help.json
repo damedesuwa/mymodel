@@ -1,34 +1,44 @@
 {
   "title": "Nam A2c",
   "sections": [
-    { "title": "Eight blocks",
+    {
+      "title": "Eight blocks",
       "lines": [
         "In -> 1 -> 2 -> ... -> 8 -> Out.",
         "Bottom pad row = the eight blocks.",
         "TAP a pad to stomp it.",
         "HOLD a pad to edit it.",
         "JOG CLICK opens the menu."
-      ] },
-    { "title": "Choosing a block",
+      ]
+    },
+    {
+      "title": "Choosing a block",
       "lines": [
         "Knob 1  Off / NAM / Cab / FX",
         "Knob 2  the family (Drive, Dynamic,",
         "        Filter, Mod, Time, Pitch)",
-        "Knob 3  the pedal",
-        "Knob 4+ that pedal's controls"
-      ] },
-    { "title": "CPU is the limit",
+        "Knob 3  the pedal - 26 of them",
+        "Knob 4-6  that pedal's controls",
+        "Knob 7  In level   Knob 8  Out level",
+        "A lit ring = that knob does something."
+      ]
+    },
+    {
+      "title": "CPU is the limit",
       "lines": [
         "A frame has ~2370us of room.",
         "NAM Full ~1200us, Slim ~250us.",
         "Cab ~60us. A pedal 20-40us.",
         "So: one amp, and seven pedals.",
         "The CPU cell on the header is real."
-      ] },
-    { "title": "Files",
+      ]
+    },
+    {
+      "title": "Files",
       "lines": [
         "Models in models/, cabs in cabs/.",
         "Drop them in at move.local:7700."
-      ] }
+      ]
+    }
   ]
 }

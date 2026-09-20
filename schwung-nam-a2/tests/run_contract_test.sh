@@ -84,15 +84,46 @@ fxl = section('fx_list')
 if fxl in (None, '(unserved)'):
     print("FAIL fx_list: not served, so the tree has no names"); fail = 1
 else:
+    # The FIRST SIXTEEN are pinned by NAME AND POSITION, because a board
+    # saved before 0.5.0 stores the number: reordering them re-points every
+    # pedal on every saved board, silently. Anything after them is appended
+    # and only has to exist.
+    ORIGINAL = ['Overdrive', 'Distortion', 'Fuzz', 'Boost',
+                'Compressor', 'Gate', 'EQ', 'Auto Wah',
+                'Chorus', 'Phaser', 'Tremolo',
+                'Delay', 'Slapback', 'Reverb', 'Doubler', 'Detune']
     try:
         names = json.loads(fxl)
-        if names[0] != 'Overdrive' or names[-1] != 'Detune' or len(names) != 16:
-            print("FAIL fx_list: %d entries, %s..%s - the UI's tree indexes this"
-                  % (len(names), names[0], names[-1])); fail = 1
+        if names[:16] != ORIGINAL:
+            print("FAIL fx_list: the first 16 moved - every saved board "
+                  "re-points. got %s" % names[:16]); fail = 1
+        elif len(names) < 16:
+            print("FAIL fx_list: %d entries" % len(names)); fail = 1
         else:
-            print("ok   fx_list: %d pedals, order pinned" % len(names))
+            print("ok   fx_list: %d pedals, the original 16 pinned in place"
+                  % len(names))
+
+        # AND THE UI'S TREE MUST COVER IT. The plugin serves a flat list and
+        # ui_chain.js groups it by hand; a pedal missing from the tree is a
+        # pedal that ships, works, and is unreachable, with nothing to say
+        # so. A duplicate is two rows that are the same pedal.
+        tree = open('src/c/ui_chain.js').read()
+        m = re.search(r'const FX_TREE = \[(.*?)\n\];', tree, re.S)
+        if not m:
+            print("FAIL fx tree: FX_TREE not found in ui_chain.js"); fail = 1
+        else:
+            ids = [int(x) for x in re.findall(r'items:\s*\[([^\]]*)\]', m.group(1))
+                             for x in x.split(',') if x.strip()]
+            if sorted(ids) != list(range(len(names))):
+                missing = sorted(set(range(len(names))) - set(ids))
+                dupes = sorted({i for i in ids if ids.count(i) > 1})
+                print("FAIL fx tree: missing %s, duplicated %s"
+                      % ([names[i] for i in missing], [names[i] for i in dupes]))
+                fail = 1
+            else:
+                print("ok   fx tree: every pedal reachable, exactly once")
     except Exception as e:
-        print("FAIL fx_list: invalid JSON - %s" % e); fail = 1
+        print("FAIL fx_list: %s" % e); fail = 1
 
 # The UI reads these to NAME what is loaded; an index is not an answer.
 for k in ('model_list', 'cab_list', 'fx_list'):

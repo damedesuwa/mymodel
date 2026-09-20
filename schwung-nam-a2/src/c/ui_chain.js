@@ -18,7 +18,7 @@
  * editable things, a cab has one, a drive has four.
  */
 
-import { setLED, decodeDelta, invalidateLedCache } from '/data/UserData/schwung/shared/input_filter.mjs';
+import { setLED, setButtonLED, decodeDelta, invalidateLedCache } from '/data/UserData/schwung/shared/input_filter.mjs';
 
 const NUM_BLOCKS = 8;
 const PAD_BASE = 68;            /* bottom row, notes 68..75 */
@@ -40,12 +40,12 @@ const TYPE_ABBREV = ['--', 'NAM', 'CAB', 'FX'];
  * plugin does not know these families exist, so adding a pedal is a number
  * in one of these rows plus a case in fx_block_process. */
 const FX_TREE = [
-    { name: 'Drive',  items: [0, 1, 2, 3] },      /* OD, Dist, Fuzz, Boost   */
-    { name: 'Dynamic', items: [4, 5] },           /* Comp, Gate              */
-    { name: 'Filter', items: [6, 7] },            /* EQ, Auto Wah            */
-    { name: 'Mod',    items: [8, 9, 10] },        /* Chorus, Phaser, Trem    */
-    { name: 'Time',   items: [11, 12, 13] },      /* Delay, Slap, Reverb     */
-    { name: 'Pitch',  items: [14, 15] },          /* Doubler, Detune         */
+    { name: 'Drive',   items: [0, 1, 2, 3] },              /* OD Dist Fuzz Boost   */
+    { name: 'Dynamic', items: [4, 5, 25] },                /* Comp Gate Limiter    */
+    { name: 'Filter',  items: [6, 7, 19, 20] },            /* EQ AWah Wah LoFi     */
+    { name: 'Mod',     items: [8, 16, 9, 17, 10, 18] },    /* Cho Fla Pha Vib Tre Rot */
+    { name: 'Time',    items: [11, 12, 23, 13, 24] },      /* Dly Slap Tape Rev Spring */
+    { name: 'Pitch',   items: [14, 15, 21, 22] },          /* Dbl Det Oct Ring     */
 ];
 
 /* What each pedal's five knobs are called. Unnamed ones are not offered -
@@ -65,8 +65,18 @@ const FX_PARAM_NAMES = [
     ['Time', 'Fdbk', 'Mix'],         /* 11 Delay      */
     ['Time', 'Fdbk', 'Mix'],         /* 12 Slapback   */
     ['Size', 'Damp', 'Mix'],         /* 13 Reverb     */
-    ['Amount', '', 'Mix'],           /* 14 Doubler    */
+    ['Spread', 'Drift', 'Level'],    /* 14 Doubler    */
     ['Amount', '', 'Mix'],           /* 15 Detune     */
+    ['Rate', 'Depth', 'Fdbk'],       /* 16 Flanger    */
+    ['Rate', 'Depth'],               /* 17 Vibrato    */
+    ['Speed', 'Depth', 'Mix'],       /* 18 Rotary     */
+    ['Pedal', 'Q', 'Mix'],           /* 19 Wah        */
+    ['Bits', 'Rate', 'Mix'],         /* 20 Lo-Fi      */
+    ['Sub', 'Tone', 'Mix'],          /* 21 Octave     */
+    ['Freq', '', 'Mix'],             /* 22 Ring Mod   */
+    ['Time', 'Fdbk', 'Mix'],         /* 23 Tape Echo  */
+    ['Decay', 'Tone', 'Mix'],        /* 24 Spring     */
+    ['Ceil', 'Rel'],                 /* 25 Limiter    */
 ];
 
 function fxCategoryOf(id) {
@@ -90,8 +100,32 @@ const TYPE_LED = [
  * Type, so a block can be re-typed without leaving the pedalboard. */
 const TYPE_KNOB = { key: 'type', label: 'Type', kind: 'enum', n: 4 };
 
+/* KNOBS 7 AND 8 ARE THE BOARD'S, not the block's.
+ *
+ * Nothing here ever needs more than six: a pedal is Type, Group, Pedal and
+ * at most three of its own. So the last two encoders are free on every
+ * screen, permanently, and the two controls that belong to the whole board
+ * rather than to one block go there - where they are always in the same
+ * place and never scroll.
+ *
+ * This is also the answer to "there is no input or output level": the
+ * plugin has had in_level and out_level since the first build, but with no
+ * hierarchy there is no host grid to show them, so they were reachable
+ * from nowhere. */
+const GLOBAL_KNOBS = [
+    { key: 'in_level',  label: 'In',  kind: 'float', global: true },
+    { key: 'out_level', label: 'Out', kind: 'float', global: true },
+];
+const GAP_KNOB = { key: '', label: '', kind: 'gap' };
+const NUM_KNOBS = 8;
+
+/* Which param a spec actually addresses. A block's keys are prefixed with
+ * its number; the board's are not, and using selKey on one writes
+ * `b3_in_level`, which nothing serves and nothing reports. */
+function fullKey(spec) { return spec.global ? spec.key : selKey(spec.key); }
+
 /* Built per block rather than declared, because past knob 3 the list is a
- * property of the PEDAL and there are sixteen of them. */
+ * property of the PEDAL and there are twenty-six of them. */
 function knobsFor(type, fxId) {
     if (type === TYPE_NAM)
         return [TYPE_KNOB,
@@ -112,6 +146,17 @@ function knobsFor(type, fxId) {
         return out;
     }
     return [TYPE_KNOB];
+}
+
+/* The block's knobs, then blanks, then the board's two - so In and Out are
+ * always encoders 7 and 8 whatever is loaded. A blank claims its encoder
+ * and does nothing with it, which is the point: an unused knob between the
+ * pedal and the levels must not shift the levels onto it. */
+function padToBoard(list) {
+    const out = list.slice(0, NUM_KNOBS - GLOBAL_KNOBS.length);
+    while (out.length < NUM_KNOBS - GLOBAL_KNOBS.length) out.push(GAP_KNOB);
+    for (const g of GLOBAL_KNOBS) out.push(g);
+    return out;
 }
 
 let sel = 0;
@@ -138,6 +183,42 @@ let padDownAt = [];             /* when each pad went down, or 0 */
 let padHandled = [];            /* hold already fired, so the release is not a tap */
 let lastPaint = 0;
 let lastKnob = 0;   /* which cell the row is following */
+
+/*
+ * THE ENCODERS ARE NOT DETENTED AND THE SHIM COALESCES, so one CC can carry
+ * ten ticks.
+ *
+ * decodeDelta returns the MAGNITUDE (1..63), and this screen was stepping
+ * every discrete control by exactly one per MESSAGE - so a list of models
+ * moved one entry for a flick of the wrist and six for a turn, with no
+ * relationship between how far the knob went and how far the list did.
+ * Reported from the device as the knobs being too sensitive to set
+ * anything. The float case had the opposite half of the same bug: it
+ * multiplied by the magnitude, so a fast turn jumped 20 units at once.
+ *
+ * Both are fixed by ACCUMULATING the ticks and spending them:
+ *
+ *   - a discrete control costs DETENTS_PER_STEP ticks per step, with the
+ *     remainder kept, so a slow turn advances one at a time and a fast one
+ *     still covers ground in proportion to the turn;
+ *   - a float moves FLOAT_STEP per tick, which is one unit of the 0-100 the
+ *     cell shows. What you see move is what you turned.
+ *
+ * The remainder is per KNOB and is dropped whenever the knob list changes
+ * underneath, or a half-turn saved up for Pedal lands on Drive.
+ */
+const DETENTS_PER_STEP = 3;
+const FLOAT_STEP = 0.01;
+const knobAcc = new Array(NUM_KNOBS).fill(0);
+
+function resetKnobAcc() { for (let i = 0; i < NUM_KNOBS; i++) knobAcc[i] = 0; }
+
+function knobSteps(idx, d) {
+    knobAcc[idx] += d;
+    const steps = (knobAcc[idx] / DETENTS_PER_STEP) | 0;   /* toward zero */
+    knobAcc[idx] -= steps * DETENTS_PER_STEP;
+    return steps;
+}
 
 /* A cache, because an IPC read is ~2.8 ms and a whole page render is 1.68 -
  * so a read costs more than redrawing the screen. Nothing is read on the
@@ -319,14 +400,18 @@ function drawMenu() {
 
 function selKey(k) { return 'b' + (sel + 1) + '_' + k; }
 
-function knobList() { return knobsFor(st.type[sel], st.fx[sel]); }
+function knobList() { return padToBoard(knobsFor(st.type[sel], st.fx[sel])); }
 
 function readSelected() {
     for (const s of knobList()) {
-        const k = selKey(s.key);
+        if (s.kind === 'gap') continue;
+        const k = fullKey(s);
         const v = getp(k);
         if (v !== null && v !== '') st.val[k] = Number(v);
     }
+    /* The pedal changed under the encoders, so a half-turn that was being
+     * accumulated for the OLD knob must not land on the new one. */
+    resetKnobAcc();
 }
 
 /* ------------------------------------------------------------------ draw */
@@ -427,12 +512,15 @@ function drawCells() {
         const col = i - first;
         const x = col * 32;
         const spec = list[i];
+        /* A blank encoder draws nothing at all - not a box, not a dash.
+         * Its ring is dark for the same reason and the two have to agree. */
+        if (spec.kind === 'gap') continue;
         const on = (i === lastKnob);
         if (on) fill_rect(x, CELL_Y - 2, CELL_W, CELL_H, 1);
         const ink = on ? 0 : 1;
 
         let shown;
-        const v = st.val[selKey(spec.key)];
+        const v = st.val[fullKey(spec)];
         if (spec.kind === 'fxcat')      shown = FX_TREE[fxCategoryOf(st.fx[sel])].name;
         else if (spec.kind === 'fxid')  shown = st.names.fx[st.fx[sel]] || String(st.fx[sel]);
         else if (spec.kind === 'float') shown = (v === undefined) ? '-' : String(Math.round(v * 100));
@@ -452,7 +540,7 @@ function drawFooter(list) {
      * you actually need in full. */
     const full = list.find(k => k.kind === 'list' || k.kind === 'fxid');
     if (full) {
-        const v = (full.kind === 'fxid') ? st.fx[sel] : st.val[selKey(full.key)];
+        const v = (full.kind === 'fxid') ? st.fx[sel] : st.val[fullKey(full)];
         if (v !== undefined) {
             ptext(1, FOOT_Y, (full.kind === 'fxid')
                     ? (st.names.fx[v] || String(v))
@@ -473,7 +561,78 @@ function draw() {
 
 /* ------------------------------------------------------------------ LEDs */
 
+/*
+ * THE RINGS SAY WHICH ENCODERS DO SOMETHING.
+ *
+ * Eight knobs, and on most screens three or four of them are wired to
+ * nothing - which is invisible until you turn one and nothing happens.
+ * A dark ring is "this knob will do nothing", which is the whole of what
+ * was asked for, and a lit one rides its value as brightness so the row
+ * also reads as a rough picture of where everything is set.
+ *
+ * The two ramps follow the host's own grid (knobs 1-4 white, 5-8 amber) so
+ * this screen does not teach a second colour language, and they are ordered
+ * by LUMINANCE rather than by name - the host's knob_leds.mjs records that
+ * picking amber constants by what they are called produces a sweep that
+ * goes dim, bright, dark, bright. The hex is in constants.mjs:
+ *
+ *     white  #141414  #404040  #CCCCCC  #FFFFFF
+ *     amber  #200D00  #5D1700  #AC1F00  #C93C00
+ *
+ * Colour 0 is reserved for unbound, so a bound knob at its minimum still
+ * shows its floor - the row identity has to survive a value sitting at 0.
+ */
+const KNOB_CC = 71;
+const RING_WHITE = [124, 118, 122, 120];   /* DarkGrey2 LightGrey OffWhite White */
+const RING_AMBER = [70, 69, 4, 3];         /* DarkBrown BurntSienna Tan BrightOrange */
+const ringCache = new Array(NUM_KNOBS).fill(-1);
+
+/* How far along its range a knob is, 0..1, or null for "nothing here".
+ * null and 0 are different answers and must stay different: an unread key
+ * lit at the bottom of its range would be a confident lie about a control
+ * that may not exist. */
+function knobFill(spec) {
+    if (!spec || spec.kind === 'gap') return null;
+    if (spec.kind === 'fxcat')
+        return FX_TREE.length < 2 ? 1
+             : fxCategoryOf(st.fx[sel]) / (FX_TREE.length - 1);
+    if (spec.kind === 'fxid') {
+        const items = FX_TREE[fxCategoryOf(st.fx[sel])].items;
+        const i = items.indexOf(st.fx[sel] | 0);
+        return (items.length < 2 || i < 0) ? 1 : i / (items.length - 1);
+    }
+    const v = st.val[fullKey(spec)];
+    if (v === undefined || !Number.isFinite(v)) return null;
+    if (spec.kind === 'float') return v;
+    const n = (spec.kind === 'enum') ? spec.n
+        : Math.max(1, ((spec.key === 'model') ? st.names.model
+                                              : st.names.cab).length);
+    return (n < 2) ? 1 : Math.max(0, Math.min(1, v / (n - 1)));
+}
+
+function paintKnobLeds() {
+    const list = knobList();
+    for (let k = 0; k < NUM_KNOBS; k++) {
+        const f = knobFill(list[k]);
+        let color = 0;
+        if (f !== null) {
+            const ramp = (k < 4) ? RING_WHITE : RING_AMBER;
+            const i = Math.min(ramp.length - 1,
+                               Math.floor(Math.max(0, Math.min(1, f)) * ramp.length));
+            color = ramp[i];
+        }
+        if (ringCache[k] === color) continue;
+        ringCache[k] = color;
+        /* force, and diff here. input_filter's own cache cannot be
+         * invalidated per key and the shim repaints the surface underneath
+         * it on the way in, so a cache we do not own would suppress the
+         * write that corrects it. */
+        try { setButtonLED(KNOB_CC + k, color, true); } catch (e) {}
+    }
+}
+
 function paintLeds() {
+    paintKnobLeds();
     for (let b = 0; b < NUM_BLOCKS; b++) {
         const t = st.type[b];
         let c;
@@ -503,15 +662,21 @@ function select(b) {
 function onKnob(idx, ccValue) {
     const list = knobList();
     if (idx >= list.length) return;
+    const s = list[idx];
+    /* A blank claims its encoder and does nothing - including not moving
+     * the cell row onto itself, which would scroll the strip to show four
+     * empty cells. */
+    if (s.kind === 'gap') return;
     lastKnob = idx;
     lastPaint = 0;
-    const s = list[idx];
     const d = decodeDelta(ccValue);
     if (!d) return;
-    const k = selKey(s.key);
+    const k = fullKey(s);
     let v = st.val[k];
 
     if (s.kind === 'fxcat' || s.kind === 'fxid') {
+        const step = knobSteps(idx, d);
+        if (!step) return;
         const cur = st.fx[sel] | 0;
         const cat = fxCategoryOf(cur);
         let want;
@@ -519,14 +684,14 @@ function onKnob(idx, ccValue) {
             /* A family, not a pedal: land on its first. Carrying the
              * position across would mean turning one knob changed two
              * things, and the second one invisibly. */
-            let c = cat + (d > 0 ? 1 : -1);
+            let c = cat + step;
             if (c < 0) c = 0;
             if (c > FX_TREE.length - 1) c = FX_TREE.length - 1;
             if (c === cat) return;
             want = FX_TREE[c].items[0];
         } else {
             const items = FX_TREE[cat].items;
-            let i = items.indexOf(cur) + (d > 0 ? 1 : -1);
+            let i = items.indexOf(cur) + step;
             if (i < 0) i = 0;
             if (i > items.length - 1) i = items.length - 1;
             want = items[i];
@@ -542,17 +707,20 @@ function onKnob(idx, ccValue) {
     }
 
     if (s.kind === 'float') {
-        v = (v === undefined ? 0.5 : v) + d * 0.02;
+        v = (v === undefined ? 0.5 : v) + d * FLOAT_STEP;
         if (v < 0) v = 0;
         if (v > 1) v = 1;
         st.val[k] = v;
         setp(k, v.toFixed(4));
     } else {
+        const step = knobSteps(idx, d);
+        if (!step) return;
         const n = (s.kind === 'enum') ? s.n
             : Math.max(1, ((s.key === 'model') ? st.names.model : st.names.cab).length);
-        v = (v === undefined ? 0 : v) + (d > 0 ? 1 : -1);
+        v = (v === undefined ? 0 : v) + step;
         if (v < 0) v = 0;
         if (v > n - 1) v = n - 1;
+        if (v === st.val[k]) return;
         st.val[k] = v;
         setp(k, v);
         if (s.key === 'type') {
@@ -573,6 +741,8 @@ globalThis.chain_ui = {
         /* The shim replays Move's own LED state on the way in, so what the
          * cache believes is stale. Re-emit everything once. */
         invalidateLedCache();
+        for (let i = 0; i < NUM_KNOBS; i++) ringCache[i] = -1;
+        resetKnobAcc();
         loadLists();
         st.build = getp('build') || '?';
         sel = num(getp('sel_block'), 0);
@@ -582,6 +752,10 @@ globalThis.chain_ui = {
             st.fx[b] = num(getp('b' + (b + 1) + '_fx'), 0);
         }
         st.cpu = num(getp('cpu'), 0);
+        for (const g of GLOBAL_KNOBS) {
+            const v = getp(g.key);
+            if (v !== null && v !== '') st.val[g.key] = Number(v);
+        }
         readSelected();
     },
 

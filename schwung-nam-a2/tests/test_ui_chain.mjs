@@ -35,6 +35,7 @@ for (let b = 1; b <= 8; b++) {
 const writes = [];
 const drawn = [];
 const leds = {};
+const buttonLeds = {};
 let padBlock = -1;
 const actionsRun = [];
 
@@ -60,12 +61,13 @@ const host = {
 };
 
 const stubs = `const setLED=(n,c)=>{leds[n]=c;},
+      setButtonLED=(cc,c)=>{buttonLeds[cc]=c;},
       decodeDelta=(v)=>(v===0?0:(v<=63?v:-(128-v))),
       invalidateLedCache=()=>{};`;
 const names = Object.keys(host);
-const fn = new Function('globalThis', 'leds', ...names,
+const fn = new Function('globalThis', 'leds', 'buttonLeds', ...names,
     stubs + src + '\nreturn globalThis.chain_ui;');
-const ui = fn({}, leds, ...names.map(n => host[n]));
+const ui = fn({}, leds, buttonLeds, ...names.map(n => host[n]));
 
 /* --- drive it ---------------------------------------------------------- */
 let fails = 0;
@@ -139,27 +141,48 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ui.onMidiMessageInternal([0x80, 71, 0]);
     ok(writes.some(([k, v]) => k === 'sel_block' && v === '3'), 'tree: pad 4 selected');
 
+    /* ONE STEP IS THREE DETENTS on every discrete control - the encoders
+     * are not detented and the shim coalesces, so a message carries however
+     * many ticks arrived in that audio frame. Every discrete turn below
+     * spends three, which is what the screen costs. */
+    const STEP = 3;
+    const turn = (cc, dir, steps = 1) => {
+        for (let i = 0; i < steps * STEP; i++)
+            ui.onMidiMessageInternal([0xb0, cc, dir > 0 ? 1 : 127]);
+    };
+
+    /* The sensitivity itself, which is the thing that was wrong: two
+     * detents must move NOTHING, and the third must move exactly one. */
     writes.length = 0;
-    for (let i = 0; i < 3; i++) ui.onMidiMessageInternal([0xb0, 71, 1]);   /* knob 1 up */
-    ok(params['b4_type'] === '3', 'tree: knob 1 reaches FX');
+    ui.onMidiMessageInternal([0xb0, 71, 1]);
+    ui.onMidiMessageInternal([0xb0, 71, 1]);
+    ok(writes.length === 0, 'knob: two detents do not make a step');
+    ui.onMidiMessageInternal([0xb0, 71, 1]);
+    ok(params['b4_type'] === '1', 'knob: the third detent makes exactly one step');
+
+    /* And a fast spin is still proportional - the coalesced magnitude is
+     * spent, not thrown away, so six ticks in one message is two steps. */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, 71, 6]);
+    ok(params['b4_type'] === '3', 'knob: a coalesced spin spends every tick');
 
     /* Knob 2 walks families and lands on each one's FIRST pedal. */
     const famFirst = [];
     for (let i = 0; i < 5; i++) {
-        ui.onMidiMessageInternal([0xb0, 72, 1]);
+        turn(72, +1);
         famFirst.push(Number(params['b4_fx']));
     }
     ok(JSON.stringify(famFirst) === JSON.stringify([4, 6, 8, 11, 14]),
        'tree: knob 2 steps Drive->Dynamic->Filter->Mod->Time->Pitch');
 
     /* Knob 3 walks inside the family it is already in, and stops at its end. */
-    ui.onMidiMessageInternal([0xb0, 73, 1]);
+    turn(73, +1);
     ok(params['b4_fx'] === '15', 'tree: knob 3 moves within Pitch');
-    ui.onMidiMessageInternal([0xb0, 73, 1]);
-    ok(params['b4_fx'] === '15', 'tree: knob 3 stops at the end of its family');
+    turn(73, +1, 4);
+    ok(params['b4_fx'] === '22', 'tree: knob 3 stops at the end of its family');
 
     /* Back to Time, and the knobs past the tree are that pedal's. */
-    ui.onMidiMessageInternal([0xb0, 72, 127]);       /* knob 2 down -> Time */
+    turn(72, -1);                                    /* knob 2 down -> Time */
     ok(params['b4_fx'] === '11', 'tree: knob 2 back to Time = Delay');
     drawn.length = 0;
     ui.onMidiMessageInternal([0xb0, 76, 1]);         /* knob 6 = Mix */
@@ -167,14 +190,38 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(drawn.includes('Mix'), 'tree: Delay exposes Time/Fdbk/Mix past the tree');
     ok(Number(params['b4_p3']) > 0.5, 'tree: turning it writes that pedal param');
 
-    /* A pedal with fewer knobs does not offer the ones it lacks. */
-    ui.onMidiMessageInternal([0xb0, 72, 1]);         /* -> Pitch / Doubler */
-    ui.onMidiMessageInternal([0xb0, 72, 127]);
-    ui.onMidiMessageInternal([0xb0, 72, 127]);
-    ui.onMidiMessageInternal([0xb0, 72, 127]);       /* -> Dynamic / Compressor */
+    /* A pedal with fewer knobs does not offer the ones it lacks - but the
+     * encoder is still CLAIMED, and writes nothing. Gate has two knobs, so
+     * encoder 6 is past its end and before the board's own two. */
+    turn(72, -1, 3);                                 /* -> Dynamic / Compressor */
+    ok(params['b4_fx'] === '4', 'tree: back round to Compressor');
+    turn(73, +1);                                    /* -> Gate */
+    ok(params['b4_fx'] === '5', 'tree: knob 3 reaches Gate');
     writes.length = 0;
-    ui.onMidiMessageInternal([0xb0, 78, 1]);         /* knob 8: past the end */
+    ui.onMidiMessageInternal([0xb0, 76, 1]);         /* knob 6: past the end */
     ok(writes.length === 0, 'tree: a knob the pedal has no use for is inert');
+
+    /* THE BOARD'S OWN TWO. Knobs 7 and 8 are In and Out on every screen,
+     * whatever is loaded, and they address the plain keys - not b4_. */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, 77, 1]);
+    ok(writes.some(([k]) => k === 'in_level'), 'board: knob 7 is Input');
+    ok(!writes.some(([k]) => k.indexOf('b4_') === 0), 'board: it is not a block key');
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, 78, 1]);
+    ok(writes.some(([k]) => k === 'out_level'), 'board: knob 8 is Output');
+    drawn.length = 0;
+    ui.tick();
+    ok(drawn.includes('In') && drawn.includes('Out'),
+       'board: the levels are on screen once a level knob is touched');
+
+    /* THE RINGS. A knob that does something is lit; one that does not is
+     * dark. Colour 0 is the reserved "nothing here". */
+    ok(buttonLeds[76] === 0, 'rings: an unbound encoder is dark');
+    ok(buttonLeds[77] !== 0 && buttonLeds[77] !== undefined,
+       'rings: Input is lit');
+    ok(buttonLeds[71] !== 0 && buttonLeds[71] !== undefined,
+       'rings: Type is lit');
 }
 
 /* --- the host refusing to answer -------------------------------------- */
