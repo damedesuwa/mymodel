@@ -25,6 +25,8 @@ const PAD_BASE = 68;            /* bottom row, notes 68..75 */
 const HOLD_MS = 350;
 
 const CC_KNOB_BASE = 71;        /* knobs 1..8 are CC 71..78 */
+const CC_JOG_TURN = 14;
+const CC_JOG_CLICK = 3;
 
 const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_DRIVE = 3;
 const TYPE_ABBREV = ['--', 'NAM', 'CAB', 'DRV'];
@@ -58,6 +60,25 @@ KNOBS[TYPE_DRIVE] = [{ key: 'type', label: 'Type', kind: 'enum', n: 4 },
                      { key: 'level', label: 'Level', kind: 'float' }];
 
 let sel = 0;
+/* THE HOST'S OWN MENU, borrowed.
+ *
+ * "My Presets" and "Module" are pages the PLANNER appends to every
+ * component's knob grid - and this module has no grid, so dropping the
+ * hierarchy for the pads took Swap Module, Remove Module and Module Help
+ * with it. There was then no way to get the module out of the slot from
+ * its own screen, which is worse than having no pads.
+ *
+ * They cannot be reimplemented here: the actions reach the user preset
+ * store, the preset browser, the component picker and the help viewer,
+ * none of which a module can address. The host binds them for exactly
+ * this case (shadow_ui.js:6763), with the slot and component already
+ * applied. */
+let menuOpen = false;
+let menuRows = [];
+let menuCursor = 0;
+let menuTop = 0;
+const MENU_VISIBLE = 5;
+
 let padDownAt = [];             /* when each pad went down, or 0 */
 let padHandled = [];            /* hold already fired, so the release is not a tap */
 let lastPaint = 0;
@@ -125,6 +146,56 @@ function rotateRead() {
         st.on[b] = num(getp('b' + (b + 1) + '_on'), st.on[b] ? 0 : 1) === 0 ? 1 : 0;
     } else {
         st.blockCpu[b] = num(getp('b' + (b + 1) + '_cpu'), st.blockCpu[b]);
+    }
+}
+
+function openMenu() {
+    menuRows = [];
+    try {
+        const secs = (typeof shadow_component_trailing_menus === 'function')
+            ? (shadow_component_trailing_menus() || []) : [];
+        for (const sec of secs) {
+            for (const e of (sec.entries || [])) {
+                if (!e || !e.label) continue;
+                menuRows.push({
+                    label: e.value ? (e.label + ': ' + e.value) : e.label,
+                    action: e.action || null,
+                });
+            }
+        }
+    } catch (err) { /* a host without the binding just gets Close */ }
+    menuRows.push({ label: 'Close', action: null });
+    menuCursor = 0;
+    menuTop = 0;
+    menuOpen = true;
+}
+
+function runMenuRow() {
+    const row = menuRows[menuCursor];
+    menuOpen = false;
+    if (!row || !row.action) return false;
+    try {
+        /* True means the action opened a screen, and this frame must not be
+         * drawn over it. The host stops ticking us once the view moves, so
+         * closing the menu and returning is the whole of it. */
+        return !!(typeof shadow_component_run_action === 'function' &&
+                  shadow_component_run_action(row.action));
+    } catch (err) { return false; }
+}
+
+function drawMenu() {
+    clear_screen();
+    print(2, 1, 'Nam A2c', 1);
+    fill_rect(0, 10, 128, 1, 1);
+    if (menuCursor < menuTop) menuTop = menuCursor;
+    if (menuCursor >= menuTop + MENU_VISIBLE) menuTop = menuCursor - MENU_VISIBLE + 1;
+    for (let i = 0; i < MENU_VISIBLE; i++) {
+        const idx = menuTop + i;
+        if (idx >= menuRows.length) break;
+        const y = 14 + i * 10;
+        if (idx === menuCursor) fill_rect(0, y - 1, 128, 10, 1);
+        const t = menuRows[idx].label;
+        print(2, y, t.length > 24 ? t.slice(0, 24) : t, idx === menuCursor ? 0 : 1);
     }
 }
 
@@ -215,10 +286,11 @@ function drawSelected() {
             return;
         }
     }
-    print(2, 56, 'tap=stomp  hold=edit', 1);
+    print(2, 56, 'tap=stomp hold=edit click=menu', 1);
 }
 
 function draw() {
+    if (menuOpen) { drawMenu(); return; }
     clear_screen();
     drawHeader();
     drawBoxes();
@@ -347,6 +419,27 @@ globalThis.chain_ui = {
         if (!data || data.length < 3) return;
         const status = data[0] & 0xf0;
         const d1 = data[1], d2 = data[2];
+
+        /* Jog: click opens the menu, turn scrolls it. The jog is free here -
+         * the host's own COMPONENT_EDIT jog handler never runs, because MIDI
+         * is routed to a loaded module UI before it (shadow_ui.js:27167). */
+        if (status === 0xb0 && d1 === CC_JOG_CLICK && d2 > 0) {
+            if (menuOpen) runMenuRow(); else openMenu();
+            return;
+        }
+        if (status === 0xb0 && d1 === CC_JOG_TURN && menuOpen) {
+            const d = decodeDelta(d2);
+            if (d) {
+                menuCursor += (d > 0 ? 1 : -1);
+                if (menuCursor < 0) menuCursor = 0;
+                if (menuCursor > menuRows.length - 1) menuCursor = menuRows.length - 1;
+            }
+            return;
+        }
+        /* While the menu is up the encoders and pads are ITS business, not
+         * the pedalboard's - a stomp landing behind an open menu is a change
+         * you cannot see. */
+        if (menuOpen) return;
 
         if (status === 0xb0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
             onKnob(d1 - CC_KNOB_BASE, d2);

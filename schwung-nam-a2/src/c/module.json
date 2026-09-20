@@ -2,7 +2,7 @@
   "id": "nam-a2c",
   "name": "Nam A2c",
   "abbrev": "A2C",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Eight freely-typed blocks in series - NAM capture, cab IR or drive in any position",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
