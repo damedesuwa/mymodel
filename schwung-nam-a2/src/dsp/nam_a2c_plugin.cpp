@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "real50"
+#define NAM_A2C_BUILD_ID "meter"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -170,6 +170,18 @@ typedef struct {
     double   rate_hz;
     float    in_peak_l, in_peak_r;
     float    out_peak;
+    /* THE SCREEN NEEDS ITS OWN PEAK HOLD, not a share of the log's.
+     *
+     * The diag thread resets out_peak every two seconds, so a second
+     * consumer reading the same field would see whatever happened to
+     * accumulate between the other one's resets - each getting part of the
+     * signal, neither getting the maximum. A clip meter that misses half
+     * the clips is worse than none, because it is believed. */
+    float    ui_peak;
+    /* A LATCH, IN SAMPLES, so one clipped block survives to be drawn.
+     * A single block is 2.9 ms and the screen repaints at ~30 Hz; without
+     * a hold, the clip that matters is the one nobody sees. */
+    int      clip_hold;
     uint64_t nan_samples;
 
     volatile int diag_stop;
@@ -576,9 +588,18 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         float m = sanitize_sample(s->mono[i] * og);
         if (m != s->mono[i] * og) s->nan_samples++;
         float sd = sanitize_sample(s->side[i] * og);
-        float a = m < 0 ? -m : m;
-        if (a > s->out_peak) s->out_peak = a;
         float lv = m + sd, rv = m - sd;
+        /* MEASURED ON THE WIDER CHANNEL, AND BEFORE THE QUANTISER CLAMPS
+         * IT. Taking it afterwards would report 0.999 for a signal that
+         * was 2.0 - the clamp is exactly what hides the thing this is
+         * looking for. And the wider channel, not the mono sum, because
+         * the doubler puts real level into the side: a mid of 0.8 with a
+         * side of 0.4 is 1.2 on the left and only the left is clipping. */
+        float a = fabsf(lv) > fabsf(rv) ? fabsf(lv) : fabsf(rv);
+        if (a > s->out_peak) s->out_peak = a;
+        if (a > s->ui_peak) s->ui_peak = a;
+        if (a >= 1.0f) s->clip_hold = (int)(SAMPLE_RATE / 2);   /* 500 ms */
+        else if (s->clip_hold > 0) s->clip_hold--;
         int32_t ql = (int32_t)lrintf(lv * 32767.0f);
         int32_t qr = (int32_t)lrintf(rv * 32767.0f);
         if (ql > 32767) ql = 32767;
@@ -731,6 +752,20 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "in_level") == 0)  return snprintf(buf, buf_len, "%.4f", s->in_level);
     if (strcmp(key, "out_level") == 0) return snprintf(buf, buf_len, "%.4f", s->out_level);
     if (strcmp(key, "sel_block") == 0) return snprintf(buf, buf_len, "%d", s->sel_block);
+    /* OUTPUT LEVEL, AS A PERCENTAGE OF FULL SCALE, PEAK-HELD.
+     *
+     * Reading it CONSUMES the hold, which is what makes a meter read once
+     * every few frames honest: whatever the loudest sample was since the
+     * last look is what comes back, so nothing between reads is missed.
+     * Over 100 means the quantiser clamped - the board is clipping and the
+     * Out knob is the fix. Capped at 400 so a runaway reads as pinned
+     * rather than as a number nobody can use. */
+    if (strcmp(key, "peak") == 0) {
+        int pct = (int)(s->ui_peak * 100.0f + 0.5f);
+        if (pct > 400) pct = 400;
+        s->ui_peak = 0.0f;
+        return snprintf(buf, buf_len, "%d", (s->clip_hold > 0 && pct < 100) ? 100 : pct);
+    }
     /* ON THE SCREEN, not only in the log.
      *
      * Three rounds of this were spent establishing which build was running,

@@ -290,6 +290,7 @@ const st = {
     on: new Array(NUM_BLOCKS).fill(1),
     fx: new Array(NUM_BLOCKS).fill(0),
     cpu: 0,
+    peak: 0,                    /* out level, %% of full scale - see drawMeter */
     blockCpu: new Array(NUM_BLOCKS).fill(0),
     val: {},                    /* "b3_drive" -> number */
     names: { model: [], cab: [], fx: [] },
@@ -342,6 +343,16 @@ function num(v, dflt) {
  * crawl. A stop lands on each fact about twice a second, which is faster
  * than anything here changes by itself. */
 function rotateRead() {
+    /* THE METER IS NOT ON THE ROTATION, and it cannot be.
+     *
+     * A stop on the rotation comes round about twice a second, which is
+     * fine for "which pedal is in block 6" and useless for a clip light.
+     * The plugin peak-HOLDS between reads and reading consumes the hold,
+     * so nothing is missed however slowly this is asked - but it still
+     * has to be asked often enough to look live. Every fourth tick is
+     * ~8 Hz for one 2.8 ms read, against a 33 ms frame. */
+    if ((st.rot & 3) === 0) st.peak = num(getp('peak'), st.peak);
+
     const steps = NUM_BLOCKS * 2 + 1;
     const i = st.rot % steps;
     st.rot++;
@@ -536,9 +547,54 @@ function pright(xr, y, t, ink, w) {
 /* The layout, in one place, so a change to one band cannot silently land on
  * top of another. */
 const BOX_Y = 12, BOX_H = 18, BOX_W = 15, BOX_GAP = 1;   /* 8*15 + 7*1 = 127 */
-const SELBAR_Y = BOX_Y + BOX_H + 2;                      /*  32            */
-const CELL_Y = 36, CELL_H = 19, CELL_W = 31;             /* 4 * 32 = 128    */
+const SELBAR_Y = 31;                                     /* 31..32          */
+const CELL_Y = 34, CELL_H = 18, CELL_W = 31;             /* 4 * 32 = 128    */
+/* THE BAR SITS BELOW THE CELL'S HIGHLIGHT, NOT INSIDE IT. The selected
+ * cell is filled white, and a bar drawn inside that would have to invert
+ * with it - two rules for one picture. Outside, it is ink 1 on black
+ * always, and the highlight ends one row above it.
+ *
+ * 34..41 label, 43..50 value, highlight 33..50, bar 52..54, footer 56..63. */
+const BAR_Y = 52, BAR_H = 2, BAR_TRACK_Y = 54;
 const FOOT_Y = 56;   /* 56 + 8 = 64 exactly; 57 runs a pixel off the bottom */
+
+/*
+ * A KNOB IS A POSITION, AND +0.0 IS NOT A POSITION.
+ *
+ * Reported from the device: the pedals whose controls read as signed
+ * numbers are harder to read than the ones that read 0-100. They are -
+ * "+0.0" tells you where a band is set only after you have thought about
+ * it, and a Graphic EQ is five of them in a row, which nobody is going to
+ * read as a shape.
+ *
+ * The number stays, because dB is the information and throwing it away to
+ * make a 0-100 would be making the display worse to make it easier. What
+ * changes is that every cell now also draws its position, and a BIPOLAR
+ * control fills from the CENTRE rather than from the left - so a row of
+ * five bands is a picture of the curve, at a glance, before any number is
+ * read. It costs three rows of pixels that were empty.
+ */
+function drawBar(x, w, kind, kn, v) {
+    if (kind === 'gap') return;
+    /* The track, so an empty bar is still visibly a bar. */
+    fill_rect(x, BAR_TRACK_Y, w, 1, 1);
+    if (v === undefined || !Number.isFinite(v)) return;
+    const p = Math.max(0, Math.min(1, v));
+    const bipolar = !!(kn && kn.c !== 2 && kn.lo < 0 && kn.hi > 0);
+    if (bipolar) {
+        const mid = x + (w >> 1);
+        /* The centre tick is taller than the fill, so "flat" reads as flat
+         * rather than as an empty bar somebody forgot to draw. */
+        fill_rect(mid, BAR_Y - 1, 1, 4, 1);
+        const span = (w >> 1) - 1;
+        const d = Math.round((p - 0.5) * 2 * span);
+        if (d > 0) fill_rect(mid, BAR_Y, d, BAR_H, 1);
+        else if (d < 0) fill_rect(mid + d, BAR_Y, -d, BAR_H, 1);
+    } else {
+        const fw = Math.round(w * p);
+        if (fw > 0) fill_rect(x, BAR_Y, fw, BAR_H, 1);
+    }
+}
 
 function blockLabel(b) {
     const t = st.type[b];
@@ -549,6 +605,42 @@ function blockLabel(b) {
 }
 
 
+/*
+ * THE OUTPUT METER, AND WHY IT IS ON SCREEN RATHER THAN IN THE LOG.
+ *
+ * The device log carried `out pk=2.02` for a whole session - the board was
+ * six decibels into the quantiser's clamp, every peak was being squared
+ * off, and nothing on the panel said so. There is no way to hear that as
+ * clipping either: a NAM amp model is already distorting, so the thing
+ * the clamp adds sounds like more of what the amp is doing.
+ *
+ * So: a meter, with the full-scale point marked a third in from the right
+ * rather than at the end. That headroom is the whole design - a meter that
+ * ends at 1.0 reads the same at 0.99 and at 2.0, which is exactly the
+ * distinction worth drawing. Past the mark the meter INVERTS, so clipping
+ * is a change of colour and not a change of length.
+ */
+const MET_X = 70, MET_W = 30, MET_Y = 2, MET_H = 6;
+const MET_UNITY = 20;          /* 1.0 sits here; 10 px of "over" beyond it */
+
+function drawMeter() {
+    const pk = st.peak / 100;
+    const over = st.peak >= 100;
+    if (over) {
+        /* Filled, with the bar knocked out of it - the same length it
+         * would have been, unmistakably not the same thing. */
+        fill_rect(MET_X, MET_Y, MET_W, MET_H, 1);
+        const w = Math.min(MET_W, Math.round(pk * MET_UNITY));
+        if (w < MET_W) fill_rect(MET_X + w, MET_Y + 1, MET_W - w, MET_H - 2, 0);
+    } else {
+        draw_rect(MET_X, MET_Y, MET_W, MET_H, 1);
+        const w = Math.max(0, Math.min(MET_UNITY, Math.round(pk * MET_UNITY)));
+        if (w > 0) fill_rect(MET_X, MET_Y + 1, w, MET_H - 2, 1);
+        /* The full-scale mark, drawn last so the fill cannot hide it. */
+        fill_rect(MET_X + MET_UNITY, MET_Y, 1, MET_H, 1);
+    }
+}
+
 function drawHeader() {
     const cpu = Math.round(st.cpu) + '%';
     const cw = text_width(cpu) + 3;
@@ -558,9 +650,10 @@ function drawHeader() {
     } else {
         pright(126, 1, cpu, 1, cw);
     }
+    drawMeter();
     /* What is selected and what it is - the one line worth reading first. */
     const what = blockLabel(sel);
-    ptext(1, 1, 'B' + (sel + 1) + (what ? ' ' + what : ' --'), 1, 128 - cw - 2);
+    ptext(1, 1, 'B' + (sel + 1) + (what ? ' ' + what : ' --'), 1, MET_X - 3);
     fill_rect(0, 10, 128, 1, 1);
 }
 
@@ -621,6 +714,7 @@ function drawCells() {
 
         ptext(x + 1, CELL_Y, spec.label, ink, CELL_W - 2);
         ptext(x + 1, CELL_Y + 9, shown, ink, CELL_W - 2);
+        drawBar(x, CELL_W, spec.kind, spec.kn, knobFill(spec));
     }
     return list;
 }

@@ -49,6 +49,7 @@ for (let b = 1; b <= 8; b++) {
 
 const writes = [];
 const drawn = [];
+const rects = [];
 const leds = {};
 const buttonLeds = {};
 let padBlock = -1;
@@ -60,7 +61,8 @@ const host = {
     host_pad_block: (v) => { padBlock = v; },
     clear_screen: () => drawn.push('<clear>'),
     print: (x, y, t) => drawn.push(String(t)),
-    draw_rect: () => {}, fill_rect: () => {},
+    draw_rect: (x, y, w, h, c) => rects.push(['draw', x, y, w, h, c]),
+    fill_rect: (x, y, w, h, c) => rects.push(['fill', x, y, w, h, c]),
     text_width: (t) => String(t).length * 5,
     console: { log: () => {} },
     shadow_component_trailing_menus: () => ([
@@ -164,7 +166,17 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
         for (let i = 0; i < steps * STEP; i++)
             ui.onMidiMessageInternal([0xb0, cc, dir > 0 ? 1 : 127]);
     };
+    const BAR_Y = 52;
     const K1 = 71, K2 = 72, K3 = 73, K4 = 74, K5 = 75, K6 = 76, K7 = 77, K8 = 78;
+    /* draw() is throttled to 33 ms, so a burst of ticks in one millisecond
+     * paints ONCE and every capture after it comes back empty - which
+     * reads as "the feature draws nothing". Move the clock instead. */
+    let clockSkew = 0;
+    const realNow2 = Date.now;
+    Date.now = () => realNow2() + clockSkew;
+    const repaint = (n = 1) => {
+        for (let i = 0; i < n; i++) { clockSkew += 50; ui.tick(); }
+    };
     /* Off NAM Cab OD Dist Fuzz Boost Dyn Filter Mod Time Pitch */
     const CAT = { OFF:0, NAM:1, CAB:2, OD:3, DIST:4, FUZZ:5, BOOST:6,
                   DYN:7, FILTER:8, MOD:9, TIME:10, PITCH:11 };
@@ -290,6 +302,55 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(buttonLeds[K8] !== 0 && buttonLeds[K8] !== undefined, 'rings: Output is lit');
     ok(buttonLeds[K1] !== 0 && buttonLeds[K1] !== undefined, 'rings: Block is lit');
     ok(buttonLeds[K7] === 0, 'rings: an encoder past the pedal is dark');
+
+    /* A KNOB IS A POSITION, AND +0.0 IS NOT ONE. Every cell draws a bar
+     * under it; a BIPOLAR control fills from the centre, so a row of EQ
+     * bands is a picture of the curve before any number is read. */
+    gotoCat(CAT.FILTER);
+    turn(K2, +1);                                    /* -> Graphic EQ */
+    ok(params['b4_fx'] === '47', 'eq: reaches the Graphic EQ');
+    params['b4_p1'] = '1.0';   /* +12 dB */
+    params['b4_p2'] = '0.5';   /*   0 dB */
+    params['b4_p3'] = '0.0';   /* -12 dB */
+    ui.init();
+    ui.onMidiMessageInternal([0xb0, K3, 0]);
+    repaint();
+    rects.length = 0; repaint();
+    /* rects are ['fill'|'draw', x, y, w, h, colour]. */
+    const barsOf = () => rects.filter(r => r[2] >= 51 && r[2] <= 55);
+    const fillAt = (x, w) => barsOf().some(
+        r => r[0] === 'fill' && r[2] === BAR_Y && r[1] === x && r[3] >= w);
+    const tickAt = (x) => barsOf().some(
+        r => r[0] === 'fill' && r[2] === BAR_Y - 1 && r[1] === x && r[3] === 1 && r[4] === 4);
+    ok(barsOf().length > 0, 'bar: the cells draw one');
+    /* Four cells across; with knob 3 touched the row shows Block, Pedal,
+     * then the first two bands. A 31 px cell at x=64 has its centre at 79. */
+    ok(fillAt(79, 4), 'bar: a boosted band fills right from its centre');
+    ok(tickAt(111), 'bar: a flat band draws the centre tick');
+    ok(!fillAt(111, 1), 'bar: and no fill, so the tick is what says where centre is');
+    /* Scroll along to the cut band - it must fill LEFT, ending at centre. */
+    ui.onMidiMessageInternal([0xb0, K5, 0]);
+    repaint();
+    rects.length = 0; repaint();
+    ok(barsOf().some(r => r[0] === 'fill' && r[2] === BAR_Y &&
+                          r[1] + r[3] === 111 && r[3] > 3),
+       'bar: a cut band fills left, ending at its own centre');
+
+    /* THE OUTPUT METER. The log carried `out pk=2.02` for a whole session
+     * with nothing on the panel saying so. */
+    params['peak'] = '50';
+    ui.init();
+    repaint(8);
+    rects.length = 0; repaint();
+    ok(rects.some(r => r[0] === 'draw' && r[2] === 2 && r[4] === 6),
+       'meter: below full scale it is an outline');
+    params['peak'] = '180';
+    repaint(8);
+    rects.length = 0; repaint();
+    ok(rects.some(r => r[0] === 'fill' && r[2] === 2 && r[4] === 6),
+       'meter: over full scale it inverts');
+    ok(!rects.some(r => r[0] === 'draw' && r[2] === 2 && r[4] === 6),
+       'meter: and stops being an outline, so the two cannot be confused');
 
     /* INPUT LIVES ON THE MENU, and a knob sets it there. Out keeps an
      * encoder because it is the one you ride; In is set once against the

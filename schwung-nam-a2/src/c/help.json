@@ -26,6 +26,20 @@
       ]
     },
     {
+      "title": "Reading the panel",
+      "lines": [
+        "Top right: CPU. Beside it, the",
+        "OUTPUT METER - the tick is full",
+        "scale, with room past it.",
+        "Past the tick it INVERTS: the",
+        "board is clipping, turn knob 8",
+        "(Out) down.",
+        "Under each knob is a bar. A +/-",
+        "control fills from the CENTRE,",
+        "so an EQ reads as a shape."
+      ]
+    },
+    {
       "title": "Real knobs",
       "lines": [
         "The pedals carry the controls",
