@@ -36,7 +36,7 @@ def section(name):
     m = re.search(r'===%s===\n(.*?)(?=\n===|\Z)' % name, txt, re.S)
     return m.group(1).strip() if m else None
 
-for name in ('chain_params', 'ui_hierarchy', 'state'):
+for name in ('chain_params', 'state'):
     raw = section(name)
     if raw is None:
         print("FAIL %s: not served" % name); fail = 1; continue
@@ -52,24 +52,44 @@ for name in ('chain_params', 'ui_hierarchy', 'state'):
 cp = json.loads(section('chain_params'))
 keys = {p['key'] for p in cp}
 
-# Every key the hierarchy names, resolved through the child template, must
-# have metadata - otherwise the grid invents a float 0..1 knob and writes
-# 0.058750 into an enum.
+# NO HIERARCHY, ON PURPOSE - and that has to stay true.
+#
+# enterComponentEdit asks for a ui_hierarchy first and, if it gets one,
+# opens the host grid and RETURNS, so loadModuleUi never runs and the pads
+# and the module's own screen both silently do not exist. That is exactly
+# how 0.2.0 shipped. Both sources have to stay quiet: module.json (which
+# fills the FX cache) and the plugin (which the empty cache falls through
+# to).
 mj = json.load(open('src/c/module.json'))
-levels = mj['capabilities']['ui_hierarchy']['levels']
-for lname, lvl in levels.items():
-    tmpl = lvl.get('child_key_template')
-    n = lvl.get('child_count', 0)
-    base = lvl.get('child_index_base', 0)
-    names = [p['key'] for p in lvl.get('params', []) if 'key' in p]
-    for k in names:
-        wanted = ([tmpl.replace('{index}', str(i + base)).replace('{key}', k)
-                   for i in range(n)] if tmpl else [k])
-        for wk in wanted:
-            if wk not in keys:
-                print("FAIL %s: level '%s' names %s, chain_params has no metadata for it"
-                      % ('ui_hierarchy', lname, wk))
-                fail = 1
+if 'ui_hierarchy' in mj.get('capabilities', {}):
+    print("FAIL module.json: declares ui_hierarchy, so ui_chain.js will never load")
+    fail = 1
+if section('ui_hierarchy') not in (None, '(unserved)'):
+    print("FAIL plugin: serves ui_hierarchy, so ui_chain.js will never load")
+    fail = 1
+print("ok   no hierarchy (pads reachable)")
+
+# Every key the UI drives must have metadata, or the chain line and the LFO
+# picker invent a float 0..1 knob for it.
+for b in range(1, 9):
+    for k in ('type', 'on', 'model', 'quality', 'cab', 'dmode',
+              'drive', 'tone', 'level', 'cpu'):
+        wk = 'b%d_%s' % (b, k)
+        if wk not in keys:
+            print("FAIL chain_params: no metadata for %s" % wk); fail = 1
+
+# The UI reads these to NAME what is loaded; an index is not an answer.
+for k in ('model_list', 'cab_list'):
+    raw = section(k)
+    if raw is None or raw == '(unserved)':
+        print("FAIL %s: not served, so the screen can only show an index" % k)
+        fail = 1
+    else:
+        try:
+            json.loads(raw)
+        except Exception as e:
+            print("FAIL %s: invalid JSON - %s" % (k, e)); fail = 1
+print("ok   picker lists served to the UI")
 
 # The two flags that only survive when the PLUGIN's string is used verbatim.
 for k in ('cpu', 'b1_cpu'):

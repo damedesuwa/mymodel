@@ -32,7 +32,7 @@
 
 #include "a2_common.h"
 
-#define NAM_A2C_BUILD_ID "pads-1"
+#define NAM_A2C_BUILD_ID "pads-2"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -685,6 +685,18 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * so the CPU readout only survives when the plugin's own string is
      * returned verbatim - and it only IS returned verbatim while it parses,
      * which a trailing comma once quietly prevented for four builds. */
+    /* The picker lists, as plain JSON arrays for ui_chain.js.
+     *
+     * With no hierarchy there is no host grid to render an enum's options,
+     * so the module's own screen has to name the loaded model rather than
+     * show an index - "2" tells you nothing about which amp is in block 2.
+     * The same names go into chain_params as enum options; both are built
+     * from the one scan so they cannot disagree. */
+    if (strcmp(key, "model_list") == 0)
+        return emit_options(buf, buf_len, s->model_names, s->model_count);
+    if (strcmp(key, "cab_list") == 0)
+        return emit_options(buf, buf_len, s->cab_names, s->cab_count);
+
     if (strcmp(key, "chain_params") == 0) {
         char models[4096], cabs[4096];
         emit_options(models, sizeof(models), s->model_names, s->model_count);
@@ -731,52 +743,23 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return w;
     }
 
-    if (strcmp(key, "ui_hierarchy") == 0) {
-        /* The eight blocks are ONE declared level multiplied by the host
-         * (`child_key_template` resolves `type` to `b3_type` for block 3),
-         * not eight levels written out. And every block declares all nine
-         * keys with `visible_if` on the type, so a block shows the cells
-         * its type has and no others - which is the whole reason a block
-         * can be any type without the page becoming a menu of dead knobs. */
-        return snprintf(buf, buf_len, "%s",
-            "{\"modes\":null,\"levels\":{"
-              "\"root\":{\"label\":\"Nam A2c\",\"children\":null,"
-                "\"knobs\":[\"in_level\",\"out_level\",\"cpu\"],"
-                "\"params\":["
-                  "{\"key\":\"in_level\",\"label\":\"Input\"},"
-                  "{\"key\":\"out_level\",\"label\":\"Output\"},"
-                  "{\"key\":\"cpu\",\"label\":\"CPU\"},"
-                  "{\"level\":\"blocks\",\"label\":\"Blocks 1-8\"}"
-                "]},"
-              "\"blocks\":{\"label\":\"Block\","
-                "\"child_count\":8,\"child_label\":\"Block\","
-                "\"child_key_template\":\"b{index}_{key}\","
-                "\"child_index_base\":1,"
-                "\"child_index_param\":\"sel_block\","
-                "\"knobs\":[\"type\",\"on\",\"model\",\"quality\",\"cab\","
-                           "\"dmode\",\"drive\",\"tone\",\"level\",\"cpu\"],"
-                "\"params\":["
-                  "{\"key\":\"type\",\"label\":\"Type\"},"
-                  "{\"key\":\"on\",\"label\":\"On\"},"
-                  "{\"key\":\"model\",\"label\":\"Model\","
-                    "\"visible_if\":{\"param\":\"type\",\"equals\":1}},"
-                  "{\"key\":\"quality\",\"label\":\"Qual\","
-                    "\"visible_if\":{\"param\":\"type\",\"equals\":1}},"
-                  "{\"key\":\"cab\",\"label\":\"Cab\","
-                    "\"visible_if\":{\"param\":\"type\",\"equals\":2}},"
-                  "{\"key\":\"dmode\",\"label\":\"Mode\","
-                    "\"visible_if\":{\"param\":\"type\",\"equals\":3}},"
-                  "{\"key\":\"drive\",\"label\":\"Drive\","
-                    "\"visible_if\":{\"param\":\"type\",\"equals\":3}},"
-                  "{\"key\":\"tone\",\"label\":\"Tone\","
-                    "\"visible_if\":{\"param\":\"type\",\"equals\":3}},"
-                  "{\"key\":\"level\",\"label\":\"Level\","
-                    "\"visible_if\":{\"param\":\"type\",\"equals\":3}},"
-                  "{\"key\":\"cpu\",\"label\":\"CPU\"}"
-                "]}"
-            "}}");
-    }
-
+    /* NO ui_hierarchy, DELIBERATELY.
+     *
+     * enterComponentEdit (shadow_ui.js:16018) asks for one FIRST and, if it
+     * gets it, opens the host's knob grid and returns - so a module that
+     * declares a hierarchy never reaches enterComponentEditFallback, which
+     * is the only place loadModuleUi runs. The two are exclusive and the
+     * hierarchy wins. This module wants the PADS, which need
+     * host_pad_block, which needs ui_chain.js, so it declares no hierarchy
+     * and draws its own screen.
+     *
+     * The FX hierarchy cache is filled from module.json by
+     * parse_ui_hierarchy_cache (it takes a DIRECTORY), and an empty cache
+     * falls through to this get_param - so BOTH have to stay silent or the
+     * grid comes back and the pads go away again.
+     *
+     * chain_params stays: the chain line, the LFO target picker and the
+     * screen reader all read it, and none of them is the grid. */
     return -1;
 }
 

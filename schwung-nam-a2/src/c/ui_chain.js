@@ -77,6 +77,24 @@ const st = {
     rot: 0,
 };
 
+/* The lists are read ONCE. They change only when a file lands on the card,
+ * which cannot happen while this screen is up. */
+function loadLists() {
+    for (const k of ['model', 'cab']) {
+        try {
+            const j = getp(k + '_list');
+            if (j) st.names[k] = JSON.parse(j);
+        } catch (e) { st.names[k] = []; }
+    }
+}
+
+function listNameFor(key, idx) {
+    const arr = (key === 'model') ? st.names.model : st.names.cab;
+    if (!arr || !arr.length) return String(idx + 1);
+    const n = arr[idx];
+    return (typeof n === 'string' && n.length) ? n : String(idx + 1);
+}
+
 function getp(key) {
     try { return host_module_get_param(key); } catch (e) { return null; }
 }
@@ -180,10 +198,22 @@ function drawSelected() {
         if (s.kind === 'float') shown = (v === undefined) ? '-' : String(Math.round(v * 100));
         else if (s.kind === 'enum') shown = (v === undefined) ? '-'
             : (s.names ? s.names[v] : TYPE_ABBREV[v]) || String(v);
-        else shown = (v === undefined) ? '-' : String(v + 1);
+        else shown = (v === undefined) ? '-' : listNameFor(s.key, v);
         print(x, y, s.label, 1);
-        print(x, y + 10, shown, 1);
+        /* A model name is longer than a cell, so the cell gets a clipped
+         * form and the full one goes on the line below - which is empty
+         * whenever nothing on this page is a list. */
+        print(x, y + 9, shown.length > 5 ? shown.slice(0, 5) : shown, 1);
         x += 32;
+    }
+    const full = list.find(s => s.kind === 'list');
+    if (full) {
+        const v = st.val[selKey(full.key)];
+        if (v !== undefined) {
+            const nm = listNameFor(full.key, v);
+            print(2, 56, nm.length > 24 ? nm.slice(0, 24) : nm, 1);
+            return;
+        }
     }
     print(2, 56, 'tap=stomp  hold=edit', 1);
 }
@@ -240,10 +270,11 @@ function onKnob(idx, ccValue) {
         st.val[k] = v;
         setp(k, v.toFixed(4));
     } else {
-        const n = (s.kind === 'enum') ? s.n : 64;
+        const n = (s.kind === 'enum') ? s.n
+            : Math.max(1, ((s.key === 'model') ? st.names.model : st.names.cab).length);
         v = (v === undefined ? 0 : v) + (d > 0 ? 1 : -1);
         if (v < 0) v = 0;
-        if (s.kind === 'enum' && v > n - 1) v = n - 1;
+        if (v > n - 1) v = n - 1;
         st.val[k] = v;
         setp(k, v);
         if (s.key === 'type') {
@@ -264,6 +295,7 @@ globalThis.chain_ui = {
         /* The shim replays Move's own LED state on the way in, so what the
          * cache believes is stale. Re-emit everything once. */
         invalidateLedCache();
+        loadLists();
         sel = num(getp('sel_block'), 0);
         for (let b = 0; b < NUM_BLOCKS; b++) {
             st.type[b] = num(getp('b' + (b + 1) + '_type'), 0);
@@ -274,6 +306,21 @@ globalThis.chain_ui = {
     },
 
     tick() {
+        try { this._tick(); }
+        catch (e) {
+            /* There is no host grid behind this screen any more, so an
+             * uncaught throw here is a black panel with working knobs and
+             * nothing anywhere saying why. Draw the reason instead. */
+            try {
+                clear_screen();
+                print(2, 2, 'Nam A2c UI error', 1);
+                print(2, 14, String(e && e.message ? e.message : e).slice(0, 24), 1);
+                print(2, 30, 'Back to leave', 1);
+            } catch (e2) { }
+        }
+    },
+
+    _tick() {
         /* RESTATED, never memoised. The shim drops pad_block unilaterally
          * from four SPI-callback sites that never tell JS, so a mirror
          * latches and the pads die silently after the first Menu dismiss.

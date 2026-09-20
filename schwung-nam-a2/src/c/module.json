@@ -2,7 +2,7 @@
   "id": "nam-a2c",
   "name": "Nam A2c",
   "abbrev": "A2C",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Eight freely-typed blocks in series - NAM capture, cab IR or drive in any position",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
@@ -30,128 +30,6 @@
     "chainable": true,
     "component_type": "audio_fx",
     "requires_continuous_processing": true,
-    "ui_hierarchy": {
-      "modes": null,
-      "levels": {
-        "root": {
-          "label": "Nam A2c",
-          "children": null,
-          "knobs": [
-            "in_level",
-            "out_level",
-            "cpu"
-          ],
-          "params": [
-            {
-              "key": "in_level",
-              "label": "Input"
-            },
-            {
-              "key": "out_level",
-              "label": "Output"
-            },
-            {
-              "key": "cpu",
-              "label": "CPU"
-            },
-            {
-              "level": "blocks",
-              "label": "Blocks 1-8"
-            }
-          ]
-        },
-        "blocks": {
-          "label": "Block",
-          "child_count": 8,
-          "child_label": "Block",
-          "child_key_template": "b{index}_{key}",
-          "child_index_base": 1,
-          "child_index_param": "sel_block",
-          "knobs": [
-            "type",
-            "on",
-            "model",
-            "quality",
-            "cab",
-            "dmode",
-            "drive",
-            "tone",
-            "level",
-            "cpu"
-          ],
-          "params": [
-            {
-              "key": "type",
-              "label": "Type"
-            },
-            {
-              "key": "on",
-              "label": "On"
-            },
-            {
-              "key": "model",
-              "label": "Model",
-              "visible_if": {
-                "param": "type",
-                "equals": 1
-              }
-            },
-            {
-              "key": "quality",
-              "label": "Qual",
-              "visible_if": {
-                "param": "type",
-                "equals": 1
-              }
-            },
-            {
-              "key": "cab",
-              "label": "Cab",
-              "visible_if": {
-                "param": "type",
-                "equals": 2
-              }
-            },
-            {
-              "key": "dmode",
-              "label": "Mode",
-              "visible_if": {
-                "param": "type",
-                "equals": 3
-              }
-            },
-            {
-              "key": "drive",
-              "label": "Drive",
-              "visible_if": {
-                "param": "type",
-                "equals": 3
-              }
-            },
-            {
-              "key": "tone",
-              "label": "Tone",
-              "visible_if": {
-                "param": "type",
-                "equals": 3
-              }
-            },
-            {
-              "key": "level",
-              "label": "Level",
-              "visible_if": {
-                "param": "type",
-                "equals": 3
-              }
-            },
-            {
-              "key": "cpu",
-              "label": "CPU"
-            }
-          ]
-        }
-      }
-    },
     "chain_params": [
       {
         "key": "in_level",

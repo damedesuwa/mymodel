@@ -30,7 +30,8 @@ int main(int argc, char **argv) {
     if (!inst) { fprintf(stderr, "create_instance failed\n"); return 1; }
 
     static char buf[262144];
-    const char *keys[] = { "chain_params", "ui_hierarchy", "state" };
+    const char *keys[] = { "chain_params", "ui_hierarchy", "state",
+                           "model_list", "cab_list" };
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         int n = api->get_param(inst, keys[i], buf, sizeof(buf));
         printf("===%s===\n", keys[i]);
