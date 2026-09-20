@@ -72,14 +72,30 @@ print("ok   no hierarchy (pads reachable)")
 # Every key the UI drives must have metadata, or the chain line and the LFO
 # picker invent a float 0..1 knob for it.
 for b in range(1, 9):
-    for k in ('type', 'on', 'model', 'quality', 'cab', 'dmode',
-              'drive', 'tone', 'level', 'cpu'):
+    for k in ('type', 'on', 'model', 'quality', 'cab', 'fx', 'cpu',
+              'p1', 'p2', 'p3', 'p4', 'p5'):
         wk = 'b%d_%s' % (b, k)
         if wk not in keys:
             print("FAIL chain_params: no metadata for %s" % wk); fail = 1
 
+# The pedal list the UI's tree groups. Its INDEX is the wire value, so a
+# reorder silently re-points every saved board.
+fxl = section('fx_list')
+if fxl in (None, '(unserved)'):
+    print("FAIL fx_list: not served, so the tree has no names"); fail = 1
+else:
+    try:
+        names = json.loads(fxl)
+        if names[0] != 'Overdrive' or names[-1] != 'Detune' or len(names) != 16:
+            print("FAIL fx_list: %d entries, %s..%s - the UI's tree indexes this"
+                  % (len(names), names[0], names[-1])); fail = 1
+        else:
+            print("ok   fx_list: %d pedals, order pinned" % len(names))
+    except Exception as e:
+        print("FAIL fx_list: invalid JSON - %s" % e); fail = 1
+
 # The UI reads these to NAME what is loaded; an index is not an answer.
-for k in ('model_list', 'cab_list'):
+for k in ('model_list', 'cab_list', 'fx_list'):
     raw = section(k)
     if raw is None or raw == '(unserved)':
         print("FAIL %s: not served, so the screen can only show an index" % k)

@@ -17,6 +17,9 @@ const params = {
     sel_block: '0', cpu: '41', build: 'test',
     model_list: JSON.stringify(['OCD', 'Recto']),
     cab_list: JSON.stringify(['TF MESA']),
+    fx_list: JSON.stringify(['Overdrive', 'Distortion', 'Fuzz', 'Boost',
+        'Compressor', 'Gate', 'EQ', 'Auto Wah', 'Chorus', 'Phaser',
+        'Tremolo', 'Delay', 'Slapback', 'Reverb', 'Doubler', 'Detune']),
 };
 for (let b = 1; b <= 8; b++) {
     params[`b${b}_type`] = b <= 2 ? '1' : (b === 3 ? '2' : '0');
@@ -25,10 +28,8 @@ for (let b = 1; b <= 8; b++) {
     params[`b${b}_quality`] = '0';
     params[`b${b}_cab`] = '0';
     params[`b${b}_cpu`] = '7';
-    params[`b${b}_dmode`] = '0';
-    params[`b${b}_drive`] = '0.5';
-    params[`b${b}_tone`] = '0.5';
-    params[`b${b}_level`] = '0.5';
+    params[`b${b}_fx`] = '0';
+    for (let k = 1; k <= 5; k++) params[`b${b}_p${k}`] = '0.5';
 }
 
 const writes = [];
@@ -125,6 +126,54 @@ drawn.length = 0;
 ui.tick();
 ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
 
+/* --- the three-knob tree ---------------------------------------------- */
+/* Coarse to fine: knob 1 the kind, knob 2 the family, knob 3 the pedal. */
+{
+    /* Block 4 is Off; make it an FX block with knob 1. */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 71, 127]);       /* hold pad 4 */
+    const rn = Date.now; Date.now = () => rn() + 1000; ui.tick(); Date.now = rn;
+    ui.onMidiMessageInternal([0x80, 71, 0]);
+    ok(writes.some(([k, v]) => k === 'sel_block' && v === '3'), 'tree: pad 4 selected');
+
+    writes.length = 0;
+    for (let i = 0; i < 3; i++) ui.onMidiMessageInternal([0xb0, 71, 1]);   /* knob 1 up */
+    ok(params['b4_type'] === '3', 'tree: knob 1 reaches FX');
+
+    /* Knob 2 walks families and lands on each one's FIRST pedal. */
+    const famFirst = [];
+    for (let i = 0; i < 5; i++) {
+        ui.onMidiMessageInternal([0xb0, 72, 1]);
+        famFirst.push(Number(params['b4_fx']));
+    }
+    ok(JSON.stringify(famFirst) === JSON.stringify([4, 6, 8, 11, 14]),
+       'tree: knob 2 steps Drive->Dynamic->Filter->Mod->Time->Pitch');
+
+    /* Knob 3 walks inside the family it is already in, and stops at its end. */
+    ui.onMidiMessageInternal([0xb0, 73, 1]);
+    ok(params['b4_fx'] === '15', 'tree: knob 3 moves within Pitch');
+    ui.onMidiMessageInternal([0xb0, 73, 1]);
+    ok(params['b4_fx'] === '15', 'tree: knob 3 stops at the end of its family');
+
+    /* Back to Time, and the knobs past the tree are that pedal's. */
+    ui.onMidiMessageInternal([0xb0, 72, 127]);       /* knob 2 down -> Time */
+    ok(params['b4_fx'] === '11', 'tree: knob 2 back to Time = Delay');
+    drawn.length = 0;
+    ui.onMidiMessageInternal([0xb0, 76, 1]);         /* knob 6 = Mix */
+    ui.tick();
+    ok(drawn.includes('Mix'), 'tree: Delay exposes Time/Fdbk/Mix past the tree');
+    ok(Number(params['b4_p3']) > 0.5, 'tree: turning it writes that pedal param');
+
+    /* A pedal with fewer knobs does not offer the ones it lacks. */
+    ui.onMidiMessageInternal([0xb0, 72, 1]);         /* -> Pitch / Doubler */
+    ui.onMidiMessageInternal([0xb0, 72, 127]);
+    ui.onMidiMessageInternal([0xb0, 72, 127]);
+    ui.onMidiMessageInternal([0xb0, 72, 127]);       /* -> Dynamic / Compressor */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, 78, 1]);         /* knob 8: past the end */
+    ok(writes.length === 0, 'tree: a knob the pedal has no use for is inert');
+}
+
 /* --- the host refusing to answer -------------------------------------- */
 /* Three ways the binding can come back useless. The menu has to stay usable
  * in all of them, because it is the only way to remove the module from its
@@ -139,6 +188,7 @@ for (const [what, impl] of [
     else delete h2.shadow_component_trailing_menus;
     const ran = [];
     h2.shadow_component_run_action = (a) => { ran.push(a); return true; };
+    h2.host_swap_module = () => { ran.push('__swap'); };
     const seen = [];
     h2.print = (x, y, t) => seen.push(String(t));
     h2.clear_screen = () => {};
@@ -154,14 +204,41 @@ for (const [what, impl] of [
     for (let i = 0; i < 10 && !found; i++) {
         seen.length = 0;
         ui2.tick();
-        found = seen.includes('Remove Module');
+        found = seen.includes('Swap / Remove...');
         if (!found) ui2.onMidiMessageInternal([0xb0, 14, 1]);
     }
-    ok(found, `host gives ${what} -> Remove Module is reachable`);
+    ok(found, `host gives ${what} -> Swap / Remove is reachable`);
 
-    /* And it runs. The cursor is on it when the scan stopped. */
+    /* Land ON it: run to the end (the cursor clamps at Close, the last
+     * row) and come back one. Scrolling only until the row is DRAWN leaves
+     * the cursor wherever the fold put it. */
+    for (let i = 0; i < 20; i++) ui2.onMidiMessageInternal([0xb0, 14, 1]);
+    ui2.onMidiMessageInternal([0xb0, 14, 127]);   /* one detent CCW */
     ui2.onMidiMessageInternal([0xb0, 3, 127]);
-    ok(ran.includes('remove_module'), `host gives ${what} -> Remove Module runs`);
+    ok(ran.includes('__swap'), `host gives ${what} -> Swap / Remove opens the picker`);
+}
+
+/* AN OLD HOST: only host_swap_module exists. Every action-key row would be
+ * inert, so none is offered - but the door still opens. */
+{
+    const h3 = Object.assign({}, host);
+    delete h3.shadow_component_trailing_menus;
+    delete h3.shadow_component_run_action;
+    const ran = [];
+    h3.host_swap_module = () => ran.push('__swap');
+    const seen = [];
+    h3.print = (x, y, t) => seen.push(String(t));
+    h3.clear_screen = () => {};
+    const n3 = Object.keys(h3);
+    const ui3 = new Function('globalThis', 'leds', ...n3,
+        stubs + src + '\nreturn globalThis.chain_ui;')({}, {}, ...n3.map(n => h3[n]));
+    ui3.init();
+    ui3.onMidiMessageInternal([0xb0, 3, 127]);
+    ui3.tick();
+    ok(seen.includes('Swap / Remove...'), 'old host -> Swap / Remove offered');
+    ok(!seen.includes('Save As'), 'old host -> no inert rows offered');
+    ui3.onMidiMessageInternal([0xb0, 3, 127]);
+    ok(ran.includes('__swap'), 'old host -> it opens the picker');
 }
 
 console.log(fails ? 'FAILED' : 'PASS');

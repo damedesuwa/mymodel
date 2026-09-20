@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
 
     static char buf[262144];
     const char *keys[] = { "chain_params", "ui_hierarchy", "state",
-                           "model_list", "cab_list" };
+                           "model_list", "cab_list", "fx_list" };
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         int n = api->get_param(inst, keys[i], buf, sizeof(buf));
         printf("===%s===\n", keys[i]);

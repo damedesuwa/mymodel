@@ -31,8 +31,9 @@
 #include <new>
 
 #include "a2_common.h"
+#include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "menu4"
+#define NAM_A2C_BUILD_ID "pedals"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -47,13 +48,24 @@
  * WaveNet, identical weight counts) and therefore at the same cost. Naming
  * the type "Amp" would put a fuzz pedal under a label that says otherwise
  * and hide that two of them do not fit in a frame. */
-enum { BLK_OFF = 0, BLK_NAM = 1, BLK_CAB = 2, BLK_DRIVE = 3, BLK_TYPES = 4 };
+enum { BLK_OFF = 0, BLK_NAM = 1, BLK_CAB = 2, BLK_FX = 3, BLK_TYPES = 4 };
+
+/* One list, used for chain_params' enum and by the UI's own tree. The INDEX
+ * is the wire value, so this is appended to and never reordered. */
+static const char *FX_NAMES[FX_COUNT] = {
+    "Overdrive", "Distortion", "Fuzz", "Boost",
+    "Compressor", "Gate",
+    "EQ", "Auto Wah",
+    "Chorus", "Phaser", "Tremolo",
+    "Delay", "Slapback", "Reverb",
+    "Doubler", "Detune",
+};
 
 static const char *block_type_name(int t) {
     switch (t) {
         case BLK_NAM:   return "NAM";
         case BLK_CAB:   return "Cab";
-        case BLK_DRIVE: return "Drive";
+        case BLK_FX:    return "FX";
         default:        return "Off";
     }
 }
@@ -69,9 +81,11 @@ static const char *block_type_name(int t) {
  * race - silently, leaving a block that says "Amp" and makes no sound. */
 #define REQ_RING 16
 
+#define REQ_ALLOC_FX 100     /* not a load: "give the pedals their buffers" */
+
 typedef struct {
     int  block;
-    int  kind;      /* BLK_NAM or BLK_CAB */
+    int  kind;      /* BLK_NAM, BLK_CAB, or REQ_ALLOC_FX */
     int  index;
     char path[MAX_PATH_LEN];
 } load_req_t;
@@ -112,7 +126,7 @@ typedef struct {
 
     nam_block_t   amp[NUM_BLOCKS];
     ir_block_t    cab[NUM_BLOCKS];
-    drive_block_t drive[NUM_BLOCKS];
+    fx_block_t    fx[NUM_BLOCKS];
 
     /* Per-block cost, peak-held. What makes the budget legible: the main
      * page shows the total, and a block's own page shows its share. */
@@ -188,6 +202,20 @@ static void *worker_thread(void *arg) {
         if (!req_pop(&s->reqs, &r)) {
             struct timespec ts = { 0, 20000000L };   /* 20 ms */
             nanosleep(&ts, NULL);
+            continue;
+        }
+        if (r.kind == REQ_ALLOC_FX) {
+            /* A pedal's delay line and reverb buffers are ~114 KB, and
+             * create_instance runs on the SPI callback where allocation is
+             * forbidden. All eight are taken here, once, so changing a
+             * block's pedal afterwards costs nothing and can happen on the
+             * callback. fx_block_process checks for the buffer, so a block
+             * whose allocation has not landed yet is silent rather than a
+             * null dereference. */
+            int okc = 0;
+            for (int i = 0; i < NUM_BLOCKS; i++) okc += fx_block_alloc(&s->fx[i]);
+            snprintf(msg, sizeof(msg), "Nam A2c: pedal buffers %d/%d", okc, NUM_BLOCKS);
+            plugin_log(msg);
             continue;
         }
         if (r.block < 0 || r.block >= NUM_BLOCKS) continue;
@@ -402,10 +430,8 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
         new (&s->amp[i].loading) std::atomic<bool>(false);
         s->cab[i].index = -1;
         s->cab[i].run_cap = IR_RUN_TAPS;
-        s->drive[i].mode = DRIVE_OD;
-        s->drive[i].drive = 0.5f;
-        s->drive[i].tone = 0.5f;
-        s->drive[i].level = 0.5f;
+        s->fx[i].id = FX_OVERDRIVE;
+        for (int k = 0; k < FX_PARAMS; k++) s->fx[i].p[k] = 0.5f;
     }
     new (&s->reqs.head) std::atomic<unsigned>(0);
     new (&s->reqs.tail) std::atomic<unsigned>(0);
@@ -422,6 +448,7 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     s->worker_stop = 0;
     s->worker_running = start_low_prio_thread(&s->worker_tid, worker_thread, s, 0);
     if (!s->worker_running) plugin_log("Nam A2c: worker FAILED to start");
+    { load_req_t r; memset(&r, 0, sizeof(r)); r.kind = REQ_ALLOC_FX; req_push(&s->reqs, &r); }
 
     /* THE DEFAULT CHAIN IS BUILT TO FIT, not just to be non-empty.
      *
@@ -476,6 +503,7 @@ static void v2_destroy_instance(void *instance) {
         delete s->amp[i].model;
         delete s->amp[i].pending.exchange(nullptr, std::memory_order_acq_rel);
         ir_block_free(&s->cab[i]);
+        fx_block_free(&s->fx[i]);
     }
     free(s);
     plugin_log("Nam A2c: instance destroyed");
@@ -539,8 +567,9 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
             case BLK_CAB:
                 ir_block_process(&s->cab[b], s->mono, n);
                 break;
-            case BLK_DRIVE:
-                drive_block_process(&s->drive[b], s->mono, n);
+            case BLK_FX:
+                if (s->fx[b].line && s->fx[b].rv)
+                    fx_block_process(&s->fx[b], s->mono, n);
                 break;
             default: break;
         }
@@ -609,6 +638,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                 request_load(s, b, BLK_NAM, 0);
             if (t == BLK_CAB && s->cab[b].index < 0 && s->cab_count > 0)
                 request_load(s, b, BLK_CAB, 0);
+            if (t == BLK_FX) fx_block_reset(&s->fx[b]);
         } else if (strcmp(sub, "on") == 0) {
             /* Enum: 0 = On, 1 = Bypass. Reads the way the pad does. */
             s->on[b] = (atoi(val) == 0) ? 1 : 0;
@@ -622,15 +652,18 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         } else if (strcmp(sub, "cab") == 0) {
             int i = atoi(val);
             if (i != s->cab[b].index) request_load(s, b, BLK_CAB, i);
-        } else if (strcmp(sub, "dmode") == 0) {
+        } else if (strcmp(sub, "fx") == 0) {
             int m = atoi(val);
-            s->drive[b].mode = (m < 0) ? 0 : (m > 2) ? 2 : m;
-        } else if (strcmp(sub, "drive") == 0) {
-            s->drive[b].drive = clampf(atof(val), 0.0f, 1.0f);
-        } else if (strcmp(sub, "tone") == 0) {
-            s->drive[b].tone = clampf(atof(val), 0.0f, 1.0f);
-        } else if (strcmp(sub, "level") == 0) {
-            s->drive[b].level = clampf(atof(val), 0.0f, 1.0f);
+            if (m < 0) m = 0;
+            if (m >= FX_COUNT) m = FX_COUNT - 1;
+            if (m != s->fx[b].id) {
+                s->fx[b].id = m;
+                /* Or the previous pedal's tail rings on through the new
+                 * one's filters. */
+                fx_block_reset(&s->fx[b]);
+            }
+        } else if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0) {
+            s->fx[b].p[sub[1] - '1'] = clampf(atof(val), 0.0f, 1.0f);
         }
         return;
     }
@@ -688,10 +721,9 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         if (strcmp(sub, "model") == 0)   return snprintf(buf, buf_len, "%d", s->amp[b].index < 0 ? 0 : s->amp[b].index);
         if (strcmp(sub, "quality") == 0) return snprintf(buf, buf_len, "%d", s->amp[b].quality);
         if (strcmp(sub, "cab") == 0)     return snprintf(buf, buf_len, "%d", s->cab[b].index < 0 ? 0 : s->cab[b].index);
-        if (strcmp(sub, "dmode") == 0)   return snprintf(buf, buf_len, "%d", s->drive[b].mode);
-        if (strcmp(sub, "drive") == 0)   return snprintf(buf, buf_len, "%.4f", s->drive[b].drive);
-        if (strcmp(sub, "tone") == 0)    return snprintf(buf, buf_len, "%.4f", s->drive[b].tone);
-        if (strcmp(sub, "level") == 0)   return snprintf(buf, buf_len, "%.4f", s->drive[b].level);
+        if (strcmp(sub, "fx") == 0)      return snprintf(buf, buf_len, "%d", s->fx[b].id);
+        if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0)
+            return snprintf(buf, buf_len, "%.4f", s->fx[b].p[sub[1] - '1']);
         if (strcmp(sub, "cpu") == 0) {
             double pct = 100.0 * s->us_peak[b] / FRAME_BUDGET_US;
             return snprintf(buf, buf_len, "%d", (int)(clampf(pct, 0.0f, 100.0f) + 0.5f));
@@ -743,11 +775,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         for (int i = 0; i < NUM_BLOCKS && w < buf_len - 256; i++) {
             w += snprintf(buf + w, buf_len - w,
                 "%s{\"type\":%d,\"on\":%d,\"model\":%d,\"quality\":%d,\"cab\":%d,"
-                "\"dmode\":%d,\"drive\":%.4f,\"tone\":%.4f,\"level\":%.4f}",
+                "\"fx\":%d,\"p\":[%.4f,%.4f,%.4f,%.4f,%.4f]}",
                 i ? "," : "", s->type[i], s->on[i],
                 s->amp[i].index, s->amp[i].quality, s->cab[i].index,
-                s->drive[i].mode, s->drive[i].drive, s->drive[i].tone,
-                s->drive[i].level);
+                s->fx[i].id,
+                s->fx[i].p[0], s->fx[i].p[1], s->fx[i].p[2],
+                s->fx[i].p[3], s->fx[i].p[4]);
         }
         w += snprintf(buf + w, buf_len - w, "]}");
         return w;
@@ -771,6 +804,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return emit_options(buf, buf_len, s->model_names, s->model_count);
     if (strcmp(key, "cab_list") == 0)
         return emit_options(buf, buf_len, s->cab_names, s->cab_count);
+    if (strcmp(key, "fx_list") == 0) {
+        int w = 0;
+        w += snprintf(buf + w, buf_len - w, "[");
+        for (int i = 0; i < FX_COUNT; i++)
+            w += snprintf(buf + w, buf_len - w, "%s\"%s\"", i ? "," : "", FX_NAMES[i]);
+        w += snprintf(buf + w, buf_len - w, "]");
+        return w;
+    }
 
     if (strcmp(key, "chain_params") == 0) {
         char models[4096], cabs[4096];
@@ -789,10 +830,17 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
              "{\"key\":\"sel_block\",\"name\":\"Block\",\"type\":\"int\","
               "\"min\":0,\"max\":%d,\"default\":0,\"step\":1}", NUM_BLOCKS - 1);
 
-        for (int i = 1; i <= NUM_BLOCKS && w < buf_len - 2048; i++) {
+        char fxopts[1024]; int fw = 0;
+        fw += snprintf(fxopts + fw, sizeof(fxopts) - fw, "[");
+        for (int i = 0; i < FX_COUNT; i++)
+            fw += snprintf(fxopts + fw, sizeof(fxopts) - fw, "%s\"%s\"",
+                           i ? "," : "", FX_NAMES[i]);
+        snprintf(fxopts + fw, sizeof(fxopts) - fw, "]");
+
+        for (int i = 1; i <= NUM_BLOCKS && w < buf_len - 3072; i++) {
             w += snprintf(buf + w, buf_len - w,
                 ",{\"key\":\"b%d_type\",\"name\":\"Type\",\"type\":\"enum\","
-                  "\"options\":[\"Off\",\"NAM\",\"Cab\",\"Drive\"],\"default\":0}"
+                  "\"options\":[\"Off\",\"NAM\",\"Cab\",\"FX\"],\"default\":0}"
                 ",{\"key\":\"b%d_on\",\"name\":\"On\",\"type\":\"enum\","
                   "\"options\":[\"On\",\"Bypass\"],\"default\":0}"
                 ",{\"key\":\"b%d_model\",\"name\":\"Model\",\"type\":\"enum\","
@@ -801,18 +849,18 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                   "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0}"
                 ",{\"key\":\"b%d_cab\",\"name\":\"Cab\",\"type\":\"enum\","
                   "\"options\":%s,\"default\":0}"
-                ",{\"key\":\"b%d_dmode\",\"name\":\"Mode\",\"type\":\"enum\","
-                  "\"options\":[\"OD\",\"Dist\",\"Fuzz\"],\"default\":0}"
-                ",{\"key\":\"b%d_drive\",\"name\":\"Drive\",\"type\":\"float\","
-                  "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01}"
-                ",{\"key\":\"b%d_tone\",\"name\":\"Tone\",\"type\":\"float\","
-                  "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01}"
-                ",{\"key\":\"b%d_level\",\"name\":\"Level\",\"type\":\"float\","
-                  "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01}"
+                ",{\"key\":\"b%d_fx\",\"name\":\"Pedal\",\"type\":\"enum\","
+                  "\"options\":%s,\"default\":0}",
+                i, i, i, models, i, i, cabs, i, fxopts);
+            for (int k = 1; k <= FX_PARAMS; k++)
+                w += snprintf(buf + w, buf_len - w,
+                    ",{\"key\":\"b%d_p%d\",\"name\":\"P%d\",\"type\":\"float\","
+                      "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01}",
+                    i, k, k);
+            w += snprintf(buf + w, buf_len - w,
                 ",{\"key\":\"b%d_cpu\",\"name\":\"CPU\",\"type\":\"int\","
                   "\"min\":0,\"max\":100,\"default\":0,\"step\":1,\"unit\":\"%%\","
-                  "\"access\":\"read\",\"live\":true}",
-                i, i, i, models, i, i, cabs, i, i, i, i, i);
+                  "\"access\":\"read\",\"live\":true}", i);
         }
         w += snprintf(buf + w, buf_len - w, "]");
         return w;

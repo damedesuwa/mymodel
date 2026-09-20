@@ -4,22 +4,31 @@
     { "title": "Eight blocks",
       "lines": [
         "In -> 1 -> 2 -> ... -> 8 -> Out.",
-        "Each block is Off, Amp, Cab or Drive.",
-        "Any type in any position."
+        "Bottom pad row = the eight blocks.",
+        "TAP a pad to stomp it.",
+        "HOLD a pad to edit it.",
+        "JOG CLICK opens the menu."
+      ] },
+    { "title": "Choosing a block",
+      "lines": [
+        "Knob 1  Off / NAM / Cab / FX",
+        "Knob 2  the family (Drive, Dynamic,",
+        "        Filter, Mod, Time, Pitch)",
+        "Knob 3  the pedal",
+        "Knob 4+ that pedal's controls"
       ] },
     { "title": "CPU is the limit",
       "lines": [
         "A frame has ~2370us of room.",
-        "Amp Full ~1200us, Slim ~250us.",
-        "Cab ~60us. Drive ~5us.",
-        "So: one amp, not eight.",
-        "The CPU cell on Main is the real number."
+        "NAM Full ~1200us, Slim ~250us.",
+        "Cab ~60us. A pedal 20-40us.",
+        "So: one amp, and seven pedals.",
+        "The CPU cell on the header is real."
       ] },
     { "title": "Files",
       "lines": [
-        "Models go in models/, cabs in cabs/.",
-        "Drop them in with the web file browser",
-        "at move.local:7700."
+        "Models in models/, cabs in cabs/.",
+        "Drop them in at move.local:7700."
       ] }
   ]
 }

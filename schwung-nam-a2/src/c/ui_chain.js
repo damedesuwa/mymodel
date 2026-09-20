@@ -28,8 +28,52 @@ const CC_KNOB_BASE = 71;        /* knobs 1..8 are CC 71..78 */
 const CC_JOG_TURN = 14;
 const CC_JOG_CLICK = 3;
 
-const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_DRIVE = 3;
-const TYPE_ABBREV = ['--', 'NAM', 'CAB', 'DRV'];
+const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3;
+const TYPE_ABBREV = ['--', 'NAM', 'CAB', 'FX'];
+
+/* THE TREE. Coarse to fine, one knob per level, which is the whole of what
+ * was asked for: knob 1 picks what KIND of thing this block is, knob 2 the
+ * family, knob 3 the pedal. Sixteen pedals on one knob would be a knob you
+ * have to count on.
+ *
+ * The ids are the DSP's flat wire values and the grouping is ours - the
+ * plugin does not know these families exist, so adding a pedal is a number
+ * in one of these rows plus a case in fx_block_process. */
+const FX_TREE = [
+    { name: 'Drive',  items: [0, 1, 2, 3] },      /* OD, Dist, Fuzz, Boost   */
+    { name: 'Dynamic', items: [4, 5] },           /* Comp, Gate              */
+    { name: 'Filter', items: [6, 7] },            /* EQ, Auto Wah            */
+    { name: 'Mod',    items: [8, 9, 10] },        /* Chorus, Phaser, Trem    */
+    { name: 'Time',   items: [11, 12, 13] },      /* Delay, Slap, Reverb     */
+    { name: 'Pitch',  items: [14, 15] },          /* Doubler, Detune         */
+];
+
+/* What each pedal's five knobs are called. Unnamed ones are not offered -
+ * a knob that does nothing is worse than a knob that is not there. */
+const FX_PARAM_NAMES = [
+    ['Drive', 'Tone', 'Level'],      /* 0  Overdrive  */
+    ['Dist', 'Tone', 'Level'],       /* 1  Distortion */
+    ['Fuzz', 'Tone', 'Level'],       /* 2  Fuzz       */
+    ['Boost', 'Tone', 'Level'],      /* 3  Boost      */
+    ['Thresh', 'Ratio', 'Makeup'],   /* 4  Compressor */
+    ['Thresh', 'Release'],           /* 5  Gate       */
+    ['Bass', 'Mid', 'Treble'],       /* 6  EQ         */
+    ['Sens', 'Range', 'Mix'],        /* 7  Auto Wah   */
+    ['Rate', 'Depth', 'Mix'],        /* 8  Chorus     */
+    ['Rate', 'Depth', 'Mix'],        /* 9  Phaser     */
+    ['Rate', 'Depth'],               /* 10 Tremolo    */
+    ['Time', 'Fdbk', 'Mix'],         /* 11 Delay      */
+    ['Time', 'Fdbk', 'Mix'],         /* 12 Slapback   */
+    ['Size', 'Damp', 'Mix'],         /* 13 Reverb     */
+    ['Amount', '', 'Mix'],           /* 14 Doubler    */
+    ['Amount', '', 'Mix'],           /* 15 Detune     */
+];
+
+function fxCategoryOf(id) {
+    for (let c = 0; c < FX_TREE.length; c++)
+        if (FX_TREE[c].items.indexOf(id) >= 0) return c;
+    return 0;
+}
 
 /* Pad colour says the TYPE; brightness says whether it is in circuit.
  * Selected blinks, because "which one am I editing" is a different question
@@ -44,20 +88,31 @@ const TYPE_LED = [
 
 /* The encoders, per type. Short because the DSP is ours. Knob 1 is always
  * Type, so a block can be re-typed without leaving the pedalboard. */
-const KNOBS = {};
-KNOBS[TYPE_OFF]   = [{ key: 'type', label: 'Type', kind: 'enum', n: 4 }];
-KNOBS[TYPE_NAM]   = [{ key: 'type', label: 'Type', kind: 'enum', n: 4 },
-                     { key: 'model', label: 'Model', kind: 'list' },
-                     { key: 'quality', label: 'Qual', kind: 'enum', n: 3,
-                       names: ['Full', 'Slim', 'Lite'] }];
-KNOBS[TYPE_CAB]   = [{ key: 'type', label: 'Type', kind: 'enum', n: 4 },
-                     { key: 'cab', label: 'Cab', kind: 'list' }];
-KNOBS[TYPE_DRIVE] = [{ key: 'type', label: 'Type', kind: 'enum', n: 4 },
-                     { key: 'dmode', label: 'Mode', kind: 'enum', n: 3,
-                       names: ['OD', 'Dist', 'Fuzz'] },
-                     { key: 'drive', label: 'Drive', kind: 'float' },
-                     { key: 'tone', label: 'Tone', kind: 'float' },
-                     { key: 'level', label: 'Level', kind: 'float' }];
+const TYPE_KNOB = { key: 'type', label: 'Type', kind: 'enum', n: 4 };
+
+/* Built per block rather than declared, because past knob 3 the list is a
+ * property of the PEDAL and there are sixteen of them. */
+function knobsFor(type, fxId) {
+    if (type === TYPE_NAM)
+        return [TYPE_KNOB,
+                { key: 'model', label: 'Model', kind: 'list' },
+                { key: 'quality', label: 'Qual', kind: 'enum', n: 3,
+                  names: ['Full', 'Slim', 'Lite'] }];
+    if (type === TYPE_CAB)
+        return [TYPE_KNOB, { key: 'cab', label: 'Cab', kind: 'list' }];
+    if (type === TYPE_FX) {
+        const out = [TYPE_KNOB,
+                     { key: 'fx', label: 'Group', kind: 'fxcat' },
+                     { key: 'fx', label: 'Pedal', kind: 'fxid' }];
+        const names = FX_PARAM_NAMES[fxId] || [];
+        for (let i = 0; i < names.length; i++) {
+            if (!names[i]) continue;
+            out.push({ key: 'p' + (i + 1), label: names[i], kind: 'float' });
+        }
+        return out;
+    }
+    return [TYPE_KNOB];
+}
 
 let sel = 0;
 /* THE HOST'S OWN MENU, borrowed.
@@ -82,6 +137,7 @@ const MENU_VISIBLE = 5;
 let padDownAt = [];             /* when each pad went down, or 0 */
 let padHandled = [];            /* hold already fired, so the release is not a tap */
 let lastPaint = 0;
+let lastKnob = 0;   /* which cell the row is following */
 
 /* A cache, because an IPC read is ~2.8 ms and a whole page render is 1.68 -
  * so a read costs more than redrawing the screen. Nothing is read on the
@@ -91,10 +147,11 @@ let lastPaint = 0;
 const st = {
     type: new Array(NUM_BLOCKS).fill(0),
     on: new Array(NUM_BLOCKS).fill(1),
+    fx: new Array(NUM_BLOCKS).fill(0),
     cpu: 0,
     blockCpu: new Array(NUM_BLOCKS).fill(0),
     val: {},                    /* "b3_drive" -> number */
-    names: { model: [], cab: [] },
+    names: { model: [], cab: [], fx: [] },
     build: '?',
     rot: 0,
 };
@@ -102,7 +159,7 @@ const st = {
 /* The lists are read ONCE. They change only when a file lands on the card,
  * which cannot happen while this screen is up. */
 function loadLists() {
-    for (const k of ['model', 'cab']) {
+    for (const k of ['model', 'cab', 'fx']) {
         try {
             const j = getp(k + '_list');
             if (j) st.names[k] = JSON.parse(j);
@@ -145,44 +202,46 @@ function rotateRead() {
     if ((i & 1) === 0) {
         st.type[b] = num(getp('b' + (b + 1) + '_type'), st.type[b]);
         st.on[b] = num(getp('b' + (b + 1) + '_on'), st.on[b] ? 0 : 1) === 0 ? 1 : 0;
+        st.fx[b] = num(getp('b' + (b + 1) + '_fx'), st.fx[b]);
     } else {
         st.blockCpu[b] = num(getp('b' + (b + 1) + '_cpu'), st.blockCpu[b]);
     }
 }
 
-/* WHAT TO OFFER WHEN THE HOST WILL NOT SAY.
+/* WHAT TO OFFER, GIVEN WHAT THE HOST ACTUALLY HAS.
  *
- * `shadow_component_trailing_menus()` builds its rows from the chain config,
- * the user preset store and a blocking `<prefix>:state` read, and on the
- * device it came back with nothing - so the menu drew its Close row and
- * nothing else, which is a menu that cannot remove the module it is a menu
- * for.
+ * `shadow_component_trailing_menus` and `shadow_component_run_action` are
+ * RECENT bindings, and the device reported `no binding` for the first -
+ * this host predates them, so the second is missing too and every row that
+ * went through it did nothing. A menu whose rows are inert is worse than no
+ * menu: it looks like the feature works.
  *
- * The ACTIONS are a different binding and a much simpler one: it takes a
- * key and runs a case. The keys are fixed in the host's own switch
- * (runComponentActionFromGrid / moduleMenuEntries), so the rows can be
- * stated here and the door still opens. The host's list is still preferred
- * when it answers - it knows which preset is loaded and whether the module
- * ships help - but it is no longer the only way in. */
+ * `host_swap_module` is the OLD one (the host's own comment calls the new
+ * pair "exactly as host_swap_module above is"), and it opens the component
+ * picker - whose first row is None. So on an old host one row does both
+ * jobs, and it is named for both rather than promising a Remove that is
+ * really a pick.
+ */
 const FALLBACK_ROWS = [
     ['Preset...',     'up_load'],
     ['Save As',       'up_save_as'],
     ['Add to List',   'module_lists'],
     ['Module Help',   'module_help'],
-    ['Swap Module',   'swap_module'],
-    ['Remove Module', 'remove_module'],
 ];
+
+const SWAP_ROW = '\u0000swap';   /* handled here, not by the host */
 
 function openMenu() {
     menuRows = [];
-    let why;
-    try {
-        if (typeof shadow_component_trailing_menus !== 'function') {
-            why = 'no binding';
-        } else {
-            const secs = shadow_component_trailing_menus() || [];
-            why = secs.length + ' sections';
-            for (const sec of secs) {
+    const haveMenus = (typeof shadow_component_trailing_menus === 'function');
+    const haveRun   = (typeof shadow_component_run_action === 'function');
+    const haveSwap  = (typeof host_swap_module === 'function');
+    let why = (haveMenus ? 'menus ' : '') + (haveRun ? 'run ' : '') +
+              (haveSwap ? 'swap' : '');
+
+    if (haveMenus && haveRun) {
+        try {
+            for (const sec of (shadow_component_trailing_menus() || [])) {
                 for (const e of (sec.entries || [])) {
                     if (!e || !e.label) continue;
                     menuRows.push({
@@ -191,17 +250,21 @@ function openMenu() {
                     });
                 }
             }
+        } catch (err) {
+            why += ' threw:' + ((err && err.message) ? err.message : String(err));
+            menuRows = [];
         }
-    } catch (err) {
-        why = 'threw: ' + ((err && err.message) ? err.message : String(err));
     }
-
-    if (menuRows.length === 0) {
+    /* Only offer rows that CAN run. A key with no binding behind it is a
+     * row that does nothing, which is the bug this is fixing. */
+    if (menuRows.length === 0 && haveRun) {
         for (const r of FALLBACK_ROWS) menuRows.push({ label: r[0], action: r[1] });
         why += ' -> fallback';
     }
-    /* Says WHICH of the three happened, so "only Close" stops being one
-     * report covering an absent binding, an empty answer and a throw. */
+    /* Last, and always, because on an old host it is the only thing here
+     * that works - and it is the one people need. */
+    if (haveSwap) menuRows.push({ label: 'Swap / Remove...', action: SWAP_ROW });
+
     try { console.log('A2c menu: ' + why + ', ' + menuRows.length + ' rows'); } catch (e) {}
 
     menuRows.push({ label: 'Close', action: null });
@@ -216,6 +279,12 @@ function runMenuRow() {
     menuOpen = false;
     lastPaint = 0;
     if (!row || !row.action) return false;
+    if (row.action === SWAP_ROW) {
+        /* Opens the component picker. Its first row is None, which is how
+         * a module is removed on this host. */
+        try { host_swap_module(); } catch (e) {}
+        return true;
+    }
     try {
         /* True means the action opened a screen, and this frame must not be
          * drawn over it. The host stops ticking us once the view moves, so
@@ -243,7 +312,7 @@ function drawMenu() {
 
 function selKey(k) { return 'b' + (sel + 1) + '_' + k; }
 
-function knobList() { return KNOBS[st.type[sel]] || KNOBS[TYPE_OFF]; }
+function knobList() { return knobsFor(st.type[sel], st.fx[sel]); }
 
 function readSelected() {
     for (const s of knobList()) {
@@ -272,7 +341,11 @@ function drawBoxes() {
         }
 
         const ink = live ? (b === sel ? 1 : 0) : (b === sel ? 0 : 1);
-        const lbl = TYPE_ABBREV[t];
+        let lbl = TYPE_ABBREV[t];
+        if (t === TYPE_FX) {
+            const nm = st.names.fx[st.fx[b]];
+            lbl = nm ? nm.slice(0, 3) : 'FX';
+        }
         print(x + ((W - text_width(lbl)) >> 1), Y + 3, lbl, ink);
 
         /* A bypassed block that HAS a type still says so - it is the
@@ -304,26 +377,38 @@ function drawSelected() {
     const list = knobList();
     let x = 2;
     const y = 40;
-    for (let i = 0; i < list.length && i < 4; i++) {
+    /* Eight knobs, four cells across 128 px: the row follows the last knob
+     * you touched rather than always showing the first four. A pedal with
+     * three controls past the tree would otherwise have them off screen. */
+    let first = 0;
+    if (lastKnob >= 4) first = Math.min(lastKnob - 3, Math.max(0, list.length - 4));
+    for (let i = first; i < list.length && i < first + 4; i++) {
         const s = list[i];
         const v = st.val[selKey(s.key)];
         let shown;
-        if (s.kind === 'float') shown = (v === undefined) ? '-' : String(Math.round(v * 100));
+        if (s.kind === 'fxcat') shown = FX_TREE[fxCategoryOf(st.fx[sel])].name;
+        else if (s.kind === 'fxid') shown = st.names.fx[st.fx[sel]] || String(st.fx[sel]);
+        else if (s.kind === 'float') shown = (v === undefined) ? '-' : String(Math.round(v * 100));
         else if (s.kind === 'enum') shown = (v === undefined) ? '-'
             : (s.names ? s.names[v] : TYPE_ABBREV[v]) || String(v);
         else shown = (v === undefined) ? '-' : listNameFor(s.key, v);
-        print(x, y, s.label, 1);
+        if (i === lastKnob) fill_rect(x - 1, y - 1, 30, 19, 1);
+        print(x, y, s.label, i === lastKnob ? 0 : 1);
         /* A model name is longer than a cell, so the cell gets a clipped
          * form and the full one goes on the line below - which is empty
          * whenever nothing on this page is a list. */
-        print(x, y + 9, shown.length > 5 ? shown.slice(0, 5) : shown, 1);
+        print(x, y + 9, shown.length > 5 ? shown.slice(0, 5) : shown,
+              i === lastKnob ? 0 : 1);
         x += 32;
     }
-    const full = list.find(s => s.kind === 'list');
+    /* The full name of whatever the row had to clip. */
+    const full = list.find(s => s.kind === 'list' || s.kind === 'fxid');
     if (full) {
-        const v = st.val[selKey(full.key)];
+        const v = (full.kind === 'fxid') ? st.fx[sel] : st.val[selKey(full.key)];
         if (v !== undefined) {
-            const nm = listNameFor(full.key, v);
+            const nm = (full.kind === 'fxid')
+                ? (st.names.fx[v] || String(v))
+                : listNameFor(full.key, v);
             print(2, 56, nm.length > 24 ? nm.slice(0, 24) : nm, 1);
             return;
         }
@@ -371,11 +456,43 @@ function select(b) {
 function onKnob(idx, ccValue) {
     const list = knobList();
     if (idx >= list.length) return;
+    lastKnob = idx;
+    lastPaint = 0;
     const s = list[idx];
     const d = decodeDelta(ccValue);
     if (!d) return;
     const k = selKey(s.key);
     let v = st.val[k];
+
+    if (s.kind === 'fxcat' || s.kind === 'fxid') {
+        const cur = st.fx[sel] | 0;
+        const cat = fxCategoryOf(cur);
+        let want;
+        if (s.kind === 'fxcat') {
+            /* A family, not a pedal: land on its first. Carrying the
+             * position across would mean turning one knob changed two
+             * things, and the second one invisibly. */
+            let c = cat + (d > 0 ? 1 : -1);
+            if (c < 0) c = 0;
+            if (c > FX_TREE.length - 1) c = FX_TREE.length - 1;
+            if (c === cat) return;
+            want = FX_TREE[c].items[0];
+        } else {
+            const items = FX_TREE[cat].items;
+            let i = items.indexOf(cur) + (d > 0 ? 1 : -1);
+            if (i < 0) i = 0;
+            if (i > items.length - 1) i = items.length - 1;
+            want = items[i];
+        }
+        if (want === cur) return;
+        st.fx[sel] = want;
+        st.val[selKey('fx')] = want;
+        setp(selKey('fx'), want);
+        /* The pedal changed, so its knobs are a different set - what they
+         * are pointing at has to be re-read rather than carried over. */
+        readSelected();
+        return;
+    }
 
     if (s.kind === 'float') {
         v = (v === undefined ? 0.5 : v) + d * 0.02;
@@ -415,6 +532,7 @@ globalThis.chain_ui = {
         for (let b = 0; b < NUM_BLOCKS; b++) {
             st.type[b] = num(getp('b' + (b + 1) + '_type'), 0);
             st.on[b] = num(getp('b' + (b + 1) + '_on'), 0) === 0 ? 1 : 0;
+            st.fx[b] = num(getp('b' + (b + 1) + '_fx'), 0);
         }
         st.cpu = num(getp('cpu'), 0);
         readSelected();
