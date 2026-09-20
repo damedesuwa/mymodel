@@ -187,9 +187,9 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(params['b4_type'] === '3' && params['b4_fx'] === '0',
        'cat: OD sets type=FX and lands on the first pedal');
     turn(K2, +1, 4);
-    ok(params['b4_fx'] === '4', 'cat: knob 2 walks to Centaur, the last OD');
-    turn(K2, +1);
-    ok(params['b4_fx'] === '4', 'cat: it stops at the end of its own family');
+    ok(params['b4_fx'] === '4', 'cat: knob 2 walks along the ODs to the Centaur');
+    turn(K2, +1, 9);
+    ok(params['b4_fx'] === '41', 'cat: and stops on the last one, the Plexi');
     gotoCat(CAT.DIST);
     ok(params['b4_fx'] === '5', 'cat: Dist starts at the RAT');
 
@@ -236,7 +236,7 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
        'ms: the rate cell prints a period with its unit, not a percentage');
 
     /* A ONE-KNOB PEDAL HAS ONE KNOB. */
-    turn(K2, +1, 3);
+    turn(K2, +1, 4);
     ok(params['b4_fx'] === '26', 'mod: reaches the Phase 90');
     writes.length = 0;
     ui.onMidiMessageInternal([0xb0, K4, 1]);
@@ -267,8 +267,24 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
 
     /* THE FOOTER SAYS WHERE YOU ARE. Forty pedals behind two knobs is a
      * place you can be lost in. */
-    ok(drawn.some(t => String(t) === 'Digital Dly  Time 1/6'),
+    ok(drawn.some(t => String(t) === 'Digital Dly  Time 1/8'),
        'footer: names the pedal, its family and its place in it');
+
+    /* EVERY CATEGORY HAS ITS OWN PAD COLOUR, and the two brightnesses are
+     * one hue - "switched on" and "bypassed" have to read as the SAME
+     * pedal, which two unrelated constants would not. */
+    {
+        const seen = new Map();
+        for (let c = 1; c < 12; c++) {
+            gotoCat(c);
+            /* Pad 4 is the selected one and BLINKS white, so read pad 1 -
+             * which carries the same category only if we set it too. */
+            const led = CATS_OF(ui)[c];
+            ok(led && led[0] !== led[1], `colour: category ${c} has an on and an off`);
+            ok(!seen.has(led[0]), `colour: category ${c} is not a repeat`);
+            seen.set(led[0], c);
+        }
+    }
 
     /* THE RINGS SAY WHICH ENCODERS DO SOMETHING. */
     ok(buttonLeds[K8] !== 0 && buttonLeds[K8] !== undefined, 'rings: Output is lit');
@@ -295,6 +311,15 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(!writes.some(([k]) => k.indexOf('b4_') === 0),
        'menu: and it does not reach the block behind it');
     ui.onMidiMessageInternal([0xb0, 3, 127]);        /* close */
+}
+
+/* The category palette, read out of the source rather than restated here -
+ * a copy would agree with itself and with nothing else. */
+function CATS_OF() {
+    const m = /const CATS = \[([\s\S]*?)\n\];/.exec(src);
+    if (!m) return [];
+    return [...m[1].matchAll(/led:\s*\[(\d+),\s*(\d+)\]/g)]
+        .map(x => [Number(x[1]), Number(x[2])]);
 }
 
 /* --- the host refusing to answer -------------------------------------- */

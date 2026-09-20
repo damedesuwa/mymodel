@@ -20,8 +20,9 @@
         "2  which model, cab or pedal",
         "3-7  that pedal's own controls",
         "8  board output level",
-        "A lit ring = the knob does",
-        "something. Input is on the menu."
+        "Each category has its own pad",
+        "colour; dim = bypassed.",
+        "Input is on the menu."
       ]
     },
     {
@@ -38,14 +39,16 @@
       ]
     },
     {
-      "title": "Doubler",
+      "title": "The two stereo ones",
       "lines": [
-        "It is the one STEREO pedal, so",
-        "put it LAST - blocks after it",
-        "see the centre only.",
-        "Width 0 collapses it to mono.",
-        "Detune 0 is plain double-track;",
-        "turn it up for the shimmer."
+        "Doubler and Dimension write a",
+        "side channel, so put them LAST -",
+        "blocks after them see the centre",
+        "only.",
+        "Doubler: Width 0 = mono.",
+        "Dimension has no rate knob on",
+        "purpose - modes 1-3 widen with",
+        "no audible cycle."
       ]
     },
     {

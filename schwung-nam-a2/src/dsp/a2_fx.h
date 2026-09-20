@@ -68,6 +68,15 @@ enum {
     FX_DELAY, FX_DUALDELAY, FX_ANALOGDLY, FX_TAPE, FX_REVERB, FX_SPRING,
     /* Pitch */
     FX_DOUBLER, FX_DETUNE, FX_OCTAVE, FX_RINGMOD,
+    /* Appended 0.7.0. Ten that a guitarist reaches for and that nothing
+     * here could do: a Marshall in a box, a parametric mid, an octave
+     * fuzz, a treble booster (which is NOT the clean boost - it is a
+     * different circuit and a different job), a Univibe, a chorus with no
+     * audible rate, a graphic EQ, a plate, and a delay that plays
+     * backwards. The order is the wire value, so they go on the END and
+     * the UI's categories put them where they belong. */
+    FX_BLUESDRV, FX_PLEXI, FX_METALZONE, FX_OCTAVIA, FX_RANGEMASTER,
+    FX_UNIVIBE, FX_DIMENSION, FX_GRAPHEQ, FX_PLATE, FX_REVERSE,
     FX_COUNT
 };
 
@@ -252,6 +261,37 @@ static const fx_pedal_t FX_PEDALS[FX_COUNT] = {
                   K_LIN("Mix", "%", 0, 100), KNOB_NONE, KNOB_NONE }, -1 },
 { "Ring Mod",   { K_EXP("Freq", "Hz", 20, 2000), KNOB_NONE,
                   K_LIN("Mix", "%", 0, 100), KNOB_NONE, KNOB_NONE }, -1 },
+/* --- 0.7.0 ----------------------------------------------------------- */
+{ "Blues Drv",  { K_POS("Gain"), K_POS("Tone"), K_POS("Level"), KNOB_NONE, KNOB_NONE }, -1 },
+{ "Plexi",      { K_POS("Gain"), K_POS("Tone"), K_POS("Level"), KNOB_NONE, KNOB_NONE }, -1 },
+/* THE SWEEPABLE MID IS THE PEDAL. An MT-2 with a fixed mid is just a
+ * bright distortion; the whole reason it is loved and hated is that the
+ * notch can be put anywhere from a honk to a scoop. */
+{ "Metal Zone", { K_POS("Dist"), K_LIN("Low", "dB", -14, 14),
+                  K_LIN("Mid", "dB", -14, 14), K_EXP("M.Freq", "Hz", 200, 5000),
+                  K_POS("Level") }, -1 },
+{ "Octavia",    { K_POS("Fuzz"), K_POS("Volume"), KNOB_NONE, KNOB_NONE, KNOB_NONE }, -1 },
+/* NOT THE CLEAN BOOST. A Rangemaster is a germanium transistor with a
+ * small coupling cap, so it passes almost NO bass at all and clips on its
+ * way past - which is why a Marshall stops sounding woolly with one in
+ * front and why a flat 20 dB lift does not do the same thing. */
+{ "Rangemaster",{ K_LIN("Boost", "dB", 0, 26), K_EXP("Range", "Hz", 200, 2000),
+                  KNOB_NONE, KNOB_NONE, KNOB_NONE }, -1 },
+{ "Univibe",    { K_EXP("Speed", "ms", 200, 6000), K_POS("Intensity"),
+                  K_LIN("Mix", "%", 0, 100), KNOB_NONE, KNOB_NONE }, -1 },
+/* A CHORUS WITH NO RATE KNOB, because the original has none. Two fixed,
+ * slow, opposed sweeps written into a stereo field: it thickens without
+ * ever announcing a cycle, which is exactly the thing asked for when the
+ * complaint about modulation is that it goes round and round. */
+{ "Dimension",  { K_ENUM("Mode", 4, "1|2|3|4"), K_LIN("Width", "%", 0, 100),
+                  KNOB_NONE, KNOB_NONE, KNOB_NONE }, -1 },
+{ "Graphic EQ", { K_LIN("100", "dB", -12, 12), K_LIN("400", "dB", -12, 12),
+                  K_LIN("800", "dB", -12, 12), K_LIN("2k", "dB", -12, 12),
+                  K_LIN("6k", "dB", -12, 12) }, -1 },
+{ "Plate",      { K_LIN("Time", "", 0, 100), K_LIN("Tone", "dB", -9, 9),
+                  K_LIN("E.Level", "%", 0, 100), KNOB_NONE, KNOB_NONE }, -1 },
+{ "Reverse",    { K_EXP("Time", "ms", 120, 1200), K_POS("F.Back"),
+                  K_LIN("E.Level", "%", 0, 100), KNOB_NONE, KNOB_NONE }, -1 },
 };
 
 /* The table and the enum are one fact in two places, and a table one row
@@ -487,7 +527,7 @@ static inline float fx_tap(fx_block_t *f, float delay_samples) {
  *            abrupt for silicon clipped to ground.
  */
 enum { TONE_TS = 0, TONE_RAT, TONE_DS1, TONE_MUFF,
-       TONE_TILT, TONE_TREBLE, TONE_3BAND, TONE_NONE };
+       TONE_TILT, TONE_TREBLE, TONE_3BAND, TONE_PARAM, TONE_NONE };
 
 typedef struct {
     float pre_hp;          /* Hz, before the clipper */
@@ -502,27 +542,49 @@ typedef struct {
     unsigned char stages;  /* cascaded clipping stages */
 } od_model_t;
 
-static const od_model_t OD_MODELS[] = {
-/*                pre_hp gain  asym hard  mid_hz   q  mid_db post_lp clean  out  tone        stages */
-/* TS808     */ {   720,   30, 0.00f, 1.00f,  720, 0.80f,  5.0f,  6000, 0.00f, 0.30f, TONE_TS,     1 },
-/* TS9       */ {   720,   34, 0.00f, 1.10f,  760, 0.80f,  4.5f,  7500, 0.00f, 0.32f, TONE_TS,     1 },
-/* SD-1      */ {   720,   32, 0.35f, 1.15f,  780, 0.90f,  3.0f,  7000, 0.00f, 0.32f, TONE_TS,     1 },
-/* Blues Brkr*/ {   170,   22, 0.00f, 0.75f,    0, 1.00f,  0.0f,  9000, 0.45f, 0.42f, TONE_TILT,   1 },
-/* Centaur   */ {   180,   45, 0.15f, 1.30f,    0, 1.00f,  0.0f,  8500, 0.55f, 0.36f, TONE_TREBLE, 1 },
-/* RAT       */ {   430,  500, 0.00f, 2.40f, 1000, 0.70f,  4.0f, 10000, 0.00f, 0.16f, TONE_RAT,    1 },
-/* DS-1      */ {   500,  220, 0.00f, 2.00f,    0, 1.00f,  0.0f,  9000, 0.00f, 0.20f, TONE_DS1,    1 },
-/* Dist+     */ {   340,  160, 0.45f, 1.80f,  900, 0.80f,  3.0f,  5200, 0.00f, 0.22f, TONE_NONE,   1 },
-/* Fullbore  */ {   300,  900, 0.00f, 2.60f,    0, 1.00f,  0.0f,  8000, 0.00f, 0.15f, TONE_3BAND,  2 },
-/* SuperBad  */ {   240,  420, 0.00f, 2.00f,    0, 1.00f,  0.0f,  9000, 0.00f, 0.17f, TONE_3BAND,  1 },
-/* Big Muff  */ {    80,  260, 0.00f, 2.20f,    0, 1.00f,  0.0f,  7000, 0.00f, 0.22f, TONE_MUFF,   2 },
-/* Fuzz Face */ {    60,  120, 0.60f, 1.60f,    0, 1.00f,  0.0f,  6000, 0.00f, 0.28f, TONE_NONE,   1 },
+/* KEYED BY ID, NOT BY POSITION.
+ *
+ * This was a plain array indexed by the pedal's id, which worked exactly
+ * as long as every gain pedal sat in one unbroken run at the front of the
+ * enum - and 0.7.0 appended a Blues Driver and a Plexi to the END, where
+ * the wire format requires new entries to go. A positional table would
+ * then have read the Doubler's row for the Plexi, silently: both are
+ * in-range small integers.
+ *
+ * A linear scan of fifteen rows, once per block, is beneath measurement. */
+typedef struct { int id; od_model_t m; } od_row_t;
+
+static const od_row_t OD_ROWS[] = {
+/*                          pre_hp gain  asym hard  mid_hz   q  mid_db post_lp clean  out  tone        stages */
+{ FX_TS808,      {   720,   30, 0.00f, 1.00f,  720, 0.80f,  5.0f,  6000, 0.00f, 0.30f, TONE_TS,     1 } },
+{ FX_TS9,        {   720,   34, 0.00f, 1.10f,  760, 0.80f,  4.5f,  7500, 0.00f, 0.32f, TONE_TS,     1 } },
+{ FX_SD1,        {   720,   32, 0.35f, 1.15f,  780, 0.90f,  3.0f,  7000, 0.00f, 0.32f, TONE_TS,     1 } },
+{ FX_BLUESBRK,   {   170,   22, 0.00f, 0.75f,    0, 1.00f,  0.0f,  9000, 0.45f, 0.42f, TONE_TILT,   1 } },
+{ FX_CENTAUR,    {   180,   45, 0.15f, 1.30f,    0, 1.00f,  0.0f,  8500, 0.55f, 0.36f, TONE_TREBLE, 1 } },
+/* A BD-2 is not a screamer with a different badge: it keeps its bass (the
+ * cut is at 120 Hz, not 720), clips on MOSFETs rather than diodes so the
+ * knee is softer and later, and leaves a little clean underneath. That is
+ * the "amp-like, not boxy" people buy it for. */
+{ FX_BLUESDRV,   {   120,   60, 0.25f, 0.90f,  500, 0.70f,  2.0f,  7000, 0.15f, 0.30f, TONE_TS,     1 } },
+/* The missing flavour: a British amp rather than a pedal. Its hump sits
+ * up at 1.8 kHz where a Marshall's presence lives, not down at 720 where
+ * a TS puts it, which is most of why one cuts and the other honks. */
+{ FX_PLEXI,      {   260,   90, 0.20f, 1.40f, 1800, 0.60f,  4.0f,  6500, 0.10f, 0.26f, TONE_TILT,   1 } },
+{ FX_RAT,        {   430,  500, 0.00f, 2.40f, 1000, 0.70f,  4.0f, 10000, 0.00f, 0.16f, TONE_RAT,    1 } },
+{ FX_DS1,        {   500,  220, 0.00f, 2.00f,    0, 1.00f,  0.0f,  9000, 0.00f, 0.20f, TONE_DS1,    1 } },
+{ FX_DISTPLUS,   {   340,  160, 0.45f, 1.80f,  900, 0.80f,  3.0f,  5200, 0.00f, 0.22f, TONE_NONE,   1 } },
+{ FX_FULLBORE,   {   300,  900, 0.00f, 2.60f,    0, 1.00f,  0.0f,  8000, 0.00f, 0.15f, TONE_3BAND,  2 } },
+{ FX_SUPERBAD,   {   240,  420, 0.00f, 2.00f,    0, 1.00f,  0.0f,  9000, 0.00f, 0.17f, TONE_3BAND,  1 } },
+{ FX_METALZONE,  {   340, 1200, 0.00f, 2.80f,    0, 1.00f,  0.0f,  7000, 0.00f, 0.13f, TONE_PARAM,  2 } },
+{ FX_BIGMUFF,    {    80,  260, 0.00f, 2.20f,    0, 1.00f,  0.0f,  7000, 0.00f, 0.22f, TONE_MUFF,   2 } },
+{ FX_FUZZFACE,   {    60,  120, 0.60f, 1.60f,    0, 1.00f,  0.0f,  6000, 0.00f, 0.28f, TONE_NONE,   1 } },
 };
 
-/* The row order IS the id order for the first twelve pedals, which is the
- * only thing making `&OD_MODELS[id]` correct. Boost is 12 and has its own
- * function, so the table stops one short of it on purpose. */
-static_assert(sizeof(OD_MODELS) / sizeof(OD_MODELS[0]) == FX_BOOST,
-              "OD_MODELS must cover exactly ids 0..FX_BOOST-1, in order");
+static const od_model_t *od_model_for(int id) {
+    for (unsigned i = 0; i < sizeof(OD_ROWS) / sizeof(OD_ROWS[0]); i++)
+        if (OD_ROWS[i].id == id) return &OD_ROWS[i].m;
+    return &OD_ROWS[0].m;
+}
 
 static inline float od_clip(float x, float hard, float asym) {
     /* The positive half turns over sooner than the negative one, which is
@@ -534,15 +596,20 @@ static inline float od_clip(float x, float hard, float asym) {
 
 static void fx_gain_stage(fx_block_t *f, float *a, int n) {
     const int id = f->id;
-    const od_model_t *m = &OD_MODELS[id];
+    const od_model_t *m = od_model_for(id);
 
     /* Which encoder is which differs per pedal, so read them by POSITION
      * in that pedal's own row rather than assuming p1 is always drive. */
     float drive, tone, level;
     float b_db = 0, m_db = 0, t_db = 0;
+    float mid_hz = 650.0f;
     if (id == FX_FULLBORE || id == FX_SUPERBAD) {
         drive = f->p[0];
         b_db = fx_v(f, 1); m_db = fx_v(f, 2); t_db = fx_v(f, 3);
+        tone = 0.5f; level = f->p[4];
+    } else if (id == FX_METALZONE) {
+        drive = f->p[0];
+        b_db = fx_v(f, 1); m_db = fx_v(f, 2); mid_hz = fx_v(f, 3);
         tone = 0.5f; level = f->p[4];
     } else if (id == FX_DISTPLUS) {
         drive = f->p[0]; tone = 0.5f; level = f->p[1];
@@ -564,6 +631,15 @@ static void fx_gain_stage(fx_block_t *f, float *a, int n) {
     fx_bq_t hump, band_lo, band_mid, band_hi;
     int use_hump = (m->mid_db != 0.0f);
     if (use_hump) fx_bq_peak(&hump, m->mid_hz, m->mid_q, m->mid_db);
+    /* The MT-2's mid is a PARAMETRIC: one bell whose centre the fourth
+     * knob sweeps two and a half octaves, over a fixed scooped voicing.
+     * Put it at 200 Hz and it is a bark; at 5 kHz it is an ice pick; in
+     * the middle with the gain down it is the scoop it is famous for. */
+    fx_bq_t mz_low, mz_mid;
+    if (m->tone == TONE_PARAM) {
+        fx_bq_shelf(&mz_low, 120.0f, b_db, 0);
+        fx_bq_peak(&mz_mid, mid_hz, 1.1f, m_db);
+    }
     int three = (m->tone == TONE_3BAND);
     if (three) {
         /* Fullbore is voiced scooped before the knobs touch it; SuperBad
@@ -654,6 +730,10 @@ static void fx_gain_stage(fx_block_t *f, float *a, int n) {
                 x = fx_bq_run(&band_lo, &f->bq1, x);
                 x = fx_bq_run(&band_mid, &f->bq2, x);
                 x = fx_bq_run(&band_hi, &f->bq3, x);
+                break;
+            case TONE_PARAM:
+                x = fx_bq_run(&mz_low, &f->bq1, x);
+                x = fx_bq_run(&mz_mid, &f->bq2, x);
                 break;
             default: break;
         }
@@ -1231,11 +1311,19 @@ static void fx_reverb(fx_block_t *f, float *a, int n) {
     float *ap0 = comb[3] + RV_COMB3;
     float *ap1 = ap0 + RV_AP0;
 
-    const float room = 0.70f + f->p[0] * 0.28f;
+    /* A PLATE IS NOT A BRIGHTER ROOM. A steel sheet has no walls, so there
+     * are no discrete early reflections - the density is there from the
+     * first millisecond and the decay is smooth and long. Here that is a
+     * longer tail, much less damping, and no dry-side early character:
+     * the same combs, different numbers, and the difference is audible. */
+    const int plate = (f->id == FX_PLATE);
+    const float room = plate ? (0.84f + f->p[0] * 0.15f)
+                             : (0.70f + f->p[0] * 0.28f);
     const float mix = fx_v(f, 2) * 0.01f;
     fx_bq_t tone;
-    fx_bq_shelf(&tone, 2200.0f, fx_v(f, 1), 1);
-    const float damp = 0.45f - f->p[1] * 0.25f;
+    fx_bq_shelf(&tone, plate ? 3200.0f : 2200.0f, fx_v(f, 1), 1);
+    const float damp = plate ? (0.18f - f->p[1] * 0.10f)
+                             : (0.45f - f->p[1] * 0.25f);
 
     for (int i = 0; i < n; i++) {
         float x = a[i] * 0.25f;
@@ -1473,6 +1561,239 @@ static void fx_ringmod(fx_block_t *f, float *a, int n) {
     }
 }
 
+/* ====================================================================== */
+/* 0.7.0                                                                   */
+/* ====================================================================== */
+
+/*
+ * OCTAVIA - a fuzz with the octave BUILT INTO the distortion, not after it.
+ *
+ * The trick is full-wave rectification: |x| has twice as many peaks per
+ * cycle as x, so it rings an octave up, and rectifying BEFORE the clipping
+ * is what makes the octave and the fuzz one sound instead of two stacked.
+ * It only tracks cleanly on single notes high on the neck - that is the
+ * pedal, not a shortcoming, and it is why everyone plays the same lick on
+ * it.
+ *
+ * The band-pass afterwards is doing real work: raw rectification is all
+ * intermodulation down low, and narrowing it to where the octave actually
+ * sits is the difference between a note and a splat.
+ */
+static void fx_octavia(fx_block_t *f, float *a, int n) {
+    const float fuzz = f->p[0];
+    const float vol = f->p[1];
+    const float gain = 1.0f + fuzz * fuzz * 180.0f;
+    const float hp_a = fx_coeff(180.0f);
+    fx_bq_t band;
+    /* +4 dB, not +7. A broad bell at Q 0.55 gains most of the band, so
+     * the boost lands on a signal tanh has already pushed to 1.0 and the
+     * output pinned - the harness caught it at full scale. The band's job
+     * is to say WHERE the octave sits, not to add level. */
+    fx_bq_peak(&band, 1400.0f, 0.55f, 4.0f);
+    const float lp_a = fx_coeff(5200.0f);
+
+    for (int i = 0; i < n; i++) {
+        float x = a[i] - fx_onepole(&f->lo_s, a[i], hp_a);
+        x *= gain;
+        /* RECTIFY, THEN CLIP. The other order is a fuzz with an octave
+         * bolted on and sounds like two pedals. */
+        float r = fabsf(x) * 2.0f - 0.35f;
+        r = tanhf(r * 1.5f);
+        r = fx_bq_run(&band, &f->bq1, r);
+        r = fx_onepole(&f->lp_y1, r, lp_a);
+        /* Rectification leaves a DC offset that rides the envelope; left
+         * in, it moves the whole waveform off centre and eats headroom. */
+        float y = r - f->hp_y1;
+        f->hp_y1 = flush_denormal(f->hp_y1 + fx_coeff(18.0f) * (r - f->hp_y1));
+        a[i] = sanitize_sample(y * vol * 0.40f);
+    }
+}
+
+/*
+ * RANGEMASTER - a treble booster, which is a different machine from a
+ * clean boost and a different job.
+ *
+ * Its coupling cap is tiny, so it passes almost no bass at all: what
+ * reaches the amp is the top two octaves, hard. That is why a Marshall
+ * stops being woolly with one in front, and why turning a flat 20 dB
+ * boost up does NOT do the same thing - a flat boost pushes the mud into
+ * the amp along with everything else.
+ *
+ * The germanium transistor clips asymmetrically on its way past, so the
+ * boost is never quite clean, which is the other half of it.
+ */
+static void fx_rangemaster(fx_block_t *f, float *a, int n) {
+    const float g = fx_db2lin(fx_v(f, 0));
+    const float corner = fx_v(f, 1);        /* where the bass stops */
+    const float hp_a = fx_coeff(corner);
+    for (int i = 0; i < n; i++) {
+        float x = a[i] - fx_onepole(&f->lo_s, a[i], hp_a);
+        x *= g;
+        /* Germanium: the positive half turns over first. */
+        float h = (x > 0.0f) ? 0.85f : 0.62f;
+        a[i] = sanitize_sample(tanhf(x * h) * 1.15f);
+    }
+}
+
+/*
+ * UNIVIBE - not a phaser, and the difference is the whole reason it is
+ * here.
+ *
+ * A phaser's allpass stages are matched and sweep together, which makes
+ * evenly spaced notches and that even whoosh. A Univibe's four stages are
+ * deliberately MISMATCHED - each sits at a different frequency and sweeps
+ * by a different amount - so the notches move at different rates relative
+ * to each other and the result throbs rather than sweeps. That, plus the
+ * lamp-driven LFO being distinctly non-sinusoidal (a bulb heats faster
+ * than it cools), is the sound.
+ */
+static void fx_univibe(fx_block_t *f, float *a, int n) {
+    const float inc = fx_lfo_inc(fx_v(f, 0));
+    const float intensity = f->p[1];
+    const float mix = fx_v(f, 2) * 0.01f;
+    /* The four stages' resting points and travel, mismatched on purpose. */
+    static const float BASE[4] = { 0.22f, 0.36f, 0.52f, 0.70f };
+    static const float SPAN[4] = { 0.30f, 0.26f, 0.20f, 0.14f };
+
+    for (int i = 0; i < n; i++) {
+        f->lfo_phase += inc;
+        if (f->lfo_phase >= 1.0f) f->lfo_phase -= 1.0f;
+        /* A LAMP, NOT AN OSCILLATOR: it brightens faster than it fades, so
+         * the sweep is asymmetric and that asymmetry is audible as the
+         * throb. A sine here gives you a phaser. */
+        float ph = f->lfo_phase;
+        float lfo = (ph < 0.35f) ? (ph / 0.35f)
+                                 : (1.0f - (ph - 0.35f) / 0.65f);
+        lfo = lfo * lfo * (3.0f - 2.0f * lfo);       /* smoothstep the corner */
+
+        float v = a[i];
+        for (int k = 0; k < 4; k++) {
+            float d = BASE[k] + SPAN[k] * lfo * intensity;
+            float out = -d * v + f->ap[k];
+            f->ap[k] = flush_denormal(v + d * out);
+            v = out;
+        }
+        /* The photocell also swings the level a little. */
+        /* A Univibe THROBS and a phaser sweeps, and the throb is mostly
+         * this: the photocells swing the level as well as the notches.
+         * At 0.12 the two were indistinguishable on a held note (measured
+         * 3.3% against the phaser's 2.9%); the amplitude term is what
+         * separates them and it has to be audible to do that. */
+        float am = 1.0f - 0.30f * intensity * lfo;
+        a[i] = sanitize_sample(a[i] * (1.0f - mix) + (a[i] + v) * 0.5f * am * mix * 2.0f);
+    }
+}
+
+/*
+ * DIMENSION - a chorus with NO RATE KNOB, because the original has none.
+ *
+ * Four buttons, and that is the entire control surface. Inside, two BBD
+ * lines run slow opposed sweeps and land on OPPOSITE SIDES of the stereo
+ * field, so what you hear is width rather than a cycle. It is the answer
+ * to "modulation that does not go round and round": there is nothing to
+ * hear going round, and the sweep is far too slow and too shallow to
+ * announce itself.
+ *
+ * Stereo, so it writes the side channel the way the doubler does - and for
+ * the same reason, it belongs late in the chain.
+ */
+static void fx_dimension(fx_block_t *f, float *a, float *side, int n) {
+    const int mode = (int)fx_v(f, 0);
+    const float width = fx_v(f, 1) * 0.01f;
+    /* The four buttons are not a depth knob - they step both the amount
+     * and the rate together, which is why the pedal has no separate one. */
+    static const float DEPTH[4] = { 0.25f, 0.45f, 0.70f, 1.00f };
+    static const float MS[4]    = { 9000, 7000, 5200, 3800 };
+    const int mi = (mode < 0) ? 0 : (mode > 3) ? 3 : mode;
+    const float inc = fx_lfo_inc(MS[mi]);
+    const float depth = DEPTH[mi];
+
+    for (int i = 0; i < n; i++) {
+        f->lfo_phase += inc;
+        if (f->lfo_phase >= 1.0f) f->lfo_phase -= 1.0f;
+        float s1 = sinf(2.0f * (float)M_PI * f->lfo_phase);
+        float s2 = -s1;                        /* opposed, exactly */
+        f->line[f->w] = a[i];
+        float dA = (0.0085f + 0.0022f * s1 * depth) * SAMPLE_RATE;
+        float dB = (0.0110f + 0.0022f * s2 * depth) * SAMPLE_RATE;
+        float A = fx_tap(f, dA), B = fx_tap(f, dB);
+        f->w = (f->w + 1 >= f->line_len) ? 0 : f->w + 1;
+        /* THE MID GETS LITTLE AND THE SIDE GETS THE REST, because the
+         * effect IS the width. Summed to mono, two copies 8.5 and 11 ms
+         * behind the dry are a deep comb that the opposed sweep then
+         * MOVES - measured at 21% level swing, worse than the chorus this
+         * exists to be calmer than. Keeping the sum small leaves the mono
+         * fold-down as a gentle thickening and puts the character where
+         * it belongs; the real unit behaves the same way, which is why a
+         * Dimension largely disappears in mono. */
+        a[i]    = sanitize_sample(a[i] + (A + B) * 0.5f * 0.30f);
+        side[i] = sanitize_sample(side[i] + (A - B) * 0.5f * (0.35f + width * 0.65f));
+    }
+}
+
+/* Five bands, fixed, as on the front of a rack EQ - the thing you reach
+ * for to fix a room rather than to voice a tone. Five is what fits the
+ * encoders; the centres are the ones that matter on a guitar. */
+static void fx_grapheq(fx_block_t *f, float *a, int n) {
+    static const float HZ[5] = { 100.0f, 400.0f, 800.0f, 2000.0f, 6000.0f };
+    fx_bq_t b[5];
+    fx_bqs_t *st[5] = { &f->bq1, &f->bq2, &f->bq3, NULL, NULL };
+    /* Two more states than the three the struct carries, borrowed from the
+     * allpass array - which no EQ uses, so there is nothing to collide
+     * with and nothing to allocate. */
+    fx_bqs_t extra0, extra1;
+    extra0.x1 = f->ap[0]; extra0.x2 = f->ap[1];
+    extra0.y1 = f->ap[2]; extra0.y2 = f->ap[3];
+    extra1.x1 = f->ap[4]; extra1.x2 = f->ap[5];
+    extra1.y1 = f->ap[6]; extra1.y2 = f->ap[7];
+    st[3] = &extra0; st[4] = &extra1;
+
+    for (int k = 0; k < 5; k++) fx_bq_peak(&b[k], HZ[k], 1.4f, fx_v(f, k));
+    for (int i = 0; i < n; i++) {
+        float x = a[i];
+        for (int k = 0; k < 5; k++) x = fx_bq_run(&b[k], st[k], x);
+        a[i] = sanitize_sample(x);
+    }
+    f->ap[0] = extra0.x1; f->ap[1] = extra0.x2;
+    f->ap[2] = extra0.y1; f->ap[3] = extra0.y2;
+    f->ap[4] = extra1.x1; f->ap[5] = extra1.x2;
+    f->ap[6] = extra1.y1; f->ap[7] = extra1.y2;
+}
+
+/*
+ * REVERSE DELAY - the line read backwards, in overlapping windows.
+ *
+ * The window is the delay time. Two read heads run BACKWARDS through it,
+ * half a window apart, crossfaded equal-power so the seam where each one
+ * restarts is inaudible: one head is always in the middle of its pass
+ * while the other is at an edge. One head alone clicks once per window,
+ * every window, forever.
+ */
+static void fx_reverse(fx_block_t *f, float *a, int n) {
+    const float ms = fx_v(f, 0);
+    const float fb = f->p[1] * 0.55f;
+    const float mix = fx_v(f, 2) * 0.01f;
+    float win = ms * 0.001f * SAMPLE_RATE;
+    if (win > (float)(f->line_len - 512)) win = (float)(f->line_len - 512);
+    if (win < 256.0f) win = 256.0f;
+
+    for (int i = 0; i < n; i++) {
+        /* rd counts FORWARD through the window; the tap distance counts
+         * backward, which is what plays the buffer in reverse. */
+        f->rd += 1.0f;
+        while (f->rd >= win) f->rd -= win;
+        float t = f->rd / win;
+        float d0 = win - f->rd;
+        float d1 = d0 + win * 0.5f;
+        if (d1 >= win * 2.0f) d1 -= win;
+        float y = fx_tap(f, d0 + 64.0f) * sinf((float)M_PI * t)
+                + fx_tap(f, d1 + 64.0f) * sinf((float)M_PI * (1.0f - t));
+        f->line[f->w] = flush_denormal(a[i] + y * fb);
+        f->w = (f->w + 1 >= f->line_len) ? 0 : f->w + 1;
+        a[i] = sanitize_sample(a[i] + y * mix);
+    }
+}
+
 /* ------------------------------------------------------------- dispatch */
 
 /* `side` is the stereo difference channel, zeroed by the caller each block
@@ -1504,7 +1825,15 @@ static void fx_block_process(fx_block_t *f, float *a, float *side, int n) {
         case FX_DELAY: case FX_ANALOGDLY:       fx_delay(f, a, n); break;
         case FX_DUALDELAY:                      fx_dual_delay(f, a, n); break;
         case FX_TAPE:                           fx_tape(f, a, n); break;
-        case FX_REVERB:                         fx_reverb(f, a, n); break;
+        case FX_REVERB: case FX_PLATE:          fx_reverb(f, a, n); break;
+        case FX_BLUESDRV: case FX_PLEXI:
+        case FX_METALZONE:                      fx_gain_stage(f, a, n); break;
+        case FX_OCTAVIA:                        fx_octavia(f, a, n); break;
+        case FX_RANGEMASTER:                    fx_rangemaster(f, a, n); break;
+        case FX_UNIVIBE:                        fx_univibe(f, a, n); break;
+        case FX_DIMENSION:                      fx_dimension(f, a, side, n); break;
+        case FX_GRAPHEQ:                        fx_grapheq(f, a, n); break;
+        case FX_REVERSE:                        fx_reverse(f, a, n); break;
         case FX_SPRING:                         fx_spring(f, a, n); break;
         case FX_DOUBLER:                        fx_doubler(f, a, side, n); break;
         case FX_DETUNE:                         fx_detune(f, a, n); break;

@@ -45,19 +45,45 @@ const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3;
  * reasons agree, which is usually the sign that a merge is right rather
  * than convenient.
  */
+/*
+ * EVERY CATEGORY HAS ITS OWN COLOUR, and the pair is a hue's bright and
+ * dim variants rather than two constants that happen to look related.
+ *
+ * The palette header in shared/constants.mjs lists a `dim` and a `dark`
+ * for every hue, and taking the pair from one hue is what keeps "switched
+ * on" and "bypassed" reading as the SAME pedal at two brightnesses. The
+ * host's own knob_leds.mjs records what happens otherwise: constants
+ * picked by name produced a ramp that went dim, bright, dark, bright,
+ * because Mustard and Ochre are different hues, not two levels of one.
+ *
+ * Hues are spread far enough apart to survive a glance across eight pads
+ * at arm's length - the gain family runs warm (yellow, orange, magenta),
+ * everything downstream runs cool (teal, green, blue, purple, pink), and
+ * the two that are not pedals at all sit outside both: the amp is red and
+ * the cab is brown.
+ */
 const CATS = [
-    { name: 'Off',    type: TYPE_OFF },
-    { name: 'NAM',    type: TYPE_NAM },
-    { name: 'Cab',    type: TYPE_CAB },
-    { name: 'OD',     type: TYPE_FX, items: [0, 1, 2, 3, 4] },
-    { name: 'Dist',   type: TYPE_FX, items: [5, 6, 7, 8, 9] },
-    { name: 'Fuzz',   type: TYPE_FX, items: [10, 11] },
-    { name: 'Boost',  type: TYPE_FX, items: [12] },
-    { name: 'Dyn',    type: TYPE_FX, items: [13, 14, 15, 16, 17, 18] },
-    { name: 'Filter', type: TYPE_FX, items: [19, 20, 21, 22] },
-    { name: 'Mod',    type: TYPE_FX, items: [23, 24, 25, 26, 27, 28, 29] },
-    { name: 'Time',   type: TYPE_FX, items: [30, 31, 32, 33, 34, 35] },
-    { name: 'Pitch',  type: TYPE_FX, items: [36, 37, 38, 39] },
+    { name: 'Off',    type: TYPE_OFF, led: [0, 0] },
+    { name: 'NAM',    type: TYPE_NAM, led: [1, 65] },     /* red     */
+    { name: 'Cab',    type: TYPE_CAB, led: [5, 73] },     /* brown   */
+    { name: 'OD',     type: TYPE_FX,  led: [8, 79],       /* yellow  */
+      items: [0, 1, 2, 3, 4, 40, 41] },
+    { name: 'Dist',   type: TYPE_FX,  led: [3, 69],       /* orange  */
+      items: [5, 6, 7, 42, 8, 9] },
+    { name: 'Fuzz',   type: TYPE_FX,  led: [26, 115],     /* magenta */
+      items: [10, 11, 43] },
+    { name: 'Boost',  type: TYPE_FX,  led: [122, 118],    /* white   */
+      items: [12, 44] },
+    { name: 'Dyn',    type: TYPE_FX,  led: [15, 93],      /* teal    */
+      items: [13, 14, 15, 16, 17, 18] },
+    { name: 'Filter', type: TYPE_FX,  led: [11, 85],      /* green   */
+      items: [19, 47, 20, 21, 22] },
+    { name: 'Mod',    type: TYPE_FX,  led: [16, 95],      /* azure   */
+      items: [23, 46, 24, 25, 26, 45, 27, 28, 29] },
+    { name: 'Time',   type: TYPE_FX,  led: [22, 107],     /* purple  */
+      items: [30, 31, 32, 33, 49, 34, 48, 35] },
+    { name: 'Pitch',  type: TYPE_FX,  led: [23, 109],     /* pink    */
+      items: [36, 37, 38, 39] },
 ];
 
 function catOfBlock(b) {
@@ -69,16 +95,7 @@ function catOfBlock(b) {
     return 3;
 }
 
-/* Pad colour says the CATEGORY; brightness says whether it is in circuit.
- * Selected blinks, because "which one am I editing" is a different
- * question from "what is switched on" and one colour cannot answer both. */
-const Black = 0, White = 120;
-const TYPE_LED = [
-    { on: 0,   off: 0   },   /* Off  - dark */
-    { on: 127, off: 68  },   /* NAM  - red */
-    { on: 3,   off: 70  },   /* Cab  - orange */
-    { on: 8,   off: 80  },   /* FX   - yellow */
-];
+const White = 120;
 
 /*
  * KNOBS 7 AND 8 ARE THE BOARD'S - except that a five-knob pedal needs one
@@ -531,12 +548,6 @@ function blockLabel(b) {
     return '';
 }
 
-/* Which LED palette a block wears. The pad says the CATEGORY, so it is
- * indexed by type rather than by the twelve-entry knob list. */
-function ledTypeOf(b) {
-    const t = st.type[b];
-    return (t < 0 || t > 3) ? 0 : t;
-}
 
 function drawHeader() {
     const cpu = Math.round(st.cpu) + '%';
@@ -728,11 +739,18 @@ function paintKnobLeds() {
 function paintLeds() {
     paintKnobLeds();
     for (let b = 0; b < NUM_BLOCKS; b++) {
-        const t = st.type[b];
+        /* Selection BLINKS rather than taking a colour of its own, because
+         * "which one am I editing" and "what is this block" are different
+         * questions and one colour cannot answer both - and now that the
+         * colour carries the category, spending it on selection would be
+         * spending the more useful of the two. */
         let c;
-        if (b === sel && (Date.now() % 700) < 350) c = White;
-        else if (t === TYPE_OFF) c = Black;
-        else c = st.on[b] ? TYPE_LED[ledTypeOf(b)].on : TYPE_LED[ledTypeOf(b)].off;
+        if (b === sel && (Date.now() % 700) < 350) {
+            c = White;
+        } else {
+            const led = CATS[catOfBlock(b)].led;
+            c = (st.type[b] === TYPE_OFF) ? 0 : (st.on[b] ? led[0] : led[1]);
+        }
         setLED(PAD_BASE + b, c);
     }
 }
