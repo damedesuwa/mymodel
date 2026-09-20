@@ -15,8 +15,10 @@
 # the id is the only thing that moves the file. A new id installs into a
 # directory nothing has open and therefore cannot be blocked.
 #
-# The proper fix is to uninstall before installing; this is for when that has
-# already been tried and the log still shows the old build.
+# EVERY RELEASE GETS THE NEXT LETTER. That is the user's call and it is the
+# right one: the alternative is one round per release spent establishing
+# which binary is on the device, which has now happened four times. The cost
+# is re-picking the module in the slot, once, which takes a jog click.
 #
 #   ./scripts/reid.sh nam-a2c nam-a2d "Nam A2d" A2D
 set -e

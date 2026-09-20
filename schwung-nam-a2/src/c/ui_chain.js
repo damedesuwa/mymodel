@@ -169,11 +169,13 @@ function openMenu() {
     menuCursor = 0;
     menuTop = 0;
     menuOpen = true;
+    lastPaint = 0;      /* repaint NOW, not up to 33 ms from now */
 }
 
 function runMenuRow() {
     const row = menuRows[menuCursor];
     menuOpen = false;
+    lastPaint = 0;
     if (!row || !row.action) return false;
     try {
         /* True means the action opened a screen, and this frame must not be
@@ -380,7 +382,7 @@ globalThis.chain_ui = {
     },
 
     tick() {
-        try { this._tick(); }
+        try { tickBody(); }
         catch (e) {
             /* There is no host grid behind this screen any more, so an
              * uncaught throw here is a black panel with working knobs and
@@ -394,7 +396,11 @@ globalThis.chain_ui = {
         }
     },
 
-    _tick() {
+    _tick() { tickBody(); },
+};
+
+/* Standalone, so `this` is never part of whether the screen draws. */
+function tickBody() {
         /* RESTATED, never memoised. The shim drops pad_block unilaterally
          * from four SPI-callback sites that never tell JS, so a mirror
          * latches and the pads die silently after the first Menu dismiss.
@@ -415,9 +421,9 @@ globalThis.chain_ui = {
 
         paintLeds();
         if (now - lastPaint >= 33) { lastPaint = now; draw(); }
-    },
+}
 
-    onMidiMessageInternal(data) {
+globalThis.chain_ui.onMidiMessageInternal = function(data) {
         if (!data || data.length < 3) return;
         const status = data[0] & 0xf0;
         const d1 = data[1], d2 = data[2];
@@ -426,6 +432,11 @@ globalThis.chain_ui = {
          * the host's own COMPONENT_EDIT jog handler never runs, because MIDI
          * is routed to a loaded module UI before it (shadow_ui.js:27167). */
         if (status === 0xb0 && d1 === CC_JOG_CLICK && d2 > 0) {
+            /* Two rounds were spent unable to tell "the menu did not open"
+             * from "the click never reached the module". One line settles
+             * it; console.log from a component UI is routed to the unified
+             * log. */
+            try { console.log('A2c: jog click -> ' + (menuOpen ? 'run' : 'open menu')); } catch (e) {}
             if (menuOpen) runMenuRow(); else openMenu();
             return;
         }
@@ -435,6 +446,7 @@ globalThis.chain_ui = {
                 menuCursor += (d > 0 ? 1 : -1);
                 if (menuCursor < 0) menuCursor = 0;
                 if (menuCursor > menuRows.length - 1) menuCursor = menuRows.length - 1;
+                lastPaint = 0;   /* the cursor moved; show it */
             }
             return;
         }
@@ -459,5 +471,4 @@ globalThis.chain_ui = {
             padDownAt[b] = 0;
             padHandled[b] = false;
         }
-    },
 };
