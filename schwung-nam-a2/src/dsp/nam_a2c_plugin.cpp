@@ -32,7 +32,7 @@
 
 #include "a2_common.h"
 
-#define NAM_A2C_BUILD_ID "menu"
+#define NAM_A2C_BUILD_ID "menu2"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -702,6 +702,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "in_level") == 0)  return snprintf(buf, buf_len, "%.4f", s->in_level);
     if (strcmp(key, "out_level") == 0) return snprintf(buf, buf_len, "%.4f", s->out_level);
     if (strcmp(key, "sel_block") == 0) return snprintf(buf, buf_len, "%d", s->sel_block);
+    /* ON THE SCREEN, not only in the log.
+     *
+     * Three rounds of this were spent establishing which build was running,
+     * twice from a log that did not include the load line. The panel is
+     * always in front of you and the log is not. */
+    if (strcmp(key, "build") == 0) return snprintf(buf, buf_len, "%s", NAM_A2C_BUILD_ID);
     if (strcmp(key, "cpu") == 0) {
         double pct = 100.0 * s->cpu_us_peak / FRAME_BUDGET_US;
         return snprintf(buf, buf_len, "%d", (int)(clampf(pct, 0.0f, 100.0f) + 0.5f));

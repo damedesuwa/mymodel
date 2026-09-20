@@ -95,6 +95,7 @@ const st = {
     blockCpu: new Array(NUM_BLOCKS).fill(0),
     val: {},                    /* "b3_drive" -> number */
     names: { model: [], cab: [] },
+    build: '?',
     rot: 0,
 };
 
@@ -185,7 +186,7 @@ function runMenuRow() {
 
 function drawMenu() {
     clear_screen();
-    print(2, 1, 'Nam A2c', 1);
+    print(2, 1, 'Nam A2c  ' + st.build, 1);
     fill_rect(0, 10, 128, 1, 1);
     if (menuCursor < menuTop) menuTop = menuCursor;
     if (menuCursor >= menuTop + MENU_VISIBLE) menuTop = menuCursor - MENU_VISIBLE + 1;
@@ -246,7 +247,7 @@ function drawBoxes() {
 
 function drawHeader() {
     const cpu = Math.round(st.cpu);
-    const left = 'A2c  blk ' + (sel + 1);
+    const left = 'A2c ' + st.build + ' blk' + (sel + 1);
     print(2, 1, left, 1);
     const right = cpu + '%';
     /* Over budget is the one thing on this screen worth inverting for. */
@@ -368,6 +369,7 @@ globalThis.chain_ui = {
          * cache believes is stale. Re-emit everything once. */
         invalidateLedCache();
         loadLists();
+        st.build = getp('build') || '?';
         sel = num(getp('sel_block'), 0);
         for (let b = 0; b < NUM_BLOCKS; b++) {
             st.type[b] = num(getp('b' + (b + 1) + '_type'), 0);
