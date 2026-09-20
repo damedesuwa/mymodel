@@ -537,14 +537,29 @@ function drawCells() {
 function drawFooter(list) {
     /* One line, and it prefers the thing that had to be cut above: a model
      * or pedal name is longer than a 31 px cell and is the one string here
-     * you actually need in full. */
-    const full = list.find(k => k.kind === 'list' || k.kind === 'fxid');
+     * you actually need in full.
+     *
+     * WHERE YOU ARE IN THE TREE, not just what is under the cursor. Twenty
+     * six pedals behind two knobs is a place you can be lost in, and the
+     * screen was not saying you were in one: the group cell clips `Filter`
+     * to `Filte` at 31 px, and nothing anywhere said how many pedals the
+     * group held or which of them this was. Asked from the device as
+     * "where did the EQ go" - it had not gone anywhere, it is the first of
+     * four in Filter, and that is the sentence the screen now prints. */
+    if (st.type[sel] === TYPE_FX) {
+        const id = st.fx[sel] | 0;
+        const cat = fxCategoryOf(id);
+        const items = FX_TREE[cat].items;
+        const at = items.indexOf(id);
+        ptext(1, FOOT_Y, (st.names.fx[id] || String(id)) + '  ' +
+              FX_TREE[cat].name + ' ' + (at + 1) + '/' + items.length, 1, 126);
+        return;
+    }
+    const full = list.find(k => k.kind === 'list');
     if (full) {
-        const v = (full.kind === 'fxid') ? st.fx[sel] : st.val[fullKey(full)];
+        const v = st.val[fullKey(full)];
         if (v !== undefined) {
-            ptext(1, FOOT_Y, (full.kind === 'fxid')
-                    ? (st.names.fx[v] || String(v))
-                    : listNameFor(full.key, v), 1, 126);
+            ptext(1, FOOT_Y, listNameFor(full.key, v), 1, 126);
             return;
         }
     }

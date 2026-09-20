@@ -188,6 +188,11 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ui.onMidiMessageInternal([0xb0, 76, 1]);         /* knob 6 = Mix */
     ui.tick();
     ok(drawn.includes('Mix'), 'tree: Delay exposes Time/Fdbk/Mix past the tree');
+    /* WHERE YOU ARE, spelled out. The group cell clips at 31 px, so the
+     * footer is the only place the family name survives in full - and the
+     * n/N is what says there is more of it to turn to. */
+    ok(drawn.some(t => String(t) === 'Delay  Time 1/5'),
+       'footer: names the pedal, its family and its place in it');
     ok(Number(params['b4_p3']) > 0.5, 'tree: turning it writes that pedal param');
 
     /* A pedal with fewer knobs does not offer the ones it lacks - but the
