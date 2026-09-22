@@ -75,12 +75,25 @@ function forkCol() {
         if (st.type[slotOf(ROW_BR, c)] !== TYPE_OFF) return c;
     return -1;
 }
-/* Is this slot in the signal path at all? The branch row before the fork
- * is not - by construction it is empty there. */
+/* And where they come back together: the LAST top-row block. Same
+ * principle as the fork - the branch is as long as the blocks on it, and
+ * everything past its end is one signal again. Two amps into a shared
+ * reverb needs no verb of its own.
+ *
+ * A branch reaching the last column merges with nothing after it, which
+ * is the same thing as merging at the output - so "two lanes, two
+ * outputs" is not a special case, it is this one with an empty tail. */
+function joinCol() {
+    for (let c = NUM_COLS - 1; c >= 0; c--)
+        if (st.type[slotOf(ROW_BR, c)] !== TYPE_OFF) return c;
+    return -1;
+}
+/* Is this slot in the signal path at all? The branch row outside
+ * [fork, join] is not - by construction it is empty there. */
 function inPath(b) {
     if (rowOf(b) === ROW_MAIN) return true;
     const f = forkCol();
-    return f >= 0 && colOf(b) >= f;
+    return f >= 0 && colOf(b) >= f && colOf(b) <= joinCol();
 }
 const HOLD_MS = 350;
 
@@ -804,7 +817,7 @@ function drawHeader() {
      * pan word says where that rail is going. Both, because "T" is a
      * position on the screen and "L" is a position in the room. */
     const f = forkCol();
-    const side = (f >= 0 && inPath(sel) && colOf(sel) >= f)
+    const side = (f >= 0 && colOf(sel) >= f && colOf(sel) <= joinCol())
                  ? (rowOf(sel) === ROW_BR ? ' L' : ' R') : '';
     ptext(1, 1, blockName(sel) + side + (what ? ' ' + what : ' --'),
           1, MET_X - 3);
@@ -813,13 +826,14 @@ function drawHeader() {
 
 /* Where a block's box sits, and where its wire runs through the column. */
 function blockGeom(b) {
-    const split = forkCol();
+    const split = forkCol(), join = joinCol();
     const col = colOf(b), row = rowOf(b);
-    const forked = split >= 0 && col >= split;
-    /* A MAIN-ROW BLOCK BEFORE THE FORK SPANS BOTH RAILS, because that is
-     * what it does: one amp feeding two cabs is drawn as one tall block
-     * meeting two short ones, and the fork then needs no arrow to
-     * explain it. */
+    const forked = split >= 0 && col >= split && col <= join;
+    /* A MAIN-ROW BLOCK OUTSIDE THE PARALLEL SECTION SPANS BOTH RAILS,
+     * because that is what it does: one amp feeding two cabs is drawn as
+     * one tall block meeting two short ones, and a reverb after them is
+     * the same picture the other way round. The fork and the join then
+     * need no arrows to explain them. */
     const y = !forked ? GRID_Y
             : (row === ROW_BR ? GRID_Y : GRID_Y + LANE_H + LANE_GAP);
     const h = forked ? LANE_H : (split >= 0 ? BAND_H : GRID_H);
@@ -827,7 +841,7 @@ function blockGeom(b) {
 }
 
 function drawBoxes() {
-    const split = forkCol();
+    const split = forkCol(), join = joinCol();
     const bandH = split >= 0 ? BAND_H : GRID_H;
     const midWire = GRID_Y + (bandH >> 1);
     const laneWire = [GRID_Y + (LANE_H >> 1),
@@ -844,16 +858,24 @@ function drawBoxes() {
      * It used to be laid down per column, and an EMPTY slot assigned to
      * the lower lane punched a hole in the UPPER lane's wire: both lanes
      * run to the output whatever is or is not on either of them, and a
-     * per-column loop cannot know that. Two continuous runs and one
-     * vertical; the boxes clear their own interiors afterwards. */
-    const fx = colX(split) - 1;
+     * per-column loop cannot know that. Runs and verticals first; the
+     * boxes clear their own interiors afterwards.
+     *
+     * THE JOIN IS DRAWN EXACTLY AS THE FORK IS - a vertical joining the
+     * two rails - because it is the same event read the other way round.
+     * Drawing the parting and leaving the meeting implied was the shape
+     * that made "where does this come back together" a question at all. */
+    const fx = colX(split) - 1;                  /* the gap before the fork */
+    const jx = colX(join) + COL_W;               /* the gap after the join  */
     if (split < 0) {
         fill_rect(IO_W, midWire, 128 - IO_W * 2, 1, 1);
     } else {
         fill_rect(IO_W, midWire, fx - IO_W + 1, 1, 1);
         fill_rect(fx, laneWire[0], 1, laneWire[1] - laneWire[0] + 1, 1);
+        fill_rect(jx, laneWire[0], 1, laneWire[1] - laneWire[0] + 1, 1);
         for (let r = 0; r < 2; r++)
-            fill_rect(fx, laneWire[r], 128 - IO_W - fx, 1, 1);
+            fill_rect(fx, laneWire[r], jx - fx + 1, 1, 1);
+        fill_rect(jx, midWire, 128 - IO_W - jx, 1, 1);
     }
 
     for (let b = 0; b < NUM_BLOCKS; b++) {

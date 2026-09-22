@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "tworow"
+#define NAM_A2C_BUILD_ID "merge"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -237,6 +237,23 @@ typedef struct {
  * nothing writes, which is silence with no way to see why. */
 static int fork_col(const a2c_t *s) {
     for (int c = 0; c < NUM_COLS; c++)
+        if (s->type[SLOT(ROW_BR, c)] != BLK_OFF) return c;
+    return -1;
+}
+
+/* And the column they come back TOGETHER after: the LAST top-row block.
+ *
+ * Same principle as the fork, and deliberately so - the branch is simply
+ * as long as the blocks on it, and everything past its end is one signal
+ * again. A parallel section in the middle of a chain (two amps into a
+ * shared reverb) needs no verb of its own, and there is no join setting
+ * to disagree with where the blocks actually are.
+ *
+ * A branch reaching the LAST column merges with nothing after it, which
+ * is the same arithmetic as merging at the output - so "two lanes to two
+ * outputs" is not a special case, it is this one with an empty tail. */
+static int join_col(const a2c_t *s) {
+    for (int c = NUM_COLS - 1; c >= 0; c--)
         if (s->type[SLOT(ROW_BR, c)] != BLK_OFF) return c;
     return -1;
 }
@@ -654,14 +671,25 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
      * callback at all leaves this 0 and fx_time_ms falls back itself. */
     const float bpm = (g_host && g_host->get_bpm) ? g_host->get_bpm() : 0.0f;
 
-    /* THE FORK IS READ OFF THE BOARD, not out of a setting. */
+    /* THE FORK AND THE JOIN ARE READ OFF THE BOARD, not out of settings. */
     const int fork  = fork_col(s);
+    const int join  = join_col(s);
     const int split = (fork >= 0);
     const int head  = split ? fork : NUM_COLS;
 
-    /* THREE RUNS, IN SIGNAL ORDER: the common head, then each lane.
+    /* EQUAL POWER, so sweeping a lane across the field does not make it
+     * louder in the middle, and two lanes both centred sum at -3 dB each
+     * rather than doubling. Computed once per block; the pans are knobs,
+     * not audio. */
+    const float aa = (s->pan_a * 0.5f + 0.5f) * 1.5707963f;
+    const float bb = (s->pan_b * 0.5f + 0.5f) * 1.5707963f;
+    const float a_l = cosf(aa), a_r = sinf(aa);
+    const float b_l = cosf(bb), b_r = sinf(bb);
+
+    /* FOUR RUNS, IN SIGNAL ORDER: the common head, each lane, then the
+     * common tail.
      *
-     * Written as three loops rather than one walk over sixteen slots
+     * Written as separate loops rather than one walk over sixteen slots
      * because the order they must run in is not the order they are stored
      * in - the whole top row would otherwise be processed before the
      * bottom row had started, and the head would feed nothing. */
@@ -671,41 +699,47 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     if (split) {
         memcpy(s->laneA, s->mono, sizeof(float) * (size_t)n);
         memcpy(s->laneB, s->mono, sizeof(float) * (size_t)n);
-        for (int c = fork; c < NUM_COLS; c++)
+        for (int c = fork; c <= join; c++)
             run_block(s, SLOT(ROW_BR,   c), s->laneA, n, bpm);
-        for (int c = fork; c < NUM_COLS; c++)
+        for (int c = fork; c <= join; c++)
             run_block(s, SLOT(ROW_MAIN, c), s->laneB, n, bpm);
+
+        /* THE MERGE IS THE OUTPUT STAGE, MOVED. Each lane is placed by
+         * its own pan and the pair is folded straight back into the
+         * mono/side the rest of the board already speaks - so the tail
+         * runs on the centre and the placement survives it.
+         *
+         * With the branch in the last column this runs with nothing
+         * after it, which is arithmetically what the old `if (split)`
+         * branch in the output stage did. That branch is gone: one path
+         * now, and it cannot drift from the other one. */
+        for (int i = 0; i < n; i++) {
+            const float la = s->laneA[i] * a_l + s->laneB[i] * b_l;
+            const float ra = s->laneA[i] * a_r + s->laneB[i] * b_r;
+            s->mono[i] = (la + ra) * 0.5f;
+            s->side[i] += (la - ra) * 0.5f;
+        }
+
+        for (int c = join + 1; c < NUM_COLS; c++)
+            run_block(s, SLOT(ROW_MAIN, c), s->mono, n, bpm);
     }
 
     /* A SLOT NOTHING REACHED COSTS NOTHING, AND MUST SAY SO. Leaving the
      * held peak where it was leaves the CPU page attributing time to a
      * block that is not in the signal path at all - which reads as the
      * budget being wrong rather than as the board being mono. */
-    for (int c = 0; c < head; c++) s->us_peak[SLOT(ROW_BR, c)] = 0.0;
+    for (int c = 0; c < NUM_COLS; c++)
+        if (!split || c < fork || c > join) s->us_peak[SLOT(ROW_BR, c)] = 0.0;
 
     const float og = s->out_gain;
-    /* EQUAL POWER, so sweeping a lane across the field does not make it
-     * louder in the middle. Computed once per block; the pans are knobs,
-     * not audio. */
-    const float aa = (s->pan_a * 0.5f + 0.5f) * 1.5707963f;
-    const float bb = (s->pan_b * 0.5f + 0.5f) * 1.5707963f;
-    const float a_l = cosf(aa), a_r = sinf(aa);
-    const float b_l = cosf(bb), b_r = sinf(bb);
 
+    /* ONE OUTPUT PATH. The lanes were folded back into mono/side at the
+     * merge, wherever that was, so there is nothing left here that needs
+     * to know whether the board forked. */
     for (int i = 0; i < n; i++) {
-        float la, ra;
-        if (split) {
-            /* Two independent signals, each placed by its own pan. */
-            float A = s->laneA[i] * og, B = s->laneB[i] * og;
-            la = A * a_l + B * b_l;
-            ra = A * a_r + B * b_r;
-        } else {
-            float m0 = s->mono[i] * og;
-            la = ra = m0;
-        }
-        float m = sanitize_sample((la + ra) * 0.5f);
+        float m = sanitize_sample(s->mono[i] * og);
         if (m != m) s->nan_samples++;
-        float sd = sanitize_sample(s->side[i] * og + (la - ra) * 0.5f);
+        float sd = sanitize_sample(s->side[i] * og);
         float lv = m + sd, rv = m - sd;
         /* MEASURED ON THE WIDER CHANNEL, AND BEFORE THE QUANTISER CLAMPS
          * IT. Taking it afterwards would report 0.999 for a signal that

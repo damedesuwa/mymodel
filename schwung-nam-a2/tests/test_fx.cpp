@@ -402,6 +402,61 @@ int main(int argc, char **argv) {
             printf("   <-- the branch's 8th column is not in the path\n"); fails++;
         }
 
+
+        /* AND THEY COME BACK TOGETHER WHERE THE BRANCH ENDS.
+         *
+         * Two lanes hard apart, then ONE block in the tail. If the merge
+         * is real, that block is heard on BOTH channels - which is the
+         * whole point of a shared reverb after two amps. If the lanes
+         * were still separate it could only reach the one it sits on,
+         * and a test that only looked at the total would pass either
+         * way. */
+        for (int b = 1; b <= 8; b++) {
+            char k[16];
+            snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0");
+            snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
+        }
+        api->set_param(in, "pan_a", "-1.0");      /* branch hard left   */
+        api->set_param(in, "pan_b", "1.0");       /* main hard right    */
+        api->set_param(in, "t2_type", "3");
+        api->set_param(in, "t2_fx", "19");        /* EQ flat: forks and joins at col 2 */
+        /* One measurement, twice, so the two runs cannot differ in
+         * anything but the block being switched. */
+        double ml = 0, mr = 0, bl = 0, br = 0;
+        auto measure = [&](double *L, double *R) {
+            double l = 0, r = 0;
+            for (int blk = 0; blk < 300; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    double t = (blk * 128.0 + i) / 44100.0;
+                    a[i * 2] = a[i * 2 + 1] =
+                        (int16_t)(0.30 * sin(2 * M_PI * 220.0 * t) * 20000);
+                }
+                api->process_block(in, a, 128);
+                if (blk < 100) continue;
+                for (int i = 0; i < 128; i++) {
+                    l += (a[i * 2] / 32768.0) * (a[i * 2] / 32768.0);
+                    r += (a[i * 2 + 1] / 32768.0) * (a[i * 2 + 1] / 32768.0);
+                }
+            }
+            *L = sqrt(l / 25600); *R = sqrt(r / 25600);
+        };
+        api->set_param(in, "b6_type", "0");
+        measure(&bl, &br);
+        api->set_param(in, "b6_type", "3");
+        api->set_param(in, "b6_fx", "19");        /* EQ ...          */
+        api->set_param(in, "b6_p1", "0.0");       /* ... all bands   */
+        api->set_param(in, "b6_p2", "0.0");       /*     at -12 dB   */
+        api->set_param(in, "b6_p3", "0.0");
+        measure(&ml, &mr);
+        printf("\nmerge: tail empty          L %.5f  R %.5f\n", bl, br);
+        printf("merge: -12 dB in the tail  L %.5f  R %.5f\n", ml, mr);
+        if (!(ml < bl * 0.8)) {
+            printf("   <-- the tail does not reach the LEFT lane\n"); fails++;
+        }
+        if (!(mr < br * 0.8)) {
+            printf("   <-- the tail does not reach the RIGHT lane\n"); fails++;
+        }
+
         for (int b = 1; b <= 8; b++) {
             char k[16]; snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
         }

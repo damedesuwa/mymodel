@@ -58,6 +58,12 @@ if (scen === 'split') {
     set('b1', 3, 0); set('b2', 1); set('b3', 2); set('b4', 3, 34);
     set('t3', 2); set('t4', 3, 30);
 }
+if (scen === 'merge') {
+    /* amp, two cabs in parallel, then a SHARED reverb after the join */
+    set('b1', 3, 0); set('b2', 1); set('b3', 2);
+    set('t3', 2);
+    set('b6', 3, 44); set('b7', 3, 30);
+}
 
 const host = {
     host_module_get_param: k => (k in params ? params[k] : null),

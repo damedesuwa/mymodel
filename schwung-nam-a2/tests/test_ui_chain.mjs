@@ -543,6 +543,27 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ok(!upperAt(0) && !upperAt(1),
        'split: nothing is drawn on the branch before it forks');
 
+    /* THE LANES COME BACK TOGETHER WHERE THE BRANCH ENDS, by the same
+     * rule that parted them. Two amps into a shared reverb: the reverb
+     * is one block, after the join, spanning both rails - the same
+     * picture as the head, read the other way round. */
+    board({ b1: 3, b2: 3, t2: 3, b5: 3, b6: 3 });
+    ui.init();
+    rects.length = 0; repaint();
+    ok(upperAt(1) && lowerAt(1),
+       'merge: the parallel section is two rails');
+    ok(!upperAt(4) && !lowerAt(4),
+       'merge: and after the branch ends there is only one');
+    ok(boxAt(4) && boxAt(4)[2] === GY && boxAt(4)[4] === BAND,
+       'merge: a block in the tail spans both rails, as the head does');
+    /* TWO verticals, not one: the fork AND the join. Drawing the parting
+     * and leaving the meeting implied is what made "where does this come
+     * back together" a question. */
+    const rails = rects.filter(r => r[0] === 'fill' && r[3] === 1 && r[4] >= LH);
+    ok(rails.length >= 2, 'merge: the join is drawn exactly as the fork is');
+    ok(rails.some(r => r[1] > 4 + 1 * (CW + 1)),
+       'merge: and it sits AFTER the branch, not at it');
+
     /* AN EMPTY SLOT IS A WIRE, NOT A BOX. Five empty boxes with a dash in
      * each is what "messy" meant: the three blocks that were there had to
      * be found among them. */
