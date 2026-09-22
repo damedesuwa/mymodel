@@ -28,18 +28,19 @@
     {
       "title": "Splitting the board",
       "lines": [
-        "The row ABOVE the blocks is the",
-        "routing row, same two gestures",
-        "as the pads under it:",
-        "  TAP   flip this block L <-> R",
-        "  HOLD  the board parts HERE",
-        "        (hold it again to rejoin)",
-        "Every pad is lit with the side",
-        "it gives you. Dim = set but not",
-        "in circuit yet; bright = live.",
+        "The row ABOVE the blocks. Dark",
+        "means no split.",
+        "  TAP a DARK pad",
+        "    the board parts there, and",
+        "    everything from there lights",
+        "    dark pink - the signal is",
+        "    now separated.",
+        "  TAP a LIT pad",
+        "    dark pink = left lane",
+        "    full pink = right lane",
+        "  HOLD anywhere  rejoin",
         "Menu > Pan L / Pan R place them.",
-        "One amp + two cabs is ~110us.",
-        "Two amps at Full do NOT fit."
+        "One amp + two cabs is ~110us."
       ]
     },
     {

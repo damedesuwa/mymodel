@@ -383,10 +383,9 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(!reads.some(k => /_cat$/.test(k)),
        'reads: nothing asks the plugin for a key it cannot answer');
 
-    /* THE ROUTING ROW KEEPS THE BLOCK ROW'S RHYTHM: tap flips a side,
-     * hold parts the board. It had three meanings on one tap decided by
-     * where the pad sat, and the device's verdict was that there was
-     * nothing to learn. */
+    /* THE ROUTING ROW: the pad tells you what it will do, and the tap
+     * acts on what it is SHOWING rather than on where it sits relative to
+     * a marker you have to find. */
     const R = (n) => 76 + n;
     const tapR = (n) => {
         ui.onMidiMessageInternal([0x90, R(n), 127]);
@@ -398,25 +397,52 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
         ui.onMidiMessageInternal([0x80, R(n), 0]);
     };
 
-    writes.length = 0;
-    tapR(5);
-    ok(writes.some(([k]) => k === 'b6_lane'), 'route: a tap flips that block side');
-    ok(!writes.some(([k]) => k === 'split'), 'route: a tap never moves the split');
-    const firstSide = writes.find(([k]) => k === 'b6_lane')[1];
-    writes.length = 0;
-    tapR(5);
-    ok(writes.some(([k, v]) => k === 'b6_lane' && v !== firstSide),
-       'route: and tapping again puts it back');
+    /* The whole row starts dark, and dark really means off - not a dim
+     * preview of a side, which is what made the row unreadable. */
+    holdR(0);                                        /* make sure it is off */
+    for (let b = 1; b <= 8; b++) { params[`b${b}_type`] = '3'; params[`b${b}_lane`] = '0'; }
+    ui.init();
+    repaint();
+    for (let b = 0; b < 8; b++)
+        ok(leds[R(b)] === 0, `route: with no split, pad ${b + 1} is dark`);
 
+    /* A dark pad has nothing to flip, so splitting is the only thing its
+     * tap could mean. */
     writes.length = 0;
-    holdR(2);
+    tapR(2);
     ok(writes.some(([k, v]) => k === 'split' && v === '3'),
-       'route: a hold parts the board there');
+       'route: a tap on a dark pad parts the board there');
+    repaint();
+    ok(leds[R(0)] === 0 && leds[R(1)] === 0,
+       'route: before it stays dark');
+    ok(leds[R(2)] !== 0 && leds[R(7)] !== 0,
+       'route: and everything from there lights up - the signal is split');
+
+    /* Lit pads are sides, and the two are one colour at two brightnesses. */
+    const dim = leds[R(2)];
     writes.length = 0;
-    holdR(2);
+    tapR(3);
+    ok(writes.some(([k]) => k === 'b4_lane'), 'route: a tap on a lit pad sends it across');
+    ok(!writes.some(([k]) => k === 'split'), 'route: and never moves the split');
+    repaint();
+    ok(leds[R(3)] !== dim, 'route: the other side is the other brightness');
+    ok(leds[R(3)] !== 0 && dim !== 0, 'route: both sides are lit');
+    writes.length = 0;
+    tapR(3);
+    repaint();
+    ok(leds[R(3)] === dim, 'route: tapping again sends it back');
+
+    /* Rejoin from ANY pad. One gesture that always means the same thing
+     * and always has somewhere to land beats one that only works on the
+     * pad the split happens to be on. */
+    writes.length = 0;
+    holdR(6);
     ok(writes.some(([k, v]) => k === 'split' && v === '0'),
-       'route: holding the same pad rejoins it');
-    holdR(2);
+       'route: a hold anywhere rejoins the board');
+    repaint();
+    let allDark = true;
+    for (let b = 0; b < 8; b++) if (leds[R(b)] !== 0) allDark = false;
+    ok(allDark, 'route: and the whole row goes dark again');
 
     /* THE BLOCK ROW IS UNTOUCHED - tap stomps, hold edits. */
     writes.length = 0;
@@ -430,41 +456,24 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(writes.some(([k, v]) => k === 'sel_block' && v === '6'),
        'blocks: a hold still selects it for editing');
 
-    /* EVERY ROUTING PAD IS LIT, because the colour is the side it gives
-     * you. Brightness is the other fact: dim before the split, bright in
-     * circuit - and the boundary between them IS the split point. */
-    for (let b = 1; b <= 8; b++) { params[`b${b}_type`] = '3'; params[`b${b}_lane`] = '0'; }
-    params['b4_lane'] = '1';
-    ui.init();
-    repaint();
-    for (let b = 0; b < 8; b++)
-        ok(leds[R(b)] !== 0, `route: pad ${b + 1} is lit`);
-    ok(leds[R(0)] !== leds[R(2)],
-       'route: before the split is dim, at it is bright');
-    ok(leds[R(2)] !== leds[R(3)],
-       'route: and the two sides are different colours');
-
     /* AND THE SCREEN SAYS WHAT JUST HAPPENED. The drawing is a picture of
      * the state; it does not answer "did that tap do what I meant", which
      * is the question being asked while you change it. */
+    tapR(2);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'Split at 3'), 'route: a split says itself');
     tapR(6);
     drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => /^B7 -> [LR]$/.test(d[2])),
-       'route: a flip says itself in the footer');
-    holdR(4);
-    drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => d[2] === 'Split at 5'), 'route: so does a split');
-    /* And it gets out of the way. */
+    ok(drawnAt.some(d => /^B7 -> [LR]$/.test(d[2])), 'route: so does a flip');
     clockSkew += 2000;
     drawnAt.length = 0; repaint();
-    ok(!drawnAt.some(d => /^Split at/.test(d[2])),
+    ok(!drawnAt.some(d => /^(Split at|B7 ->)/.test(d[2])),
        'route: the message is brief, not a mode');
-    holdR(2);
 
     /* THE PICTURE ON SCREEN. A rail above the row for the left lane,
      * below for the right, and a drop where they part company - which is
      * where Move draws it too. */
-    params['b3_lane'] = '0'; params['b4_lane'] = '1';
+    params['b3_lane'] = '0'; params['b4_lane'] = '1'; params['split'] = '3';
     ui.init();
     rects.length = 0; drawnAt.length = 0; repaint();
     const BOXY = 12, BOXH = 18;

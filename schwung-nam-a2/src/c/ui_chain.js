@@ -35,8 +35,22 @@ const PAD_BASE = 68;            /* bottom row, notes 68..75 */
  * blocks carry the same information under your fingers.
  */
 const ROUTE_BASE = 76;          /* second row, notes 76..83 */
-const LANE_LED = [16, 23];      /* AzureBlue for L, NeonPink for R */
-const LANE_LED_DIM = [95, 109];
+/*
+ * ONE COLOUR, TWO BRIGHTNESSES, AND DARK MEANS DARK.
+ *
+ * It was two hues - azure for the left lane, pink for the right - with the
+ * pads before the split lit dimly in whichever side they would land on.
+ * Three things to decode on one row, and the report from the device was
+ * that the row could not be read.
+ *
+ * Off really means off now: no split, or before it, and the pad does
+ * nothing you can see the result of. Lit means the signal is separated
+ * from here, and the two sides are the SAME pink at two brightnesses -
+ * which is a difference you can see across eight pads at arm's length
+ * without naming either colour.
+ */
+const PINK_DIM = 115;           /* Light Magenta dim  - the left lane  */
+const PINK_MAX = 26;            /* Light Magenta      - the right lane */
 const HOLD_MS = 350;
 
 const CC_KNOB_BASE = 71;        /* knobs 1..8 are CC 71..78 */
@@ -949,49 +963,51 @@ function paintLeds() {
         /* THE ROUTING ROW SHOWS WHAT IT DOES. A dark pad sets the split, a
          * white one is the split, and a coloured one is a lane you can
          * flip - so every pad's colour IS its instruction. */
-        /* EVERY PAD IS LIT, and the colour is the side it will give you -
-         * so the row is read rather than worked out. Brightness is the
-         * other fact: dim means the side is set but not in circuit yet,
-         * because the split has not started. The boundary between dim and
-         * bright IS the split point, which needs no colour of its own. */
+        /* Lit from the split point rightward, and nowhere else: the row
+         * IS the split, so its extent is the one fact worth drawing. */
         const live = st.split > 0 && b >= st.split - 1;
         setLED(ROUTE_BASE + b,
-               (live ? LANE_LED : LANE_LED_DIM)[st.lane[b] ? 1 : 0]);
+               !live ? 0 : (st.lane[b] ? PINK_MAX : PINK_DIM));
     }
 }
 
 /* ----------------------------------------------------------------- input */
 
 /*
- * THE ROUTING ROW KEEPS THE SAME RHYTHM AS THE BLOCK ROW.
+ * THE PAD TELLS YOU WHAT IT WILL DO, and there are only three answers.
  *
- * It had three meanings on one tap, decided by where the pad sat relative
- * to the split marker, with Shift as an escape hatch for the one case the
- * rule could not express. Every one of those was defensible on its own and
- * together they were reported from the device as simply too hard to use -
- * which is the right verdict: the pad's meaning changed under your finger
- * as the marker moved, so there was nothing to learn.
+ *   DARK       tap parts the board here; everything from here lights up
+ *   DARK PINK  this block is on the left of the split - tap sends it right
+ *   FULL PINK  it is on the right - tap sends it back
+ *   HOLD       anywhere: rejoin, and the whole row goes dark again
  *
- * It is the row below's rhythm instead, which is already in the hand:
- *
- *   TAP   flip this block's side
- *   HOLD  the board parts HERE (hold the marker again to rejoin)
- *
- * One meaning per gesture, the same two gestures as the pads underneath,
- * and every pad lit with the side it will give you - so the row can be
- * read rather than worked out.
+ * The position-dependent tap is back, and this time it is honest: what the
+ * tap does is decided by what the pad is SHOWING, not by where it sits
+ * relative to a marker you have to find. A dark pad has nothing to flip,
+ * so splitting is the only thing it could mean.
  */
 function routeTap(b) {
+    if (st.split <= 0 || b < st.split - 1) {
+        st.split = b + 1;
+        st.val['split'] = st.split;
+        setp('split', st.split);
+        flash('Split at ' + st.split);
+        return;
+    }
     st.lane[b] = st.lane[b] ? 0 : 1;
     setp('b' + (b + 1) + '_lane', st.lane[b]);
     flash('B' + (b + 1) + ' -> ' + (st.lane[b] ? 'R' : 'L'));
 }
 
+/* Rejoin, from any pad. One gesture that always means the same thing and
+ * always has somewhere to land is worth more here than one that only works
+ * on the pad the split happens to be on. */
 function routeHold(b) {
-    st.split = (st.split === b + 1) ? 0 : b + 1;
-    st.val['split'] = st.split;
-    setp('split', st.split);
-    flash(st.split ? ('Split at ' + st.split) : 'No split');
+    if (st.split <= 0) return;
+    st.split = 0;
+    st.val['split'] = 0;
+    setp('split', 0);
+    flash('No split');
 }
 
 function stomp(b) {
