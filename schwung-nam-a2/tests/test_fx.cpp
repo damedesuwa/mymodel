@@ -278,6 +278,79 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* ---- THE SPLIT ---------------------------------------------------
+     *
+     * Two lanes that never rejoin, so the thing to prove is that they are
+     * genuinely SEPARATE: different pedals on each side must produce
+     * different audio on each side, and a lane that nothing is panned to
+     * must be silent. A split that quietly ran one signal twice would
+     * pass every smoke test and sound almost right.
+     */
+    {
+        for (int b = 1; b <= 8; b++) { char k[16]; snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0"); }
+        api->set_param(in, "b1_type", "3");
+        api->set_param(in, "b1_fx", "19");        /* EQ, flat */
+        api->set_param(in, "b2_type", "3");
+        api->set_param(in, "b2_fx", "12");        /* Boost, on the left  */
+        api->set_param(in, "b3_type", "3");
+        api->set_param(in, "b3_fx", "17");        /* Star Gate, on the right */
+        api->set_param(in, "b3_p1", "1.0");       /* wide open, so it passes */
+        api->set_param(in, "b2_p1", "0.6");
+        api->set_param(in, "split", "2");
+        api->set_param(in, "b2_lane", "0");
+        api->set_param(in, "b3_lane", "1");
+        api->set_param(in, "pan_a", "-1.0");
+        api->set_param(in, "pan_b", "1.0");
+
+        int16_t a[128 * 2];
+        double dl = 0, dr = 0;
+        for (int blk = 0; blk < 300; blk++) {
+            for (int i = 0; i < 128; i++) {
+                double t = (blk * 128.0 + i) / 44100.0;
+                a[i * 2] = a[i * 2 + 1] =
+                    (int16_t)(0.30 * sin(2 * M_PI * 220.0 * t) * 20000);
+            }
+            api->process_block(in, a, 128);
+            if (blk < 50) continue;
+            for (int i = 0; i < 128; i++) {
+                dl += (a[i * 2] / 32768.0) * (a[i * 2] / 32768.0);
+                dr += (a[i * 2 + 1] / 32768.0) * (a[i * 2 + 1] / 32768.0);
+            }
+        }
+        printf("\nsplit: hard-panned lanes  L %.4f  R %.4f  ratio %.2f\n",
+               sqrt(dl / 32000), sqrt(dr / 32000), sqrt(dl / (dr + 1e-12)));
+        if (!(dl > 1e-9 && dr > 1e-9)) {
+            printf("   <-- a lane is silent\n"); fails++;
+        }
+        /* A Boost on one side and a gate on the other cannot come out the
+         * same; if they do, both lanes are carrying one signal. */
+        if (fabs(sqrt(dl / (dr + 1e-12)) - 1.0) < 0.05) {
+            printf("   <-- the two lanes are the same signal\n"); fails++;
+        }
+
+        /* Both hard left: the right channel must be silent. That is the
+         * check that catches a pan that is decorative. */
+        api->set_param(in, "pan_b", "-1.0");
+        double r2 = 0;
+        for (int blk = 0; blk < 200; blk++) {
+            for (int i = 0; i < 128; i++) {
+                double t = (blk * 128.0 + i) / 44100.0;
+                a[i * 2] = a[i * 2 + 1] =
+                    (int16_t)(0.30 * sin(2 * M_PI * 220.0 * t) * 20000);
+            }
+            api->process_block(in, a, 128);
+            if (blk < 50) continue;
+            for (int i = 0; i < 128; i++)
+                r2 += (a[i * 2 + 1] / 32768.0) * (a[i * 2 + 1] / 32768.0);
+        }
+        printf("split: both lanes panned hard left -> right rms %.6f\n",
+               sqrt(r2 / 19200));
+        if (sqrt(r2 / 19200) > 0.002) {
+            printf("   <-- the pan does not reach the output\n"); fails++;
+        }
+        api->set_param(in, "split", "0");
+    }
+
     api->destroy_instance(in);
     printf("\n%s\n", fails ? "FAILED" : "PASS");
     return fails ? 1 : 0;

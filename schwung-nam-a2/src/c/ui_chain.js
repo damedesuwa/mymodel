@@ -27,6 +27,7 @@ const HOLD_MS = 350;
 const CC_KNOB_BASE = 71;        /* knobs 1..8 are CC 71..78 */
 const CC_JOG_TURN = 14;
 const CC_JOG_CLICK = 3;
+const CC_SHIFT = 49;
 
 const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3;
 
@@ -243,6 +244,7 @@ let padDownAt = [];             /* when each pad went down, or 0 */
 let padHandled = [];            /* hold already fired, so the release is not a tap */
 let lastPaint = 0;
 let lastKnob = 0;   /* which cell the row is following */
+let shiftHeld = false;
 
 /*
  * THE ENCODERS ARE NOT DETENTED AND THE SHIM COALESCES, so one CC can carry
@@ -291,6 +293,8 @@ const st = {
     fx: new Array(NUM_BLOCKS).fill(0),
     cpu: 0,
     peak: 0,                    /* out level, %% of full scale - see drawMeter */
+    split: 0,                   /* 0 = off, else the 1-based block it starts at */
+    lane: new Array(NUM_BLOCKS).fill(0),
     blockCpu: new Array(NUM_BLOCKS).fill(0),
     val: {},                    /* "b3_drive" -> number */
     names: { model: [], cab: [], fx: [] },
@@ -365,6 +369,7 @@ function rotateRead() {
         st.type[b] = num(getp('b' + (b + 1) + '_type'), st.type[b]);
         st.on[b] = num(getp('b' + (b + 1) + '_on'), st.on[b] ? 0 : 1) === 0 ? 1 : 0;
         st.fx[b] = num(getp('b' + (b + 1) + '_fx'), st.fx[b]);
+        st.lane[b] = num(getp('b' + (b + 1) + '_lane'), st.lane[b]);
     } else {
         st.blockCpu[b] = num(getp('b' + (b + 1) + '_cpu'), st.blockCpu[b]);
     }
@@ -434,6 +439,13 @@ function openMenu() {
      * no sub-screen - so it is still two gestures away. */
     menuRows.push({ label: 'Input', action: null, edit: 'in_level' });
     menuRows.push({ label: 'Output', action: null, edit: 'out_level' });
+    /* THE SPLIT LIVES HERE because it is a decision about the BOARD, made
+     * once, and every pad and encoder is already spoken for. Its two pans
+     * sit under it, where the thing they belong to is one row up. */
+    menuRows.push({ label: 'Split', action: null, edit: 'split',
+                    kind: 'split' });
+    menuRows.push({ label: 'Pan L', action: null, edit: 'pan_a', kind: 'pan' });
+    menuRows.push({ label: 'Pan R', action: null, edit: 'pan_b', kind: 'pan' });
 
     try { console.log('A2c menu: ' + why + ', ' + menuRows.length + ' rows'); } catch (e) {}
 
@@ -442,6 +454,21 @@ function openMenu() {
     menuTop = 0;
     menuOpen = true;
     lastPaint = 0;      /* repaint NOW, not up to 33 ms from now */
+}
+
+/* Three shapes of value on these rows and none of them is a percentage of
+ * the same thing: a level is 0-100, a pan is a position between two names,
+ * and the split is a block number or the word Off. */
+function menuValueText(row, v) {
+    if (v === undefined || !Number.isFinite(v)) return '-';
+    if (row.kind === 'split')
+        return (v < 1) ? 'Off' : ('at ' + Math.round(v));
+    if (row.kind === 'pan') {
+        const p = Math.round(v * 100);
+        if (p === 0) return 'C';
+        return (p < 0 ? 'L' : 'R') + Math.abs(p);
+    }
+    return Math.round(v * 100) + '%';
 }
 
 function runMenuRow() {
@@ -481,8 +508,7 @@ function drawMenu() {
         if (row.edit) {
             const v = st.val[row.edit];
             ptext(2, y, row.label, ink, 80);
-            pright(126, y, (v === undefined) ? '-'
-                   : (Math.round(v * 100) + '%'), ink, 44);
+            pright(126, y, menuValueText(row, v), ink, 44);
         } else {
             ptext(2, y, row.label, ink, 124);
         }
@@ -672,10 +698,31 @@ function drawBoxes() {
         } else {
             pcenter(x, BOX_W, BOX_Y + 2, blockLabel(b), ink);
             /* A block that is switched off says so; one that is on shows
-             * what it costs. Empty and bypassed have to be tellable apart -
-             * that is most of what the picture is for. */
+             * what it costs, or which SIDE it is on once the board is
+             * split. Empty, bypassed and left-hand have to be tellable
+             * apart - that is most of what the picture is for.
+             *
+             * The side displaces the cost rather than sharing the row:
+             * "L12" clips to "L1" in fifteen pixels, and a number that
+             * might be cut in half is worse than no number. The total is
+             * in the header and the per-block figure is on the grid. */
+            const inSplit = st.split > 0 && b >= st.split - 1;
             pcenter(x, BOX_W, BOX_Y + 10,
-                    st.on[b] ? String(Math.round(st.blockCpu[b])) : 'B', ink);
+                    !st.on[b] ? 'B'
+                    : inSplit ? (st.lane[b] ? 'R' : 'L')
+                    : String(Math.round(st.blockCpu[b])), ink);
+        }
+
+        /* THE SPLIT IS DRAWN WHERE MOVE DRAWS IT: a rail above the row for
+         * the left lane, below it for the right, and a vertical drop at
+         * the block where the two part company. Two rows of pixels that
+         * were empty, and it turns "L" and "R" from labels you read into a
+         * shape you see. */
+        if (st.split > 0 && b >= st.split - 1) {
+            const railY = st.lane[b] ? BOX_Y + BOX_H : BOX_Y - 2;
+            fill_rect(x, railY, BOX_W + BOX_GAP, 1, 1);
+            if (b === st.split - 1)
+                fill_rect(x, BOX_Y - 2, 1, BOX_H + 3, 1);
         }
 
         /* Selection is a bar UNDER the box, not a border around it: a border
@@ -851,6 +898,21 @@ function paintLeds() {
 
 /* ----------------------------------------------------------------- input */
 
+/* SHIFT + PAD MOVES A BLOCK ACROSS, and it costs no encoder.
+ *
+ * The lane is a rare, deliberate edit on a block you are already pointing
+ * at with your foot - the same gesture as a stomp with a modifier, which
+ * is how every other surface on this device spells "the other meaning of
+ * this button". The alternative was a ninth knob on an instrument with
+ * eight. */
+function flipLane(b) {
+    if (st.split <= 0 || b < st.split - 1) return false;
+    st.lane[b] = st.lane[b] ? 0 : 1;
+    setp('b' + (b + 1) + '_lane', st.lane[b]);
+    lastPaint = 0;
+    return true;
+}
+
 function stomp(b) {
     const nowOn = st.on[b];
     st.on[b] = nowOn ? 0 : 1;
@@ -989,10 +1051,13 @@ globalThis.chain_ui = {
             st.fx[b] = num(getp('b' + (b + 1) + '_fx'), 0);
         }
         st.cpu = num(getp('cpu'), 0);
-        for (const key of ['in_level', 'out_level']) {
+        for (const key of ['in_level', 'out_level', 'split', 'pan_a', 'pan_b']) {
             const v = getp(key);
             if (v !== null && v !== '') st.val[key] = Number(v);
         }
+        st.split = num(getp('split'), 0);
+        for (let b = 0; b < NUM_BLOCKS; b++)
+            st.lane[b] = num(getp('b' + (b + 1) + '_lane'), b & 1);
         readSelected();
     },
 
@@ -1043,6 +1108,8 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
         const status = data[0] & 0xf0;
         const d1 = data[1], d2 = data[2];
 
+        if (status === 0xb0 && d1 === CC_SHIFT) { shiftHeld = d2 > 0; return; }
+
         /* Jog: click opens the menu, turn scrolls it. The jog is free here -
          * the host's own COMPONENT_EDIT jog handler never runs, because MIDI
          * is routed to a loaded module UI before it (shadow_ui.js:27167). */
@@ -1080,11 +1147,31 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
                 const dd = decodeDelta(d2);
                 if (row && row.edit && dd) {
                     let v = st.val[row.edit];
-                    v = (v === undefined ? 0.5 : v) + dd * FLOAT_STEP;
-                    if (v < 0) v = 0;
-                    if (v > 1) v = 1;
-                    st.val[row.edit] = v;
-                    setp(row.edit, v.toFixed(4));
+                    if (row.kind === 'split') {
+                        /* A block number, so it steps - and it steps at
+                         * the same three detents everything discrete on
+                         * this screen costs. */
+                        const step = knobSteps(d1 - CC_KNOB_BASE, dd);
+                        if (!step) return;
+                        v = Math.round(v === undefined ? 0 : v) + step;
+                        if (v < 0) v = 0;
+                        if (v > NUM_BLOCKS) v = NUM_BLOCKS;
+                        st.val[row.edit] = v;
+                        st.split = v;
+                        setp(row.edit, v);
+                    } else if (row.kind === 'pan') {
+                        v = (v === undefined ? 0 : v) + dd * FLOAT_STEP * 2;
+                        if (v < -1) v = -1;
+                        if (v > 1) v = 1;
+                        st.val[row.edit] = v;
+                        setp(row.edit, v.toFixed(4));
+                    } else {
+                        v = (v === undefined ? 0.5 : v) + dd * FLOAT_STEP;
+                        if (v < 0) v = 0;
+                        if (v > 1) v = 1;
+                        st.val[row.edit] = v;
+                        setp(row.edit, v.toFixed(4));
+                    }
                     lastPaint = 0;
                 }
             }
@@ -1103,7 +1190,13 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
             padDownAt[b] = Date.now();
             padHandled[b] = false;
         } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
-            if (padDownAt[b] && !padHandled[b]) stomp(b);
+            /* Shift is read at the RELEASE, where the decision is made.
+             * Reading it at the press and remembering would mean a shift
+             * let go mid-tap still counted - and Shift is usually let go
+             * before the thing it modifies. */
+            if (padDownAt[b] && !padHandled[b]) {
+                if (!(shiftHeld && flipLane(b))) stomp(b);
+            }
             padDownAt[b] = 0;
             padHandled[b] = false;
         }

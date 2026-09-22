@@ -26,6 +26,22 @@
       ]
     },
     {
+      "title": "Splitting the board",
+      "lines": [
+        "Menu > Split: pick the block the",
+        "two lanes start at.",
+        "SHIFT + a pad past that point",
+        "moves the block L <-> R.",
+        "Menu > Pan L / Pan R place them.",
+        "The lanes never rejoin - that is",
+        "why each block keeps its own",
+        "delay and filter memory.",
+        "One amp + two cabs costs about",
+        "110us more. Two amps at Full do",
+        "NOT fit; Full + Slim does."
+      ]
+    },
+    {
       "title": "Reading the panel",
       "lines": [
         "Top right: CPU. Beside it, the",

@@ -23,6 +23,7 @@ catch (e) {
 
 const params = {
     sel_block: '0', cpu: '41', build: 'test',
+    split: '0', pan_a: '-1.0', pan_b: '1.0',
     model_list: JSON.stringify(['OCD', 'Recto']),
     cab_list: JSON.stringify(['TF MESA']),
     /* THE PEDAL TABLE COMES FROM THE PLUGIN, not from a copy written out
@@ -49,6 +50,7 @@ for (let b = 1; b <= 8; b++) {
 
 const writes = [];
 const drawn = [];
+const drawnAt = [];     /* the same text, with where it landed */
 const rects = [];
 const leds = {};
 const buttonLeds = {};
@@ -60,7 +62,7 @@ const host = {
     host_module_set_param: (k, v) => { params[k] = String(v); writes.push([k, String(v)]); },
     host_pad_block: (v) => { padBlock = v; },
     clear_screen: () => drawn.push('<clear>'),
-    print: (x, y, t) => drawn.push(String(t)),
+    print: (x, y, t) => { drawn.push(String(t)); drawnAt.push([x, y, String(t)]); },
     draw_rect: (x, y, w, h, c) => rects.push(['draw', x, y, w, h, c]),
     fill_rect: (x, y, w, h, c) => rects.push(['fill', x, y, w, h, c]),
     text_width: (t) => String(t).length * 5,
@@ -356,14 +358,7 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
      * encoder because it is the one you ride; In is set once against the
      * guitar and wants to be somewhere it cannot be nudged mid-take. */
     ui.onMidiMessageInternal([0xb0, 3, 127]);        /* jog click: open */
-    /* Counted from the BOTTOM - Close is last, then Output, then Input -
-     * because how many rows the HOST offers above them varies by host and
-     * this test also runs against three that offer none. */
-    for (let i = 0; i < 40; i++) ui.onMidiMessageInternal([0xb0, 14, 1]);
-    ui.onMidiMessageInternal([0xb0, 14, 127]);
-    ui.onMidiMessageInternal([0xb0, 14, 127]);
-    drawn.length = 0; ui.tick();
-    ok(drawn.some(t => String(t) === 'Input'), 'menu: the cursor is on Input');
+    ok(menuGoTo(ui, 'Input', repaint), 'menu: the cursor reaches Input');
     writes.length = 0;
     ui.onMidiMessageInternal([0xb0, K1, 1]);
     ok(writes.some(([k]) => k === 'in_level'), 'menu: a knob sets Input in place');
@@ -371,7 +366,124 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ui.onMidiMessageInternal([0xb0, K1, 1]);
     ok(!writes.some(([k]) => k.indexOf('b4_') === 0),
        'menu: and it does not reach the block behind it');
+
+    /* ================================================================ *
+     * THE SPLIT                                                        *
+     * ================================================================ */
+
+    /* Off by default, and Shift+pad does nothing but stomp while it is -
+     * a modifier that silently does nothing is better than one that
+     * silently does something to a board with no lanes in it. */
+    ok(menuGoTo(ui, 'Split', repaint), 'split: it is a row on the menu');
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'Off'), 'split: and it starts Off');
+
+    ui.onMidiMessageInternal([0xb0, 3, 127]);        /* close, or the pads
+                                                       are the menu's */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, 49, 127]);       /* shift down */
+    ui.onMidiMessageInternal([0x90, 71, 127]);
+    ui.onMidiMessageInternal([0x80, 71, 0]);
+    ok(writes.some(([k]) => k === 'b4_on'), 'split: off, Shift+pad still stomps');
+    ok(!writes.some(([k]) => k === 'b4_lane'), 'split: and moves no lane');
+    ui.onMidiMessageInternal([0xb0, 49, 0]);         /* shift up */
+
+    /* Turn it on. menuGoTo only SCROLLS - it cannot know whether the menu
+     * is up, so the open is the caller's. */
+    ui.onMidiMessageInternal([0xb0, 3, 127]);        /* open */
+    ok(menuGoTo(ui, 'Split', repaint), 'split: back on the Split row');
+    writes.length = 0;
+    for (let i = 0; i < 9; i++) ui.onMidiMessageInternal([0xb0, K1, 1]);
+    ok(writes.some(([k, v]) => k === 'split' && v === '3'),
+       'split: three detents a step, so nine puts it at block 3');
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'at 3'), 'split: the row says where it is');
+    ui.onMidiMessageInternal([0xb0, 3, 127]);        /* close the menu */
+
+    /* Now Shift+pad moves a block across, and only past the split. */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, 49, 127]);
+    ui.onMidiMessageInternal([0x90, 68, 127]);       /* pad 1 - before it */
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    ok(writes.some(([k]) => k === 'b1_on'), 'split: a block before it still stomps');
+    ok(!writes.some(([k]) => k === 'b1_lane'), 'split: it has no side to be on');
+
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 71, 127]);       /* pad 4 - past it */
+    ui.onMidiMessageInternal([0x80, 71, 0]);
+    ok(writes.some(([k]) => k === 'b4_lane'), 'split: a block past it moves side');
+    ok(!writes.some(([k]) => k === 'b4_on'),
+       'split: and does NOT also stomp, or one gesture would do two things');
+    ui.onMidiMessageInternal([0xb0, 49, 0]);
+
+    /* THE PICTURE. A rail above the row for the left lane, below for the
+     * right, and a drop at the block where they part company - which is
+     * where Move draws it too. */
+    for (let b = 1; b <= 8; b++) params[`b${b}_type`] = '3';
+    params['b3_lane'] = '0'; params['b4_lane'] = '1';
+    ui.init();
+    rects.length = 0; drawnAt.length = 0; repaint();
+    const BOXY = 12, BOXH = 18;
+    ok(rects.some(r => r[0] === 'fill' && r[2] === BOXY - 2 && r[4] === 1 && r[1] === 2 * 16),
+       'split: the left lane gets a rail above its boxes');
+    ok(rects.some(r => r[0] === 'fill' && r[2] === BOXY + BOXH && r[4] === 1 && r[1] === 3 * 16),
+       'split: the right lane gets one below');
+    ok(rects.some(r => r[0] === 'fill' && r[1] === 2 * 16 && r[2] === BOXY - 2 &&
+                       r[3] === 1 && r[4] === BOXH + 3),
+       'split: and they part company with a vertical drop');
+    ok(drawnAt.some(d => d[2] === 'L') && drawnAt.some(d => d[2] === 'R'),
+       'split: each box says which side it is on');
+    /* A block before the split is not on a side, so it keeps its cost. */
+    /* Width matters in this one: the header's own rule is a 128 px fill
+     * on exactly this row, so a test that only checked x and y would
+     * report the rule as a rail and pass for block 1 forever. */
+    ok(!rects.some(r => r[0] === 'fill' && r[2] === BOXY - 2 && r[4] === 1 &&
+                        r[1] === 0 && r[3] === 16),
+       'split: nothing before it wears a rail');
+
+    /* PAN, in its own units - a position between two names, not a
+     * percentage of something. */
+    ui.onMidiMessageInternal([0xb0, 3, 127]);        /* open */
+    ok(menuGoTo(ui, 'Pan L', repaint), 'split: Pan L is a row');
+    writes.length = 0;
+    for (let i = 0; i < 5; i++) ui.onMidiMessageInternal([0xb0, K1, 1]);
+    ok(writes.some(([k, v]) => k === 'pan_a' && Number(v) > -1 && Number(v) <= 1),
+       'pan: the knob moves it off hard left');
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => /^(L|R)\d+$|^C$/.test(d[2])),
+       'pan: and it reads as a position, not a percentage');
+    ui.onMidiMessageInternal([0xb0, 3, 127]);
     ui.onMidiMessageInternal([0xb0, 3, 127]);        /* close */
+}
+
+/* WHICH ROW THE CURSOR IS ON, asked of the picture.
+ *
+ * The tests used to count detents from the bottom of the menu, which was
+ * fine until the menu grew three rows and every one of those counts was
+ * silently off by three. The menu draws a full-width highlight behind the
+ * cursor; whatever text shares that row's y IS the row. Counting is
+ * replaced by looking.
+ */
+function cursorRow(ui, repaint) {
+    drawnAt.length = 0; rects.length = 0;
+    repaint();
+    const hl = rects.find(r => r[0] === 'fill' && r[1] === 0 && r[3] === 128 && r[4] === 10);
+    if (!hl) return null;
+    const y = hl[2] + 1;
+    const t = drawnAt.find(d => d[1] === y);
+    return t ? t[2] : null;
+}
+
+/* Scroll to a named row. Walks DOWN from the top, which terminates: the
+ * cursor clamps at the last row, so a label that is not there fails by
+ * running out of steps rather than by looping. */
+function menuGoTo(ui, label, repaint) {
+    for (let i = 0; i < 40; i++) ui.onMidiMessageInternal([0xb0, 14, 127]);
+    for (let i = 0; i < 40; i++) {
+        if (cursorRow(ui, repaint) === label) return true;
+        ui.onMidiMessageInternal([0xb0, 14, 1]);
+    }
+    return false;
 }
 
 /* The category palette, read out of the source rather than restated here -
@@ -398,8 +510,10 @@ for (const [what, impl] of [
     const ran = [];
     h2.shadow_component_run_action = (a) => { ran.push(a); return true; };
     h2.host_swap_module = () => { ran.push('__swap'); };
-    const seen = [];
-    h2.print = (x, y, t) => seen.push(String(t));
+    const seen = [], seenAt = [], seenRects = [];
+    h2.print = (x, y, t) => { seen.push(String(t)); seenAt.push([x, y, String(t)]); };
+    h2.fill_rect = (x, y, w, h) => seenRects.push([x, y, w, h]);
+    h2.draw_rect = () => {};
     h2.clear_screen = () => {};
     const n2 = Object.keys(h2);
     /* buttonLeds has to be here too: the stub closes over it, so leaving
@@ -423,12 +537,23 @@ for (const [what, impl] of [
     }
     ok(found, `host gives ${what} -> Swap / Remove is reachable`);
 
-    /* Land ON it: run to the end (the cursor clamps at Close, the last
-     * row) and come back THREE - Close, Output, Input, then Swap.
-     * Scrolling only until the row is DRAWN leaves the cursor wherever
-     * the fold put it. */
-    for (let i = 0; i < 20; i++) ui2.onMidiMessageInternal([0xb0, 14, 1]);
-    for (let i = 0; i < 3; i++) ui2.onMidiMessageInternal([0xb0, 14, 127]);
+    /* Land ON it by NAME. Counting detents from either end of the menu
+     * was right until the menu grew three rows, and then every count was
+     * silently off by three - a test that passes for the wrong reason
+     * right up until it fails for one. */
+    for (let i = 0; i < 30; i++) ui2.onMidiMessageInternal([0xb0, 14, 127]);
+    let landed = false;
+    for (let i = 0; i < 30 && !landed; i++) {
+        seenRects.length = 0; seenAt.length = 0;
+        ui2.tick();
+        const hl = seenRects.find(r => r[0] === 0 && r[2] === 128 && r[3] === 10);
+        if (hl) {
+            const row = seenAt.find(d => d[1] === hl[1] + 1);
+            if (row && row[2] === 'Swap / Remove...') { landed = true; break; }
+        }
+        ui2.onMidiMessageInternal([0xb0, 14, 1]);
+    }
+    ok(landed, `host gives ${what} -> the cursor lands on Swap / Remove`);
     ui2.onMidiMessageInternal([0xb0, 3, 127]);
     ok(ran.includes('__swap'), `host gives ${what} -> Swap / Remove opens the picker`);
 }

@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "meter"
+#define NAM_A2C_BUILD_ID "split"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
@@ -155,6 +155,28 @@ typedef struct {
 
     /* Scratch. Allocated once in create_instance - never per block. */
     float mono[FRAMES_PER_BLOCK];
+    /*
+     * TWO LANES, AND THE SPLIT NEVER REJOINS.
+     *
+     * Before `split_at` there is one signal in `mono`. At it, mono is
+     * copied into both lanes and every block from there on belongs to one
+     * of them. They meet again only at the output, where the pans put
+     * them where they go.
+     *
+     * NOT REJOINING IS THE DESIGN, not a shortcut. A block that processed
+     * both lanes would have to do it with ONE set of state - one delay
+     * line, one filter memory, one envelope - so lane A's tail would come
+     * out of lane B, and the bug would be subtle enough to read as a bad
+     * sounding preset rather than as a wiring fault. Giving every block
+     * two instances is 3.9 MB and doubles every cost. Both reference
+     * pictures - Move's own split, TONE3000's two cabs - end in two
+     * outputs, so the rule costs nothing anyone wanted.
+     */
+    float laneA[FRAMES_PER_BLOCK];
+    float laneB[FRAMES_PER_BLOCK];
+    int   split_at;                 /* 0 = off, else the 1-based block */
+    int   lane[NUM_BLOCKS];         /* 0 = A/left, 1 = B/right */
+    float pan_a, pan_b;             /* -1 .. +1 */
     float scratch[FRAMES_PER_BLOCK];
 
     req_ring_t   reqs;
@@ -302,10 +324,17 @@ static void *diag_thread(void *arg) {
         nanosleep(&ts, NULL);
         if (s->diag_stop) break;
 
-        char chain[160]; int w = 0;
+        /* THE ROUTING IS IN THE LINE, because a split board whose log
+         * looks exactly like a series one is a board nobody can diagnose
+         * from a paste. `/` is where the lanes part; L and R say which
+         * side each block after it is on. */
+        char chain[220]; int w = 0;
         for (int i = 0; i < NUM_BLOCKS; i++) {
-            w += snprintf(chain + w, sizeof(chain) - w, "%s%s%.0f",
+            const int split = (s->split_at > 0 && i >= s->split_at - 1);
+            w += snprintf(chain + w, sizeof(chain) - w, "%s%s%s%s%.0f",
                           i ? " " : "",
+                          (s->split_at > 0 && i == s->split_at - 1) ? "/" : "",
+                          split ? (s->lane[i] ? "R" : "L") : "",
                           s->type[i] == BLK_OFF ? "-" :
                           (s->on[i] ? block_type_name(s->type[i]) : "("),
                           s->type[i] == BLK_OFF ? 0.0 : s->us_peak[i]);
@@ -460,6 +489,13 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     s->in_gain = knob_to_gain(s->in_level);
     s->out_gain = knob_to_gain(s->out_level);
     s->sel_block = 0;
+    s->split_at = 0;
+    /* ALTERNATING, so switching the split on is immediately a working
+     * split rather than a silent right channel. The commonest shape by a
+     * long way is amp, split, two cabs. */
+    for (int i = 0; i < NUM_BLOCKS; i++) s->lane[i] = i & 1;
+    s->pan_a = -1.0f;
+    s->pan_b = 1.0f;
 
     report_install(s);
     scan_lists(s);
@@ -543,7 +579,20 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
      * callback at all leaves this 0 and fx_time_ms falls back itself. */
     const float bpm = (g_host && g_host->get_bpm) ? g_host->get_bpm() : 0.0f;
 
+    /* A SPLIT PAST THE LAST BLOCK IS NO SPLIT. Clamped here rather than
+     * at the setter so a board saved with eight blocks and a split at 8
+     * cannot leave a lane that nothing ever writes. */
+    const int split_at = (s->split_at > 0 && s->split_at <= NUM_BLOCKS) ? s->split_at : 0;
+    int split = 0;
+
     for (int b = 0; b < NUM_BLOCKS; b++) {
+        if (split_at && b == split_at - 1) {
+            memcpy(s->laneA, s->mono, sizeof(float) * (size_t)n);
+            memcpy(s->laneB, s->mono, sizeof(float) * (size_t)n);
+            split = 1;
+        }
+        float *buf = split ? (s->lane[b] ? s->laneB : s->laneA) : s->mono;
+
         int t = s->type[b];
         if (t == BLK_OFF) { s->us_peak[b] = 0.0; continue; }
 
@@ -560,19 +609,19 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
             case BLK_NAM:
                 if (s->amp[b].model) {
                     const float mg = s->amp[b].in_gain;
-                    for (int i = 0; i < n; i++) s->mono[i] *= mg;
-                    nam_block_process(&s->amp[b], s->mono, s->scratch, n);
+                    for (int i = 0; i < n; i++) buf[i] *= mg;
+                    nam_block_process(&s->amp[b], buf, s->scratch, n);
                     const float mo = s->amp[b].out_gain;
-                    for (int i = 0; i < n; i++) s->mono[i] *= mo;
+                    for (int i = 0; i < n; i++) buf[i] *= mo;
                 }
                 break;
             case BLK_CAB:
-                ir_block_process(&s->cab[b], s->mono, n);
+                ir_block_process(&s->cab[b], buf, n);
                 break;
             case BLK_FX:
                 if (s->fx[b].line && s->fx[b].rv) {
                     s->fx[b].bpm = bpm;
-                    fx_block_process(&s->fx[b], s->mono, s->side, n);
+                    fx_block_process(&s->fx[b], buf, s->side, n);
                 }
                 break;
             default: break;
@@ -584,10 +633,28 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     }
 
     const float og = s->out_gain;
+    /* EQUAL POWER, so sweeping a lane across the field does not make it
+     * louder in the middle. Computed once per block; the pans are knobs,
+     * not audio. */
+    const float aa = (s->pan_a * 0.5f + 0.5f) * 1.5707963f;
+    const float bb = (s->pan_b * 0.5f + 0.5f) * 1.5707963f;
+    const float a_l = cosf(aa), a_r = sinf(aa);
+    const float b_l = cosf(bb), b_r = sinf(bb);
+
     for (int i = 0; i < n; i++) {
-        float m = sanitize_sample(s->mono[i] * og);
-        if (m != s->mono[i] * og) s->nan_samples++;
-        float sd = sanitize_sample(s->side[i] * og);
+        float la, ra;
+        if (split) {
+            /* Two independent signals, each placed by its own pan. */
+            float A = s->laneA[i] * og, B = s->laneB[i] * og;
+            la = A * a_l + B * b_l;
+            ra = A * a_r + B * b_r;
+        } else {
+            float m0 = s->mono[i] * og;
+            la = ra = m0;
+        }
+        float m = sanitize_sample((la + ra) * 0.5f);
+        if (m != m) s->nan_samples++;
+        float sd = sanitize_sample(s->side[i] * og + (la - ra) * 0.5f);
         float lv = m + sd, rv = m - sd;
         /* MEASURED ON THE WIDER CHANNEL, AND BEFORE THE QUANTISER CLAMPS
          * IT. Taking it afterwards would report 0.999 for a signal that
@@ -680,6 +747,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                  * one's filters. */
                 fx_block_reset(&s->fx[b]);
             }
+        } else if (strcmp(sub, "lane") == 0) {
+            s->lane[b] = (atoi(val) != 0) ? 1 : 0;
         } else if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0) {
             s->fx[b].p[sub[1] - '1'] = clampf(atof(val), 0.0f, 1.0f);
         }
@@ -692,6 +761,13 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     } else if (strcmp(key, "out_level") == 0) {
         s->out_level = clampf(atof(val), 0.0f, 1.0f);
         s->out_gain = knob_to_gain(s->out_level);
+    } else if (strcmp(key, "split") == 0) {
+        int v = atoi(val);
+        s->split_at = (v < 0) ? 0 : (v > NUM_BLOCKS) ? NUM_BLOCKS : v;
+    } else if (strcmp(key, "pan_a") == 0) {
+        s->pan_a = clampf(atof(val), -1.0f, 1.0f);
+    } else if (strcmp(key, "pan_b") == 0) {
+        s->pan_b = clampf(atof(val), -1.0f, 1.0f);
     } else if (strcmp(key, "sel_block") == 0) {
         int i = atoi(val);
         s->sel_block = (i < 0) ? 0 : (i >= NUM_BLOCKS) ? NUM_BLOCKS - 1 : i;
@@ -742,6 +818,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         if (strcmp(sub, "fx") == 0)      return snprintf(buf, buf_len, "%d", s->fx[b].id);
         if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0)
             return snprintf(buf, buf_len, "%.4f", s->fx[b].p[sub[1] - '1']);
+        if (strcmp(sub, "lane") == 0)    return snprintf(buf, buf_len, "%d", s->lane[b]);
         if (strcmp(sub, "cpu") == 0) {
             double pct = 100.0 * s->us_peak[b] / FRAME_BUDGET_US;
             return snprintf(buf, buf_len, "%d", (int)(clampf(pct, 0.0f, 100.0f) + 0.5f));
@@ -751,6 +828,9 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
 
     if (strcmp(key, "in_level") == 0)  return snprintf(buf, buf_len, "%.4f", s->in_level);
     if (strcmp(key, "out_level") == 0) return snprintf(buf, buf_len, "%.4f", s->out_level);
+    if (strcmp(key, "split") == 0)  return snprintf(buf, buf_len, "%d", s->split_at);
+    if (strcmp(key, "pan_a") == 0)  return snprintf(buf, buf_len, "%.4f", s->pan_a);
+    if (strcmp(key, "pan_b") == 0)  return snprintf(buf, buf_len, "%.4f", s->pan_b);
     if (strcmp(key, "sel_block") == 0) return snprintf(buf, buf_len, "%d", s->sel_block);
     /* OUTPUT LEVEL, AS A PERCENTAGE OF FULL SCALE, PEAK-HELD.
      *
@@ -808,13 +888,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "state") == 0) {
         int w = 0;
         w += snprintf(buf + w, buf_len - w,
-                      "{\"in_level\":%.4f,\"out_level\":%.4f,\"blocks\":[",
-                      s->in_level, s->out_level);
+                      "{\"in_level\":%.4f,\"out_level\":%.4f,\"split\":%d,"
+                      "\"pan_a\":%.4f,\"pan_b\":%.4f,\"blocks\":[",
+                      s->in_level, s->out_level, s->split_at, s->pan_a, s->pan_b);
         for (int i = 0; i < NUM_BLOCKS && w < buf_len - 256; i++) {
             w += snprintf(buf + w, buf_len - w,
-                "%s{\"type\":%d,\"on\":%d,\"model\":%d,\"quality\":%d,\"cab\":%d,"
+                "%s{\"type\":%d,\"on\":%d,\"lane\":%d,\"model\":%d,\"quality\":%d,\"cab\":%d,"
                 "\"fx\":%d,\"p\":[%.4f,%.4f,%.4f,%.4f,%.4f]}",
-                i ? "," : "", s->type[i], s->on[i],
+                i ? "," : "", s->type[i], s->on[i], s->lane[i],
                 s->amp[i].index, s->amp[i].quality, s->cab[i].index,
                 s->fx[i].id,
                 s->fx[i].p[0], s->fx[i].p[1], s->fx[i].p[2],
@@ -910,7 +991,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
               "\"max\":100,\"default\":0,\"step\":1,\"unit\":\"%%\","
               "\"access\":\"read\",\"live\":true},"
              "{\"key\":\"sel_block\",\"name\":\"Block\",\"type\":\"int\","
-              "\"min\":0,\"max\":%d,\"default\":0,\"step\":1}", NUM_BLOCKS - 1);
+              "\"min\":0,\"max\":%d,\"default\":0,\"step\":1},"
+             "{\"key\":\"split\",\"name\":\"Split\",\"type\":\"int\","
+              "\"min\":0,\"max\":%d,\"default\":0,\"step\":1},"
+             "{\"key\":\"pan_a\",\"name\":\"Pan L\",\"type\":\"float\","
+              "\"min\":-1.0,\"max\":1.0,\"default\":-1.0,\"step\":0.02},"
+             "{\"key\":\"pan_b\",\"name\":\"Pan R\",\"type\":\"float\","
+              "\"min\":-1.0,\"max\":1.0,\"default\":1.0,\"step\":0.02}",
+             NUM_BLOCKS - 1, NUM_BLOCKS);
 
         char fxopts[1024]; int fw = 0;
         fw += snprintf(fxopts + fw, sizeof(fxopts) - fw, "[");
@@ -934,6 +1022,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                   "\"options\":[\"Off\",\"NAM\",\"Cab\",\"FX\"],\"default\":0}"
                 ",{\"key\":\"b%d_on\",\"name\":\"On\",\"type\":\"enum\","
                   "\"options\":[\"On\",\"Bypass\"],\"default\":0}"
+                ",{\"key\":\"b%d_lane\",\"name\":\"Lane\",\"type\":\"enum\","
+                  "\"options\":[\"L\",\"R\"],\"default\":0}"
                 ",{\"key\":\"b%d_model\",\"name\":\"Model\",\"type\":\"enum\","
                   "\"options\":%s,\"default\":0}"
                 ",{\"key\":\"b%d_quality\",\"name\":\"Qual\",\"type\":\"enum\","
@@ -942,7 +1032,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                   "\"options\":%s,\"default\":0}"
                 ",{\"key\":\"b%d_fx\",\"name\":\"Pedal\",\"type\":\"enum\","
                   "\"options\":%s,\"default\":0}",
-                i, i, i, models, i, i, cabs, i, fxopts);
+                i, i, i, i, models, i, i, cabs, i, fxopts);
             for (int k = 1; k <= FX_PARAMS; k++)
                 w += snprintf(buf + w, buf_len - w,
                     ",{\"key\":\"b%d_p%d\",\"name\":\"P%d\",\"type\":\"float\","
