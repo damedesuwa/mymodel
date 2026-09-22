@@ -36,25 +36,27 @@ const params = { sel_block: '2', cpu: '41', build: 'r', peak: '55',
     model_list: JSON.stringify(['OCD', 'Recto']),
     cab_list: JSON.stringify(['TF MESA']),
     fx_list: JSON.stringify(FX), fx_specs: specsRaw,
-    in_level: '0.5', out_level: '0.85', split: '0', pan_a: '-1.0', pan_b: '1.0' };
-for (let b = 1; b <= 8; b++) {
-    params[`b${b}_type`] = '0'; params[`b${b}_on`] = '0'; params[`b${b}_fx`] = '0';
-    params[`b${b}_cpu`] = '0'; params[`b${b}_model`] = '0'; params[`b${b}_cab`] = '0';
-    params[`b${b}_quality`] = '0'; params[`b${b}_lane`] = String(b & 1);
-    for (let k = 1; k <= 5; k++) params[`b${b}_p${k}`] = '0.5';
+    in_level: '0.5', out_level: '0.85', pan_a: '-1.0', pan_b: '1.0' };
+for (const r of ['b', 't']) for (let b = 1; b <= 8; b++) {
+    params[`${r}${b}_type`] = '0'; params[`${r}${b}_on`] = '0';
+    params[`${r}${b}_fx`] = '0'; params[`${r}${b}_cpu`] = '0';
+    params[`${r}${b}_model`] = '0'; params[`${r}${b}_cab`] = '0';
+    params[`${r}${b}_quality`] = '0';
+    for (let k = 1; k <= 5; k++) params[`${r}${b}_p${k}`] = '0.5';
 }
-const set = (b, type, fx, on) => {
-    params[`b${b}_type`] = String(type);
-    if (fx !== undefined) params[`b${b}_fx`] = String(fx);
-    params[`b${b}_on`] = on === false ? '1' : '0';
+/* `b<n>` is the bottom (main) row, `t<n>` the top (parallel) one. */
+const set = (key, type, fx, on) => {
+    params[`${key}_type`] = String(type);
+    if (fx !== undefined) params[`${key}_fx`] = String(fx);
+    params[`${key}_on`] = on === false ? '1' : '0';
 };
 if (scen === 'empty') { /* nothing loaded */ }
-if (scen === 'series') { set(1, 3, 0); set(2, 1); set(3, 2); set(4, 3, 30); }
-if (scen === 'bypass') { set(1, 3, 0); set(2, 1); set(3, 2); set(4, 3, 30, false); set(5, 1, undefined, false); }
+if (scen === 'series') { set('b1', 3, 0); set('b2', 1); set('b3', 2); set('b4', 3, 30); }
+if (scen === 'bypass') { set('b1', 3, 0); set('b2', 1); set('b3', 2); set('b4', 3, 30, false); set('b5', 1, undefined, false); }
 if (scen === 'split') {
-    set(1, 3, 0); set(2, 1); set(3, 2); set(4, 2); set(5, 3, 34);
-    params.split = '3';
-    params.b3_lane = '0'; params.b4_lane = '1'; params.b5_lane = '1';
+    /* amp in the head, then two cabs and a delay on the branch */
+    set('b1', 3, 0); set('b2', 1); set('b3', 2); set('b4', 3, 34);
+    set('t3', 2); set('t4', 3, 30);
 }
 
 const host = {

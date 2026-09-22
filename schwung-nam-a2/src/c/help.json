@@ -2,12 +2,15 @@
   "title": "Nam A2",
   "sections": [
     {
-      "title": "Eight blocks",
+      "title": "Two rows of eight",
       "lines": [
-        "In -> 1 -> 2 -> ... -> 8 -> Out.",
-        "Bottom pad row = the eight blocks.",
+        "BOTH pad rows are blocks.",
+        "  BOTTOM row = the main chain",
+        "  TOP row    = a parallel row",
+        "16 slots, not 8.",
         "TAP a pad to stomp it.",
         "HOLD a pad to edit it.",
+        "Same two gestures on both.",
         "JOG CLICK opens the menu."
       ]
     },
@@ -41,18 +44,19 @@
       ]
     },
     {
-      "title": "Splitting the board",
+      "title": "Splitting",
       "lines": [
-        "The row ABOVE the blocks. Dark",
-        "means no split.",
-        "  TAP a DARK pad   part here",
-        "  TAP a LIT pad    other side",
-        "  HOLD anywhere    rejoin",
-        "Once split the board becomes",
-        "TWO WIRES: the LEFT lane runs",
-        "along the top, the RIGHT along",
-        "the bottom. A block before the",
-        "fork is tall - it feeds both."
+        "Put a block in the TOP row and",
+        "the signal SPLITS at that",
+        "column. Nothing else to set.",
+        "  before it  one signal, and a",
+        "             block there is",
+        "             drawn TALL - it",
+        "             feeds both",
+        "  after it   top row = LEFT",
+        "             bottom row = RIGHT",
+        "Empty the top row to rejoin.",
+        "Menu: Pan Top / Pan Btm."
       ]
     },
     {

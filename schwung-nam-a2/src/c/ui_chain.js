@@ -20,37 +20,68 @@
 
 import { setLED, setButtonLED, decodeDelta, invalidateLedCache } from '/data/UserData/schwung/shared/input_filter.mjs';
 
-const NUM_BLOCKS = 8;
+/*
+ * TWO ROWS OF EIGHT, AND BOTH ARE LIVE.
+ *
+ * The parallel lane used to be carved out of the one row of eight: split
+ * at column three and the six blocks after it were SHARED between the two
+ * sides. Taking a board stereo therefore shortened both halves of it, and
+ * the report was exactly that - "블럭 갯수가 줄잖아". It is a fair
+ * complaint about a feature that is supposed to add something.
+ *
+ * Move has two pad rows and the reference picture (Quad Cortex's grid) is
+ * two rows of eight, so that is what this is:
+ *
+ *   BOTTOM pads 68..75   the MAIN chain   - drawn on the lower rail
+ *   TOP    pads 76..83   the PARALLEL row - drawn on the upper rail
+ *
+ * Both rows take TAP to stomp and HOLD to edit, identically. There is no
+ * routing row and no routing gesture left to learn.
+ *
+ * WHERE THEY PART IS NOT A SETTING. The fork is the first column that
+ * carries a TOP-row block, so putting a pedal up there IS the split and
+ * taking the last one off rejoins the board. Two things that used to have
+ * to agree - a stored split and the blocks either side of it - are now
+ * one thing, and the picture cannot disagree with the audio.
+ *
+ * A block in the main row BEFORE the fork feeds both lanes, which is the
+ * amp-into-two-cabs shape without paying for a second amp.
+ */
+const NUM_COLS = 8;
+const NUM_ROWS = 2;
+const NUM_BLOCKS = NUM_COLS * NUM_ROWS;      /* slots, not columns */
+const ROW_BR = 0;               /* top pad row - the parallel branch */
+const ROW_MAIN = 1;             /* bottom pad row - the main chain   */
 const PAD_BASE = 68;            /* bottom row, notes 68..75 */
-/*
- * THE ROW ABOVE THE BLOCKS IS THE ROUTING ROW.
- *
- * The split started life on the menu, which is three gestures away from a
- * thing you want to try and undo while listening - reported from the
- * device as simply not working well, and the suggestion that came with it
- * is the right one: press the pad ABOVE a block and the board parts there.
- *
- * It is the same picture as the screen. The rail is drawn above the boxes
- * for the left lane and below for the right, and now the pads above the
- * blocks carry the same information under your fingers.
- */
-const ROUTE_BASE = 76;          /* second row, notes 76..83 */
-/*
- * ONE COLOUR, TWO BRIGHTNESSES, AND DARK MEANS DARK.
- *
- * It was two hues - azure for the left lane, pink for the right - with the
- * pads before the split lit dimly in whichever side they would land on.
- * Three things to decode on one row, and the report from the device was
- * that the row could not be read.
- *
- * Off really means off now: no split, or before it, and the pad does
- * nothing you can see the result of. Lit means the signal is separated
- * from here, and the two sides are the SAME pink at two brightnesses -
- * which is a difference you can see across eight pads at arm's length
- * without naming either colour.
- */
-const PINK_DIM = 115;           /* Light Magenta dim  - the left lane  */
-const PINK_MAX = 26;            /* Light Magenta      - the right lane */
+const ROUTE_BASE = 76;          /* top row,    notes 76..83 */
+
+function slotOf(row, col) { return row * NUM_COLS + col; }
+function rowOf(b) { return (b / NUM_COLS) | 0; }
+function colOf(b) { return b % NUM_COLS; }
+/* THE ROW IS A LETTER IN THE KEY, so the column stays one digit: `b1..b8`
+ * is the main row and `t1..t8` the branch. A flat b1..b16 would have made
+ * every parse two-digit, and the parse that gets it wrong reads b16 as
+ * b1 - silently, on the block furthest from where you are looking. */
+function keyOf(b, sub) {
+    return (rowOf(b) === ROW_BR ? 't' : 'b') + (colOf(b) + 1) + '_' + sub;
+}
+function blockName(b) {
+    return (rowOf(b) === ROW_BR ? 'T' : 'B') + (colOf(b) + 1);
+}
+/* The column the lanes part at, or -1 for a board that stays mono.
+ * DERIVED, never stored - see the note above. */
+function forkCol() {
+    for (let c = 0; c < NUM_COLS; c++)
+        if (st.type[slotOf(ROW_BR, c)] !== TYPE_OFF) return c;
+    return -1;
+}
+/* Is this slot in the signal path at all? The branch row before the fork
+ * is not - by construction it is empty there. */
+function inPath(b) {
+    if (rowOf(b) === ROW_MAIN) return true;
+    const f = forkCol();
+    return f >= 0 && colOf(b) >= f;
+}
 const HOLD_MS = 350;
 
 const CC_KNOB_BASE = 71;        /* knobs 1..8 are CC 71..78 */
@@ -249,7 +280,7 @@ function padToBoard(list) {
 }
 
 
-let sel = 0;
+let sel = NUM_COLS;              /* main row, column 1 - see init */
 /* THE HOST'S OWN MENU, borrowed.
  *
  * "My Presets" and "Module" are pages the PLANNER appends to every
@@ -342,8 +373,6 @@ const st = {
     fx: new Array(NUM_BLOCKS).fill(0),
     cpu: 0,
     peak: 0,                    /* out level, %% of full scale - see drawMeter */
-    split: 0,                   /* 0 = off, else the 1-based block it starts at */
-    lane: new Array(NUM_BLOCKS).fill(0),
     blockCpu: new Array(NUM_BLOCKS).fill(0),
     val: {},                    /* "b3_drive" -> number */
     names: { model: [], cab: [], fx: [] },
@@ -415,12 +444,11 @@ function rotateRead() {
     }
     const b = i >> 1;
     if ((i & 1) === 0) {
-        st.type[b] = num(getp('b' + (b + 1) + '_type'), st.type[b]);
-        st.on[b] = num(getp('b' + (b + 1) + '_on'), st.on[b] ? 0 : 1) === 0 ? 1 : 0;
-        st.fx[b] = num(getp('b' + (b + 1) + '_fx'), st.fx[b]);
-        st.lane[b] = num(getp('b' + (b + 1) + '_lane'), st.lane[b]);
+        st.type[b] = num(getp(keyOf(b, 'type')), st.type[b]);
+        st.on[b] = num(getp(keyOf(b, 'on')), st.on[b] ? 0 : 1) === 0 ? 1 : 0;
+        st.fx[b] = num(getp(keyOf(b, 'fx')), st.fx[b]);
     } else {
-        st.blockCpu[b] = num(getp('b' + (b + 1) + '_cpu'), st.blockCpu[b]);
+        st.blockCpu[b] = num(getp(keyOf(b, 'cpu')), st.blockCpu[b]);
     }
 }
 
@@ -488,13 +516,15 @@ function openMenu() {
      * no sub-screen - so it is still two gestures away. */
     menuRows.push({ label: 'Input', action: null, edit: 'in_level' });
     menuRows.push({ label: 'Output', action: null, edit: 'out_level' });
-    /* THE SPLIT LIVES HERE because it is a decision about the BOARD, made
-     * once, and every pad and encoder is already spoken for. Its two pans
-     * sit under it, where the thing they belong to is one row up. */
-    menuRows.push({ label: 'Split', action: null, edit: 'split',
-                    kind: 'split' });
-    menuRows.push({ label: 'Pan L', action: null, edit: 'pan_a', kind: 'pan' });
-    menuRows.push({ label: 'Pan R', action: null, edit: 'pan_b', kind: 'pan' });
+    /* NO SPLIT ROW. The fork is wherever the top row starts, so setting
+     * it here would be a second way to say a thing the board already
+     * says - and the two could disagree.
+     *
+     * The pans are named for the RAIL they move, not for a side, because
+     * the side is what they SET. "Pan L" on a row you can drag to the
+     * right was the question the device kept asking back. */
+    menuRows.push({ label: 'Pan Top', action: null, edit: 'pan_a', kind: 'pan' });
+    menuRows.push({ label: 'Pan Btm', action: null, edit: 'pan_b', kind: 'pan' });
 
     try { console.log('A2c menu: ' + why + ', ' + menuRows.length + ' rows'); } catch (e) {}
 
@@ -510,8 +540,6 @@ function openMenu() {
  * and the split is a block number or the word Off. */
 function menuValueText(row, v) {
     if (v === undefined || !Number.isFinite(v)) return '-';
-    if (row.kind === 'split')
-        return (v < 1) ? 'Off' : ('at ' + Math.round(v));
     if (row.kind === 'pan') {
         const p = Math.round(v * 100);
         if (p === 0) return 'C';
@@ -573,7 +601,7 @@ function drawMenu() {
         ptext(2, 55, 'turn any knob to set', 1, 124);
 }
 
-function selKey(k) { return 'b' + (sel + 1) + '_' + k; }
+function selKey(k) { return keyOf(sel, k); }
 
 function knobList() { return padToBoard(knobsFor(st.type[sel], st.fx[sel])); }
 
@@ -772,29 +800,34 @@ function drawHeader() {
      * says which lane it is on; this says which lane YOU are on, which is
      * a different question and the one that was going unanswered. */
     const what = blockLabel(sel);
-    const side = (st.split > 0 && sel >= st.split - 1)
-                 ? (st.lane[sel] ? ' R' : ' L') : '';
-    ptext(1, 1, 'B' + (sel + 1) + side + (what ? ' ' + what : ' --'),
+    /* The row letter says which rail, and while the board is forked the
+     * pan word says where that rail is going. Both, because "T" is a
+     * position on the screen and "L" is a position in the room. */
+    const f = forkCol();
+    const side = (f >= 0 && inPath(sel) && colOf(sel) >= f)
+                 ? (rowOf(sel) === ROW_BR ? ' L' : ' R') : '';
+    ptext(1, 1, blockName(sel) + side + (what ? ' ' + what : ' --'),
           1, MET_X - 3);
     fill_rect(0, 10, 128, 1, 1);
 }
 
 /* Where a block's box sits, and where its wire runs through the column. */
 function blockGeom(b) {
-    const split = st.split > 0 ? st.split - 1 : -1;
-    const forked = split >= 0 && b >= split;
-    /* A BLOCK BEFORE THE FORK SPANS BOTH LANES, because that is what it
-     * does: one amp feeding two cabs is drawn as one tall block meeting
-     * two short ones, which is the picture Axe-Edit draws and the reason
-     * the fork needs no arrow to explain it. */
+    const split = forkCol();
+    const col = colOf(b), row = rowOf(b);
+    const forked = split >= 0 && col >= split;
+    /* A MAIN-ROW BLOCK BEFORE THE FORK SPANS BOTH RAILS, because that is
+     * what it does: one amp feeding two cabs is drawn as one tall block
+     * meeting two short ones, and the fork then needs no arrow to
+     * explain it. */
     const y = !forked ? GRID_Y
-            : (st.lane[b] ? GRID_Y + LANE_H + LANE_GAP : GRID_Y);
+            : (row === ROW_BR ? GRID_Y : GRID_Y + LANE_H + LANE_GAP);
     const h = forked ? LANE_H : (split >= 0 ? BAND_H : GRID_H);
-    return { x: colX(b), y: y, h: h, wire: y + (h >> 1), forked: forked };
+    return { x: colX(col), y: y, h: h, wire: y + (h >> 1), forked: forked };
 }
 
 function drawBoxes() {
-    const split = st.split > 0 ? st.split - 1 : -1;
+    const split = forkCol();
     const bandH = split >= 0 ? BAND_H : GRID_H;
     const midWire = GRID_Y + (bandH >> 1);
     const laneWire = [GRID_Y + (LANE_H >> 1),
@@ -824,6 +857,11 @@ function drawBoxes() {
     }
 
     for (let b = 0; b < NUM_BLOCKS; b++) {
+        /* A SLOT OFF THE PATH IS NOT DRAWN AT ALL, not drawn faintly.
+         * The branch row before the fork is empty by construction - it is
+         * what DEFINES the fork - so there is no wire there and a box
+         * would be sitting on nothing. */
+        if (!inPath(b)) continue;
         const t = st.type[b];
         const g = blockGeom(b);
 
@@ -1030,7 +1068,15 @@ function paintKnobLeds() {
 
 function paintLeds() {
     paintKnobLeds();
+    /* BOTH ROWS ARE THE SAME KIND OF THING NOW, so they are painted by
+     * one loop with one rule. The old top row carried a second language -
+     * two brightnesses of pink meaning which side of a split a block was
+     * on - which was three things to decode on one row and was reported,
+     * twice, as unreadable. There is nothing left to decode: a pad shows
+     * its own block's category, dim when bypassed, dark when empty. */
+    const pathFork = forkCol();
     for (let b = 0; b < NUM_BLOCKS; b++) {
+        const note = (rowOf(b) === ROW_BR ? ROUTE_BASE : PAD_BASE) + colOf(b);
         /* Selection BLINKS rather than taking a colour of its own, because
          * "which one am I editing" and "what is this block" are different
          * questions and one colour cannot answer both - and now that the
@@ -1039,61 +1085,21 @@ function paintLeds() {
         let c;
         if (b === sel && (Date.now() % 700) < 350) {
             c = White;
+        } else if (rowOf(b) === ROW_BR && pathFork >= 0 && colOf(b) < pathFork) {
+            /* Off the path: before the fork the branch row carries no
+             * signal, and lighting it would offer a stomp with nothing
+             * to stomp. It is still HOLDable - that is how you move the
+             * fork earlier. */
+            c = 0;
         } else {
             const led = CATS[catOfBlock(b)].led;
             c = (st.type[b] === TYPE_OFF) ? 0 : (st.on[b] ? led[0] : led[1]);
         }
-        setLED(PAD_BASE + b, c);
-
-        /* THE ROUTING ROW SHOWS WHAT IT DOES. A dark pad sets the split, a
-         * white one is the split, and a coloured one is a lane you can
-         * flip - so every pad's colour IS its instruction. */
-        /* Lit from the split point rightward, and nowhere else: the row
-         * IS the split, so its extent is the one fact worth drawing. */
-        const live = st.split > 0 && b >= st.split - 1;
-        setLED(ROUTE_BASE + b,
-               !live ? 0 : (st.lane[b] ? PINK_MAX : PINK_DIM));
+        setLED(note, c);
     }
 }
 
 /* ----------------------------------------------------------------- input */
-
-/*
- * THE PAD TELLS YOU WHAT IT WILL DO, and there are only three answers.
- *
- *   DARK       tap parts the board here; everything from here lights up
- *   DARK PINK  this block is on the left of the split - tap sends it right
- *   FULL PINK  it is on the right - tap sends it back
- *   HOLD       anywhere: rejoin, and the whole row goes dark again
- *
- * The position-dependent tap is back, and this time it is honest: what the
- * tap does is decided by what the pad is SHOWING, not by where it sits
- * relative to a marker you have to find. A dark pad has nothing to flip,
- * so splitting is the only thing it could mean.
- */
-function routeTap(b) {
-    if (st.split <= 0 || b < st.split - 1) {
-        st.split = b + 1;
-        st.val['split'] = st.split;
-        setp('split', st.split);
-        flash('Split at B' + st.split);
-        return;
-    }
-    st.lane[b] = st.lane[b] ? 0 : 1;
-    setp('b' + (b + 1) + '_lane', st.lane[b]);
-    flash('B' + (b + 1) + ' -> ' + (st.lane[b] ? 'RIGHT' : 'LEFT'));
-}
-
-/* Rejoin, from any pad. One gesture that always means the same thing and
- * always has somewhere to land is worth more here than one that only works
- * on the pad the split happens to be on. */
-function routeHold(b) {
-    if (st.split <= 0) return;
-    st.split = 0;
-    st.val['split'] = 0;
-    setp('split', 0);
-    flash('Rejoined');
-}
 
 /*
  * A STOMP SAYS WHICH WAY IT WENT.
@@ -1108,10 +1114,10 @@ function routeHold(b) {
 function stomp(b) {
     const nowOn = st.on[b];
     st.on[b] = nowOn ? 0 : 1;
-    flash('B' + (b + 1) + (st.on[b] ? ' ON' : ' BYPASS'));
+    flash(blockName(b) + (st.on[b] ? ' ON' : ' BYPASS'));
     /* Written through rather than waiting for the rotation to notice: the
      * pad has to answer under the finger. */
-    setp('b' + (b + 1) + '_on', st.on[b] ? 0 : 1);
+    setp(keyOf(b, 'on'), st.on[b] ? 0 : 1);
 }
 
 function select(b) {
@@ -1119,7 +1125,7 @@ function select(b) {
     /* The header carries this too, but the header is where it ALWAYS is -
      * which makes it a state and not an answer to "did that hold take".
      * Same reasoning as the routing messages. */
-    flash('Edit B' + (b + 1) + (blockLabel(b) ? ' ' + blockLabel(b) : ''));
+    flash('Edit ' + blockName(b) + (blockLabel(b) ? ' ' + blockLabel(b) : ''));
     setp('sel_block', b);
     readSelected();
 }
@@ -1233,7 +1239,7 @@ function onKnob(idx, ccValue) {
 
 globalThis.chain_ui = {
     init() {
-        for (let i = 0; i < NUM_BLOCKS; i++) {
+        for (let i = 0; i < NUM_COLS; i++) {
             padDownAt[i] = 0; padHandled[i] = false;
             routeDownAt[i] = 0; routeHandled[i] = false;
         }
@@ -1244,20 +1250,21 @@ globalThis.chain_ui = {
         resetKnobAcc();
         loadLists();
         st.build = getp('build') || '?';
-        sel = num(getp('sel_block'), 0);
+        /* THE MAIN ROW'S FIRST BLOCK IS WHERE THIS OPENS. Slot 0 is the
+         * top row, which on a mono board is off the path entirely - so
+         * defaulting to it lands the editor on a block that is not in the
+         * signal and draws no box. */
+        sel = num(getp('sel_block'), slotOf(ROW_MAIN, 0));
         for (let b = 0; b < NUM_BLOCKS; b++) {
-            st.type[b] = num(getp('b' + (b + 1) + '_type'), 0);
-            st.on[b] = num(getp('b' + (b + 1) + '_on'), 0) === 0 ? 1 : 0;
-            st.fx[b] = num(getp('b' + (b + 1) + '_fx'), 0);
+            st.type[b] = num(getp(keyOf(b, 'type')), 0);
+            st.on[b] = num(getp(keyOf(b, 'on')), 0) === 0 ? 1 : 0;
+            st.fx[b] = num(getp(keyOf(b, 'fx')), 0);
         }
         st.cpu = num(getp('cpu'), 0);
-        for (const key of ['in_level', 'out_level', 'split', 'pan_a', 'pan_b']) {
+        for (const key of ['in_level', 'out_level', 'pan_a', 'pan_b']) {
             const v = getp(key);
             if (v !== null && v !== '') st.val[key] = Number(v);
         }
-        st.split = num(getp('split'), 0);
-        for (let b = 0; b < NUM_BLOCKS; b++)
-            st.lane[b] = num(getp('b' + (b + 1) + '_lane'), b & 1);
         readSelected();
     },
 
@@ -1292,14 +1299,14 @@ function tickBody() {
         /* A hold fires while the finger is still down - waiting for the
          * release would make selecting feel like a slow tap. */
         const now = Date.now();
-        for (let b = 0; b < NUM_BLOCKS; b++) {
+        for (let b = 0; b < NUM_COLS; b++) {
             if (padDownAt[b] && !padHandled[b] && now - padDownAt[b] >= HOLD_MS) {
                 padHandled[b] = true;
-                select(b);
+                select(slotOf(ROW_MAIN, b));
             }
             if (routeDownAt[b] && !routeHandled[b] && now - routeDownAt[b] >= HOLD_MS) {
                 routeHandled[b] = true;
-                routeHold(b);
+                select(slotOf(ROW_BR, b));
             }
         }
 
@@ -1355,19 +1362,7 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
                 const dd = decodeDelta(d2);
                 if (row && row.edit && dd) {
                     let v = st.val[row.edit];
-                    if (row.kind === 'split') {
-                        /* A block number, so it steps - and it steps at
-                         * the same three detents everything discrete on
-                         * this screen costs. */
-                        const step = knobSteps(d1 - CC_KNOB_BASE, dd);
-                        if (!step) return;
-                        v = Math.round(v === undefined ? 0 : v) + step;
-                        if (v < 0) v = 0;
-                        if (v > NUM_BLOCKS) v = NUM_BLOCKS;
-                        st.val[row.edit] = v;
-                        st.split = v;
-                        setp(row.edit, v);
-                    } else if (row.kind === 'pan') {
+                    if (row.kind === 'pan') {
                         v = (v === undefined ? 0 : v) + dd * FLOAT_STEP * 2;
                         if (v < -1) v = -1;
                         if (v > 1) v = 1;
@@ -1391,20 +1386,22 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
             return;
         }
 
-        if (d1 >= ROUTE_BASE && d1 < ROUTE_BASE + NUM_BLOCKS) {
+        /* THE TOP ROW IS BLOCKS, AND IT TAKES THE SAME TWO GESTURES.
+         * One rule for sixteen pads: tap stomps, hold edits. */
+        if (d1 >= ROUTE_BASE && d1 < ROUTE_BASE + NUM_COLS) {
             const r = d1 - ROUTE_BASE;
             if (status === 0x90 && d2 > 0) {
                 routeDownAt[r] = Date.now();
                 routeHandled[r] = false;
             } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
-                if (routeDownAt[r] && !routeHandled[r]) routeTap(r);
+                if (routeDownAt[r] && !routeHandled[r]) stomp(slotOf(ROW_BR, r));
                 routeDownAt[r] = 0;
                 routeHandled[r] = false;
             }
             return;
         }
 
-        if (d1 < PAD_BASE || d1 >= PAD_BASE + NUM_BLOCKS) return;
+        if (d1 < PAD_BASE || d1 >= PAD_BASE + NUM_COLS) return;
         const b = d1 - PAD_BASE;
 
         if (status === 0x90 && d2 > 0) {
@@ -1413,10 +1410,9 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
         } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
             /* A block pad stomps, full stop. Shift used to move it
              * between lanes here as well, which was one gesture doing two
-             * jobs and an undocumented second way to do what the routing
-             * row above now does under your finger, next to the pad that
-             * shows the answer. */
-            if (padDownAt[b] && !padHandled[b]) stomp(b);
+             * jobs - and a lane is the ROW a pad is in now, so there is
+             * nothing left for it to mean. */
+            if (padDownAt[b] && !padHandled[b]) stomp(slotOf(ROW_MAIN, b));
             padDownAt[b] = 0;
             padHandled[b] = false;
         }

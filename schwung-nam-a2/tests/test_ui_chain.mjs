@@ -22,7 +22,7 @@ catch (e) {
 }
 
 const params = {
-    sel_block: '0', cpu: '41', build: 'test',
+    sel_block: '8', cpu: '41', build: 'test',   /* main row, column 1 */
     split: '0', pan_a: '-1.0', pan_b: '1.0',
     model_list: JSON.stringify(['OCD', 'Recto']),
     cab_list: JSON.stringify(['TF MESA']),
@@ -34,16 +34,34 @@ const params = {
     fx_list: JSON.stringify(JSON.parse(specsRaw).map(p => p.n)),
     fx_specs: specsRaw,
 };
-for (let b = 1; b <= 8; b++) {
-    params[`b${b}_type`] = b <= 2 ? '1' : (b === 3 ? '2' : '0');
-    params[`b${b}_on`] = '0';                 /* 0 = On */
-    params[`b${b}_model`] = '0';
-    params[`b${b}_quality`] = '0';
-    params[`b${b}_cab`] = '0';
-    params[`b${b}_cpu`] = '7';
-    params[`b${b}_fx`] = '0';
-    for (let k = 1; k <= 5; k++) params[`b${b}_p${k}`] = '0.5';
+/* TWO ROWS: `b<n>` is the bottom (main) chain, `t<n>` the top (parallel)
+ * one. The top row starts EMPTY, which is what makes the board mono - the
+ * fork is derived from it, not stored. */
+for (const r of ['b', 't']) for (let b = 1; b <= 8; b++) {
+    params[`${r}${b}_type`] = (r === 'b') ? (b <= 2 ? '1' : (b === 3 ? '2' : '0')) : '0';
+    params[`${r}${b}_on`] = '0';              /* 0 = On */
+    params[`${r}${b}_model`] = '0';
+    params[`${r}${b}_quality`] = '0';
+    params[`${r}${b}_cab`] = '0';
+    params[`${r}${b}_cpu`] = '7';
+    params[`${r}${b}_fx`] = '0';
+    for (let k = 1; k <= 5; k++) params[`${r}${b}_p${k}`] = '0.5';
 }
+/* Every scenario below sets the board it needs; this puts BOTH rows back
+ * to a known state first, so a test cannot inherit a fork from the one
+ * above it - which is exactly how the lane assertions used to pass for
+ * the wrong reason. */
+const board = (spec) => {
+    for (const r of ['b', 't']) for (let b = 1; b <= 8; b++) {
+        params[`${r}${b}_type`] = '0';
+        params[`${r}${b}_on`] = '0';
+    }
+    for (const k of Object.keys(spec || {})) {
+        params[`${k}_type`] = String(spec[k].t !== undefined ? spec[k].t : spec[k]);
+        if (spec[k].on !== undefined) params[`${k}_on`] = spec[k].on ? '0' : '1';
+        if (spec[k].fx !== undefined) params[`${k}_fx`] = String(spec[k].fx);
+    }
+};
 
 
 
@@ -128,7 +146,7 @@ writes.length = 0;
 ui.onMidiMessageInternal([0x90, 70, 127]);
 advance(1000);                              /* past HOLD_MS */
 ui.tick();
-ok(writes.some(([k, v]) => k === 'sel_block' && v === '2'), 'pad hold selects the block');
+ok(writes.some(([k, v]) => k === 'sel_block' && v === '10'), 'pad hold selects the block');
 ui.onMidiMessageInternal([0x80, 70, 0]);
 
 /* THE MENU. */
@@ -171,7 +189,7 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ui.onMidiMessageInternal([0x90, 71, 127]);       /* hold pad 4 */
     advance(1000); ui.tick();
     ui.onMidiMessageInternal([0x80, 71, 0]);
-    ok(writes.some(([k, v]) => k === 'sel_block' && v === '3'), 'tree: pad 4 selected');
+    ok(writes.some(([k, v]) => k === 'sel_block' && v === '11'), 'tree: pad 4 selected');
 
     /* ONE STEP IS THREE DETENTS on every discrete control - the encoders
      * are not detented and the shim coalesces, so a message carries
@@ -397,9 +415,13 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ok(!reads.some(k => /_cat$/.test(k)),
        'reads: nothing asks the plugin for a key it cannot answer');
 
-    /* THE ROUTING ROW: the pad tells you what it will do, and the tap
-     * acts on what it is SHOWING rather than on where it sits relative to
-     * a marker you have to find. */
+    /* THE TOP ROW IS BLOCKS NOW, not a routing row.
+     *
+     * It used to carry its own language - tap a dark pad to split, tap a
+     * lit one to flip a side, hold anywhere to rejoin - which was three
+     * things to decode on one row and cost the eight blocks it sat above
+     * nothing but READ them. Both rows take the same two gestures, and
+     * the fork is wherever the top row starts. */
     const R = (n) => 76 + n;
     const tapR = (n) => {
         ui.onMidiMessageInternal([0x90, R(n), 127]);
@@ -411,52 +433,41 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
         ui.onMidiMessageInternal([0x80, R(n), 0]);
     };
 
-    /* The whole row starts dark, and dark really means off - not a dim
-     * preview of a side, which is what made the row unreadable. */
-    holdR(0);                                        /* make sure it is off */
-    for (let b = 1; b <= 8; b++) { params[`b${b}_type`] = '3'; params[`b${b}_lane`] = '0'; }
+    /* A MONO BOARD LEAVES THE TOP ROW DARK, and dark means empty - not a
+     * dim preview of a side, which is what made the old row unreadable. */
+    board({ b1: 3, b2: 3, b3: 3, b4: 3, b5: 3, b6: 3, b7: 3, b8: 3 });
     ui.init();
     repaint();
     for (let b = 0; b < 8; b++)
-        ok(leds[R(b)] === 0, `route: with no split, pad ${b + 1} is dark`);
+        ok(leds[R(b)] === 0, `route: a mono board leaves top pad ${b + 1} dark`);
+    for (let b = 0; b < 8; b++)
+        ok(leds[68 + b] !== 0, `route: and bottom pad ${b + 1} lit`);
 
-    /* A dark pad has nothing to flip, so splitting is the only thing its
-     * tap could mean. */
+    /* A TOP PAD HOLD SELECTS ITS OWN SLOT, which is how a block gets up
+     * there at all - and slot 2 is the top row, column 3. */
+    writes.length = 0;
+    holdR(2);
+    ok(writes.some(([k, v]) => k === 'sel_block' && v === '2'),
+       'route: a hold on the top row selects that slot');
+
+    /* PUTTING A BLOCK IN THE TOP ROW IS THE SPLIT. Nothing writes a
+     * `split` key - there is no such setting any more. */
+    writes.length = 0;
+    board({ b1: 3, b2: 3, b3: 3, b4: 3, t3: 3, t4: 3 });
+    ui.init();
+    repaint();
+    ok(!writes.some(([k]) => k === 'split'),
+       'route: the fork is derived, so nothing stores one');
+    ok(leds[R(0)] === 0 && leds[R(1)] === 0,
+       'route: before the fork the top row stays dark');
+    ok(leds[R(2)] !== 0 && leds[R(3)] !== 0,
+       'route: from the fork its blocks light like any others');
+
+    /* A TOP PAD STOMPS, exactly as a bottom one does. */
     writes.length = 0;
     tapR(2);
-    ok(writes.some(([k, v]) => k === 'split' && v === '3'),
-       'route: a tap on a dark pad parts the board there');
-    repaint();
-    ok(leds[R(0)] === 0 && leds[R(1)] === 0,
-       'route: before it stays dark');
-    ok(leds[R(2)] !== 0 && leds[R(7)] !== 0,
-       'route: and everything from there lights up - the signal is split');
-
-    /* Lit pads are sides, and the two are one colour at two brightnesses. */
-    const dim = leds[R(2)];
-    writes.length = 0;
-    tapR(3);
-    ok(writes.some(([k]) => k === 'b4_lane'), 'route: a tap on a lit pad sends it across');
-    ok(!writes.some(([k]) => k === 'split'), 'route: and never moves the split');
-    repaint();
-    ok(leds[R(3)] !== dim, 'route: the other side is the other brightness');
-    ok(leds[R(3)] !== 0 && dim !== 0, 'route: both sides are lit');
-    writes.length = 0;
-    tapR(3);
-    repaint();
-    ok(leds[R(3)] === dim, 'route: tapping again sends it back');
-
-    /* Rejoin from ANY pad. One gesture that always means the same thing
-     * and always has somewhere to land beats one that only works on the
-     * pad the split happens to be on. */
-    writes.length = 0;
-    holdR(6);
-    ok(writes.some(([k, v]) => k === 'split' && v === '0'),
-       'route: a hold anywhere rejoins the board');
-    repaint();
-    let allDark = true;
-    for (let b = 0; b < 8; b++) if (leds[R(b)] !== 0) allDark = false;
-    ok(allDark, 'route: and the whole row goes dark again');
+    ok(writes.some(([k, v]) => k === 't3_on' && v === '1'),
+       'route: a tap on the top row bypasses that block');
 
     /* THE BLOCK ROW IS UNTOUCHED - tap stomps, hold edits. */
     writes.length = 0;
@@ -467,43 +478,31 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ui.onMidiMessageInternal([0x90, 74, 127]);
     advance(1000); ui.tick();
     ui.onMidiMessageInternal([0x80, 74, 0]);
-    ok(writes.some(([k, v]) => k === 'sel_block' && v === '6'),
+    ok(writes.some(([k, v]) => k === 'sel_block' && v === '14'),
        'blocks: a hold still selects it for editing');
 
-    /* AND THE SCREEN SAYS WHAT JUST HAPPENED. The drawing is a picture of
-     * the state; it does not answer "did that tap do what I meant", which
-     * is the question being asked while you change it. */
-    tapR(2);
-    drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => d[2] === 'Split at B3'), 'route: a split says itself');
-    tapR(6);
-    drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => /^B7 -> (LEFT|RIGHT)$/.test(d[2])), 'route: so does a flip');
-    advance(2000);
-    drawnAt.length = 0; repaint();
-    ok(!drawnAt.some(d => /^(Split at|B7 ->)/.test(d[2])),
-       'route: the message is brief, not a mode');
-
-    /* A STOMP SAYS WHICH WAY IT WENT. A whole session went to "no sound,
-     * the amp is dead" with the board's only loaded block bypassed - the
-     * screen said so with one letter in a fifteen-pixel box. */
+    /* AND THE SCREEN SAYS WHAT JUST HAPPENED, naming the ROW. `B4` and
+     * `T4` are different blocks on the same column, and a message that
+     * said only `B4` would be right half the time. */
     ui.onMidiMessageInternal([0x90, 68, 127]);
     ui.onMidiMessageInternal([0x80, 68, 0]);
     drawnAt.length = 0; repaint();
     ok(drawnAt.some(d => /^B1 (ON|BYPASS)$/.test(d[2])),
        'blocks: a stomp says which way it went');
-    ui.onMidiMessageInternal([0x90, 68, 127]);
-    ui.onMidiMessageInternal([0x80, 68, 0]);
+    tapR(3);
     drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => /^B1 (ON|BYPASS)$/.test(d[2])),
-       'blocks: and says the other thing on the way back');
+    ok(drawnAt.some(d => /^T4 (ON|BYPASS)$/.test(d[2])),
+       'blocks: and a top-row stomp names the top row');
+    advance(2000);
+    drawnAt.length = 0; repaint();
+    ok(!drawnAt.some(d => /^[BT]\d (ON|BYPASS)$/.test(d[2])),
+       'route: the message is brief, not a mode');
 
-    /* THE PICTURE ON SCREEN: a split block MOVES, it does not wear a
-     * label. The lane used to be a letter in a 15 px box and a one-pixel
-     * rail; both were true and neither was legible, which is what "I
-     * cannot tell which side I am editing" meant. */
-    for (let b = 1; b <= 8; b++) { params[`b${b}_type`] = '3'; params[`b${b}_on`] = '0'; }
-    params['b3_lane'] = '0'; params['b4_lane'] = '1'; params['split'] = '3';
+    /* THE PICTURE ON SCREEN: the two lanes are two ROWS. The lane used to
+     * be a letter in a 15 px box and a one-pixel rail; both were true and
+     * neither was legible, which is what "I cannot tell which side I am
+     * editing" meant. */
+    board({ b1: 3, b2: 3, b3: 3, b4: 3, t3: 3, t4: 3 });
     ui.init();
     rects.length = 0; drawnAt.length = 0; repaint();
     const GY = 12, LH = 9, CW = 14, BAND = 19;
@@ -511,19 +510,26 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     /* Height > 1 matters: the WIRE through a column is also COL_W wide,
      * so a finder that only matched the width would report every empty
      * slot as a box and pass whatever the drawing did. */
-    const boxAt = (col) => rects.find(
+    const boxesAt = (col) => rects.filter(
         r => (r[0] === 'fill' || r[0] === 'draw') &&
              r[1] === colX(col) && r[3] === CW && r[4] > 1);
+    const boxAt = (col) => boxesAt(col)[0];
+    /* HEIGHT TELLS THE RAIL FROM THE BAND. A head block also starts at
+     * GY - it spans both rails - so matching on y alone reports the head
+     * as an upper-rail box and the "nothing before the fork" check below
+     * passes on every board. */
+    const upperAt = (col) => boxesAt(col).find(r => r[2] === GY && r[4] === LH);
+    const lowerAt = (col) => boxesAt(col).find(r => r[2] === GY + LH + 1);
 
     /* A block BEFORE the fork spans BOTH lanes - one amp visibly feeding
      * two cabs - so its height is the band, not a lane. */
     ok(boxAt(0) && boxAt(0)[2] === GY && boxAt(0)[4] === BAND,
        'split: before the fork a block spans both lanes');
-    ok(boxAt(2) && boxAt(2)[2] === GY && boxAt(2)[4] === LH,
-       'split: a left-lane block sits UP and is half height');
-    ok(boxAt(3) && boxAt(3)[2] === GY + LH + 1 && boxAt(3)[4] === LH,
-       'split: a right-lane block sits DOWN');
-    ok(boxAt(2)[2] !== boxAt(3)[2],
+    ok(upperAt(2) && upperAt(2)[4] === LH,
+       'split: the TOP row draws on the upper rail');
+    ok(lowerAt(2) && lowerAt(2)[4] === LH,
+       'split: the BOTTOM row draws on the lower rail');
+    ok(upperAt(2)[2] !== lowerAt(2)[2],
        'split: so the two sides are two ROWS, not two letters');
     /* The fork is a wire joining the two lane centres, as Axe-Edit draws a
      * block feeding two cabs. */
@@ -531,12 +537,16 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
        'split: and a vertical wire says where they part company');
     ok(!drawnAt.some(d => d[2] === 'L' || d[2] === 'R'),
        'split: no lane letters left in the boxes');
+    /* THE BRANCH ROW BEFORE THE FORK IS NOT DRAWN AT ALL. There is no
+     * wire there for a box to sit on, so a faint one would be a path
+     * that does not exist. */
+    ok(!upperAt(0) && !upperAt(1),
+       'split: nothing is drawn on the branch before it forks');
 
     /* AN EMPTY SLOT IS A WIRE, NOT A BOX. Five empty boxes with a dash in
      * each is what "messy" meant: the three blocks that were there had to
      * be found among them. */
-    for (let b = 1; b <= 8; b++) params[`b${b}_type`] = '0';
-    params['b1_type'] = '3'; params['split'] = '0';
+    board({ b1: 3 });
     ui.init();
     rects.length = 0; drawnAt.length = 0; repaint();
     ok(boxAt(0), 'grid: a loaded block still draws a box');
@@ -572,24 +582,29 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
 
     /* WHICH SIDE YOU ARE EDITING is a different question from which side
      * a block is on, and it was the one going unanswered. */
-    for (let b = 1; b <= 8; b++) { params[`b${b}_type`] = '3'; params[`b${b}_on`] = '0'; }
-    params['b3_lane'] = '0'; params['b4_lane'] = '1'; params['split'] = '3';
+    board({ b1: 3, b2: 3, b3: 3, b4: 3, t3: 3, t4: 3 });
     ui.init();
     ui.onMidiMessageInternal([0x90, 71, 127]);       /* hold pad 4 -> select */
     advance(1000); ui.tick();
     ui.onMidiMessageInternal([0x80, 71, 0]);
     drawnAt.length = 0; repaint();
     ok(drawnAt.some(d => d[1] === 1 && /^B4 R/.test(d[2])),
-       'split: the header names the side you are on');
+       'split: the header names the row AND where it is panned');
+    ui.onMidiMessageInternal([0x90, 79, 127]);       /* hold top pad 4 */
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 79, 0]);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[1] === 1 && /^T4 L/.test(d[2])),
+       'split: and the other row says the other side');
 
 
     /* PAN, in its own units - a position between two names. */
     ui.onMidiMessageInternal([0xb0, 3, 127]);        /* open */
-    ok(menuGoTo(ui, 'Pan L', repaint), 'split: Pan L is a row');
+    ok(menuGoTo(ui, 'Pan Top', repaint), 'split: Pan Top is a row');
     writes.length = 0;
     for (let i = 0; i < 5; i++) ui.onMidiMessageInternal([0xb0, K1, 1]);
     ok(writes.some(([k, v]) => k === 'pan_a' && Number(v) > -1 && Number(v) <= 1),
-       'pan: the knob moves it off hard left');
+       'pan: the knob moves the top rail off hard left');
     drawnAt.length = 0; repaint();
     ok(drawnAt.some(d => /^(L|R)\d+$|^C$/.test(d[2])),
        'pan: and it reads as a position, not a percentage');

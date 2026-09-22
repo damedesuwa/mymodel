@@ -33,9 +33,30 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "axegrid"
+#define NAM_A2C_BUILD_ID "tworow"
 
-#define NUM_BLOCKS 8
+/* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
+ *
+ * The parallel lane used to be carved out of the one row: split at column
+ * three and the six blocks after it had to be shared between the two
+ * sides, so taking a board stereo SHORTENED both halves of it. "블럭 갯수가
+ * 줄잖아" - exactly right, and the reason the feature felt like a trade.
+ *
+ * Move has two pad rows. The bottom one is the MAIN chain, the top one is
+ * the PARALLEL branch, and they are live at the same time - so the branch
+ * costs nothing from the chain it leaves. Sixteen slots, addressed as
+ * `b1..b8` (bottom) and `t1..t8` (top).
+ *
+ * WHERE THEY PART IS NOT A SETTING. The fork is the first column carrying
+ * a top-row block, so putting a pedal up there IS the split gesture and
+ * taking the last one off rejoins the board. One less thing to set, one
+ * less thing that can disagree with the picture. */
+#define NUM_COLS   8
+#define NUM_ROWS   2
+#define ROW_BR     0              /* top pad row - the parallel branch */
+#define ROW_MAIN   1              /* bottom pad row - the main chain   */
+#define SLOT(r, c) ((r) * NUM_COLS + (c))
+#define NUM_BLOCKS (NUM_ROWS * NUM_COLS)
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
 
 /* How many entries the model and cab pickers offer. The lists are served as
@@ -158,10 +179,10 @@ typedef struct {
     /*
      * TWO LANES, AND THE SPLIT NEVER REJOINS.
      *
-     * Before `split_at` there is one signal in `mono`. At it, mono is
-     * copied into both lanes and every block from there on belongs to one
-     * of them. They meet again only at the output, where the pans put
-     * them where they go.
+     * Before the fork there is one signal in `mono`. At it, mono is
+     * copied into both lanes - the TOP pad row runs lane A, the BOTTOM
+     * row lane B - and they meet again only at the output, where the pans
+     * put them where they go.
      *
      * NOT REJOINING IS THE DESIGN, not a shortcut. A block that processed
      * both lanes would have to do it with ONE set of state - one delay
@@ -174,9 +195,7 @@ typedef struct {
      */
     float laneA[FRAMES_PER_BLOCK];
     float laneB[FRAMES_PER_BLOCK];
-    int   split_at;                 /* 0 = off, else the 1-based block */
-    int   lane[NUM_BLOCKS];         /* 0 = A/left, 1 = B/right */
-    float pan_a, pan_b;             /* -1 .. +1 */
+    float pan_a, pan_b;             /* A = top row, B = bottom row, -1 .. +1 */
     float scratch[FRAMES_PER_BLOCK];
 
     req_ring_t   reqs;
@@ -210,6 +229,17 @@ typedef struct {
     pthread_t    diag_tid;
     int          diag_running;
 } a2c_t;
+
+/* The column the two lanes part at, or -1 for a board that never does.
+ *
+ * DERIVED, NEVER STORED. A stored split plus a set of block types is two
+ * facts that can disagree, and the one that loses is invisible - a lane
+ * nothing writes, which is silence with no way to see why. */
+static int fork_col(const a2c_t *s) {
+    for (int c = 0; c < NUM_COLS; c++)
+        if (s->type[SLOT(ROW_BR, c)] != BLK_OFF) return c;
+    return -1;
+}
 
 /* ======================================================================== */
 /* Threads                                                                   */
@@ -326,18 +356,22 @@ static void *diag_thread(void *arg) {
 
         /* THE ROUTING IS IN THE LINE, because a split board whose log
          * looks exactly like a series one is a board nobody can diagnose
-         * from a paste. `/` is where the lanes part; L and R say which
-         * side each block after it is on. */
-        char chain[220]; int w = 0;
-        for (int i = 0; i < NUM_BLOCKS; i++) {
-            const int split = (s->split_at > 0 && i >= s->split_at - 1);
-            w += snprintf(chain + w, sizeof(chain) - w, "%s%s%s%s%.0f",
-                          i ? " " : "",
-                          (s->split_at > 0 && i == s->split_at - 1) ? "/" : "",
-                          split ? (s->lane[i] ? "R" : "L") : "",
-                          s->type[i] == BLK_OFF ? "-" :
-                          (s->on[i] ? block_type_name(s->type[i]) : "("),
-                          s->type[i] == BLK_OFF ? 0.0 : s->us_peak[i]);
+         * from a paste. Two rows, printed as two: `T` is the parallel
+         * branch, `B` the main chain, and `/` marks the column they part
+         * at. A `-` is an empty slot and `(` a bypassed one. */
+        char chain[440]; int w = 0;
+        const int dfork = fork_col(s);
+        for (int r = 0; r < NUM_ROWS; r++) {
+            w += snprintf(chain + w, sizeof(chain) - w, "%s%c",
+                          r ? " | " : "", r == ROW_BR ? 'T' : 'B');
+            for (int c = 0; c < NUM_COLS; c++) {
+                const int i = SLOT(r, c);
+                w += snprintf(chain + w, sizeof(chain) - w, " %s%s%.0f",
+                              (dfork == c) ? "/" : "",
+                              s->type[i] == BLK_OFF ? "-" :
+                              (s->on[i] ? block_type_name(s->type[i]) : "("),
+                              s->type[i] == BLK_OFF ? 0.0 : s->us_peak[i]);
+            }
         }
 
         char msg[512];
@@ -488,12 +522,7 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     s->out_level = 0.85f;
     s->in_gain = knob_to_gain(s->in_level);
     s->out_gain = knob_to_gain(s->out_level);
-    s->sel_block = 0;
-    s->split_at = 0;
-    /* ALTERNATING, so switching the split on is immediately a working
-     * split rather than a silent right channel. The commonest shape by a
-     * long way is amp, split, two cabs. */
-    for (int i = 0; i < NUM_BLOCKS; i++) s->lane[i] = i & 1;
+    s->sel_block = SLOT(ROW_MAIN, 0);
     s->pan_a = -1.0f;
     s->pan_b = 1.0f;
 
@@ -539,6 +568,52 @@ static void v2_destroy_instance(void *instance) {
     plugin_log("Nam A2c: instance destroyed");
 }
 
+
+/* ONE BLOCK, ON WHICHEVER BUFFER ITS LANE OWNS.
+ *
+ * Lifted out of the loop when the board grew a second row: the three runs
+ * that replaced that loop would otherwise have carried three copies of
+ * this, and the copy that drifts is the one on the lane nobody solos. */
+static void run_block(a2c_t *s, int b, float *buf, int n, float bpm) {
+    const int t = s->type[b];
+    if (t == BLK_OFF) { s->us_peak[b] = 0.0; return; }
+
+    /* Adopt a finished load even while bypassed: coming off bypass
+     * should not then wait for a model that has been ready for a
+     * minute. */
+    if (t == BLK_NAM) nam_block_adopt_pending(&s->amp[b]);
+
+    if (!s->on[b]) { s->us_peak[b] *= CPU_PEAK_DECAY; return; }
+
+    struct timespec b0, b1;
+    clock_gettime(CLOCK_MONOTONIC, &b0);
+    switch (t) {
+        case BLK_NAM:
+            if (s->amp[b].model) {
+                const float mg = s->amp[b].in_gain;
+                for (int i = 0; i < n; i++) buf[i] *= mg;
+                nam_block_process(&s->amp[b], buf, s->scratch, n);
+                const float mo = s->amp[b].out_gain;
+                for (int i = 0; i < n; i++) buf[i] *= mo;
+            }
+            break;
+        case BLK_CAB:
+            ir_block_process(&s->cab[b], buf, n);
+            break;
+        case BLK_FX:
+            if (s->fx[b].line && s->fx[b].rv) {
+                s->fx[b].bpm = bpm;
+                fx_block_process(&s->fx[b], buf, s->side, n);
+            }
+            break;
+        default: break;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &b1);
+    double us = (b1.tv_sec - b0.tv_sec) * 1e6 + (b1.tv_nsec - b0.tv_nsec) / 1e3;
+    double decayed = s->us_peak[b] * CPU_PEAK_DECAY;
+    s->us_peak[b] = (us > decayed) ? us : decayed;
+}
+
 static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
     a2c_t *s = (a2c_t *)instance;
     if (!s || !audio_inout) return;
@@ -579,58 +654,34 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
      * callback at all leaves this 0 and fx_time_ms falls back itself. */
     const float bpm = (g_host && g_host->get_bpm) ? g_host->get_bpm() : 0.0f;
 
-    /* A SPLIT PAST THE LAST BLOCK IS NO SPLIT. Clamped here rather than
-     * at the setter so a board saved with eight blocks and a split at 8
-     * cannot leave a lane that nothing ever writes. */
-    const int split_at = (s->split_at > 0 && s->split_at <= NUM_BLOCKS) ? s->split_at : 0;
-    int split = 0;
+    /* THE FORK IS READ OFF THE BOARD, not out of a setting. */
+    const int fork  = fork_col(s);
+    const int split = (fork >= 0);
+    const int head  = split ? fork : NUM_COLS;
 
-    for (int b = 0; b < NUM_BLOCKS; b++) {
-        if (split_at && b == split_at - 1) {
-            memcpy(s->laneA, s->mono, sizeof(float) * (size_t)n);
-            memcpy(s->laneB, s->mono, sizeof(float) * (size_t)n);
-            split = 1;
-        }
-        float *buf = split ? (s->lane[b] ? s->laneB : s->laneA) : s->mono;
+    /* THREE RUNS, IN SIGNAL ORDER: the common head, then each lane.
+     *
+     * Written as three loops rather than one walk over sixteen slots
+     * because the order they must run in is not the order they are stored
+     * in - the whole top row would otherwise be processed before the
+     * bottom row had started, and the head would feed nothing. */
+    for (int c = 0; c < head; c++)
+        run_block(s, SLOT(ROW_MAIN, c), s->mono, n, bpm);
 
-        int t = s->type[b];
-        if (t == BLK_OFF) { s->us_peak[b] = 0.0; continue; }
-
-        /* Adopt a finished load even while bypassed: coming off bypass
-         * should not then wait for a model that has been ready for a
-         * minute. */
-        if (t == BLK_NAM) nam_block_adopt_pending(&s->amp[b]);
-
-        if (!s->on[b]) { s->us_peak[b] *= CPU_PEAK_DECAY; continue; }
-
-        struct timespec b0, b1;
-        clock_gettime(CLOCK_MONOTONIC, &b0);
-        switch (t) {
-            case BLK_NAM:
-                if (s->amp[b].model) {
-                    const float mg = s->amp[b].in_gain;
-                    for (int i = 0; i < n; i++) buf[i] *= mg;
-                    nam_block_process(&s->amp[b], buf, s->scratch, n);
-                    const float mo = s->amp[b].out_gain;
-                    for (int i = 0; i < n; i++) buf[i] *= mo;
-                }
-                break;
-            case BLK_CAB:
-                ir_block_process(&s->cab[b], buf, n);
-                break;
-            case BLK_FX:
-                if (s->fx[b].line && s->fx[b].rv) {
-                    s->fx[b].bpm = bpm;
-                    fx_block_process(&s->fx[b], buf, s->side, n);
-                }
-                break;
-            default: break;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &b1);
-        double us = (b1.tv_sec - b0.tv_sec) * 1e6 + (b1.tv_nsec - b0.tv_nsec) / 1e3;
-        double decayed = s->us_peak[b] * CPU_PEAK_DECAY;
-        s->us_peak[b] = (us > decayed) ? us : decayed;
+    if (split) {
+        memcpy(s->laneA, s->mono, sizeof(float) * (size_t)n);
+        memcpy(s->laneB, s->mono, sizeof(float) * (size_t)n);
+        for (int c = fork; c < NUM_COLS; c++)
+            run_block(s, SLOT(ROW_BR,   c), s->laneA, n, bpm);
+        for (int c = fork; c < NUM_COLS; c++)
+            run_block(s, SLOT(ROW_MAIN, c), s->laneB, n, bpm);
     }
+
+    /* A SLOT NOTHING REACHED COSTS NOTHING, AND MUST SAY SO. Leaving the
+     * held peak where it was leaves the CPU page attributing time to a
+     * block that is not in the signal path at all - which reads as the
+     * budget being wrong rather than as the board being mono. */
+    for (int c = 0; c < head; c++) s->us_peak[SLOT(ROW_BR, c)] = 0.0;
 
     const float og = s->out_gain;
     /* EQUAL POWER, so sweeping a lane across the field does not make it
@@ -693,14 +744,23 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
 
 /* ------------------------------------------------------------------ params */
 
-/* `b<N>_<key>`, the shape `child_key_template` in the hierarchy resolves to.
- * Returns the block index, or -1 when the key is not a block key. */
+/* `b<N>_<key>` (bottom row) or `t<N>_<key>` (top row), the shape
+ * `child_key_template` in the hierarchy resolves to. Returns the SLOT
+ * index, or -1 when the key is not a block key.
+ *
+ * A ROW LETTER RATHER THAN b1..b16, so the column stays ONE DIGIT. The
+ * parse is `key[1] - '1'` and a two-digit form would have had to grow a
+ * second branch that every caller reaches through this one function - the
+ * sort of change that works for b1..b9 and reads b16 as b1. */
 static int block_key(const char *key, const char **rest) {
-    if (key[0] != 'b') return -1;
-    if (key[1] < '1' || key[1] > '0' + NUM_BLOCKS) return -1;
+    int row;
+    if      (key[0] == 'b') row = ROW_MAIN;
+    else if (key[0] == 't') row = ROW_BR;
+    else return -1;
+    if (key[1] < '1' || key[1] > '0' + NUM_COLS) return -1;
     if (key[2] != '_') return -1;
     *rest = key + 3;
-    return key[1] - '1';
+    return SLOT(row, key[1] - '1');
 }
 
 static void v2_set_param(void *instance, const char *key, const char *val) {
@@ -748,7 +808,10 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                 fx_block_reset(&s->fx[b]);
             }
         } else if (strcmp(sub, "lane") == 0) {
-            s->lane[b] = (atoi(val) != 0) ? 1 : 0;
+            /* A SLOT'S LANE IS ITS ROW NOW. Accepted and dropped rather
+             * than refused, so a board saved by 0.8.5 still loads - the
+             * types carry the shape and this carried nothing else. */
+            (void)val;
         } else if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0) {
             s->fx[b].p[sub[1] - '1'] = clampf(atof(val), 0.0f, 1.0f);
         }
@@ -763,7 +826,9 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         s->out_gain = knob_to_gain(s->out_level);
     } else if (strcmp(key, "split") == 0) {
         int v = atoi(val);
-        s->split_at = (v < 0) ? 0 : (v > NUM_BLOCKS) ? NUM_BLOCKS : v;
+        /* Derived from the board now; kept settable so an older state
+         * blob loads without an error for every key in it. */
+        (void)v;
     } else if (strcmp(key, "pan_a") == 0) {
         s->pan_a = clampf(atof(val), -1.0f, 1.0f);
     } else if (strcmp(key, "pan_b") == 0) {
@@ -818,7 +883,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         if (strcmp(sub, "fx") == 0)      return snprintf(buf, buf_len, "%d", s->fx[b].id);
         if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0)
             return snprintf(buf, buf_len, "%.4f", s->fx[b].p[sub[1] - '1']);
-        if (strcmp(sub, "lane") == 0)    return snprintf(buf, buf_len, "%d", s->lane[b]);
+        if (strcmp(sub, "lane") == 0)
+            return snprintf(buf, buf_len, "%d", (b < NUM_COLS) ? 0 : 1);
         if (strcmp(sub, "cpu") == 0) {
             double pct = 100.0 * s->us_peak[b] / FRAME_BUDGET_US;
             return snprintf(buf, buf_len, "%d", (int)(clampf(pct, 0.0f, 100.0f) + 0.5f));
@@ -828,7 +894,9 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
 
     if (strcmp(key, "in_level") == 0)  return snprintf(buf, buf_len, "%.4f", s->in_level);
     if (strcmp(key, "out_level") == 0) return snprintf(buf, buf_len, "%.4f", s->out_level);
-    if (strcmp(key, "split") == 0)  return snprintf(buf, buf_len, "%d", s->split_at);
+    /* The fork as a 1-based COLUMN, 0 for a mono board - the same shape
+     * the setting had, so every reader of it still reads. */
+    if (strcmp(key, "split") == 0)  return snprintf(buf, buf_len, "%d", fork_col(s) + 1);
     if (strcmp(key, "pan_a") == 0)  return snprintf(buf, buf_len, "%.4f", s->pan_a);
     if (strcmp(key, "pan_b") == 0)  return snprintf(buf, buf_len, "%.4f", s->pan_b);
     if (strcmp(key, "sel_block") == 0) return snprintf(buf, buf_len, "%d", s->sel_block);
@@ -888,14 +956,14 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "state") == 0) {
         int w = 0;
         w += snprintf(buf + w, buf_len - w,
-                      "{\"in_level\":%.4f,\"out_level\":%.4f,\"split\":%d,"
+                      "{\"in_level\":%.4f,\"out_level\":%.4f,\"rows\":%d,"
                       "\"pan_a\":%.4f,\"pan_b\":%.4f,\"blocks\":[",
-                      s->in_level, s->out_level, s->split_at, s->pan_a, s->pan_b);
+                      s->in_level, s->out_level, NUM_ROWS, s->pan_a, s->pan_b);
         for (int i = 0; i < NUM_BLOCKS && w < buf_len - 256; i++) {
             w += snprintf(buf + w, buf_len - w,
-                "%s{\"type\":%d,\"on\":%d,\"lane\":%d,\"model\":%d,\"quality\":%d,\"cab\":%d,"
+                "%s{\"type\":%d,\"on\":%d,\"model\":%d,\"quality\":%d,\"cab\":%d,"
                 "\"fx\":%d,\"p\":[%.4f,%.4f,%.4f,%.4f,%.4f]}",
-                i ? "," : "", s->type[i], s->on[i], s->lane[i],
+                i ? "," : "", s->type[i], s->on[i],
                 s->amp[i].index, s->amp[i].quality, s->cab[i].index,
                 s->fx[i].id,
                 s->fx[i].p[0], s->fx[i].p[1], s->fx[i].p[2],
@@ -1016,32 +1084,37 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * four builds. */
         const int per_block = (int)(strlen(models) * 1 + strlen(cabs) * 1 +
                                     strlen(fxopts) + 1024);
-        for (int i = 1; i <= NUM_BLOCKS && w + per_block < buf_len; i++) {
+        /* BOTH ROWS, AND THE ROW LETTER IS A PARAMETER. Emitting only
+         * `b` left every top-row key undeclared, which is not an error
+         * anywhere - the write lands, the read answers, and the host's
+         * own metadata simply has nothing for it. */
+        for (int r = 0; r < NUM_ROWS; r++) {
+        const char rl = (r == ROW_BR) ? 't' : 'b';
+        for (int i = 1; i <= NUM_COLS && w + per_block < buf_len; i++) {
             w += snprintf(buf + w, buf_len - w,
-                ",{\"key\":\"b%d_type\",\"name\":\"Type\",\"type\":\"enum\","
+                ",{\"key\":\"%c%d_type\",\"name\":\"Type\",\"type\":\"enum\","
                   "\"options\":[\"Off\",\"NAM\",\"Cab\",\"FX\"],\"default\":0}"
-                ",{\"key\":\"b%d_on\",\"name\":\"On\",\"type\":\"enum\","
+                ",{\"key\":\"%c%d_on\",\"name\":\"On\",\"type\":\"enum\","
                   "\"options\":[\"On\",\"Bypass\"],\"default\":0}"
-                ",{\"key\":\"b%d_lane\",\"name\":\"Lane\",\"type\":\"enum\","
-                  "\"options\":[\"L\",\"R\"],\"default\":0}"
-                ",{\"key\":\"b%d_model\",\"name\":\"Model\",\"type\":\"enum\","
+                ",{\"key\":\"%c%d_model\",\"name\":\"Model\",\"type\":\"enum\","
                   "\"options\":%s,\"default\":0}"
-                ",{\"key\":\"b%d_quality\",\"name\":\"Qual\",\"type\":\"enum\","
+                ",{\"key\":\"%c%d_quality\",\"name\":\"Qual\",\"type\":\"enum\","
                   "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0}"
-                ",{\"key\":\"b%d_cab\",\"name\":\"Cab\",\"type\":\"enum\","
+                ",{\"key\":\"%c%d_cab\",\"name\":\"Cab\",\"type\":\"enum\","
                   "\"options\":%s,\"default\":0}"
-                ",{\"key\":\"b%d_fx\",\"name\":\"Pedal\",\"type\":\"enum\","
+                ",{\"key\":\"%c%d_fx\",\"name\":\"Pedal\",\"type\":\"enum\","
                   "\"options\":%s,\"default\":0}",
-                i, i, i, i, models, i, i, cabs, i, fxopts);
+                rl, i, rl, i, rl, i, models, rl, i, rl, i, cabs, rl, i, fxopts);
             for (int k = 1; k <= FX_PARAMS; k++)
                 w += snprintf(buf + w, buf_len - w,
-                    ",{\"key\":\"b%d_p%d\",\"name\":\"P%d\",\"type\":\"float\","
+                    ",{\"key\":\"%c%d_p%d\",\"name\":\"P%d\",\"type\":\"float\","
                       "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01}",
-                    i, k, k);
+                    rl, i, k, k);
             w += snprintf(buf + w, buf_len - w,
-                ",{\"key\":\"b%d_cpu\",\"name\":\"CPU\",\"type\":\"int\","
+                ",{\"key\":\"%c%d_cpu\",\"name\":\"CPU\",\"type\":\"int\","
                   "\"min\":0,\"max\":100,\"default\":0,\"step\":1,\"unit\":\"%%\","
-                  "\"access\":\"read\",\"live\":true}", i);
+                  "\"access\":\"read\",\"live\":true}", rl, i);
+        }
         }
         w += snprintf(buf + w, buf_len - w, "]");
         return w;

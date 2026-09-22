@@ -287,18 +287,25 @@ int main(int argc, char **argv) {
      * pass every smoke test and sound almost right.
      */
     {
-        for (int b = 1; b <= 8; b++) { char k[16]; snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0"); }
+        /* BOTH ROWS CLEARED. The fork is derived from the top row, so a
+         * stale block up there from an earlier case is a fork this case
+         * never asked for - and the lanes would be right for the wrong
+         * reason. */
+        for (int b = 1; b <= 8; b++) {
+            char k[16];
+            snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0");
+            snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
+        }
         api->set_param(in, "b1_type", "3");
-        api->set_param(in, "b1_fx", "19");        /* EQ, flat */
+        api->set_param(in, "b1_fx", "19");        /* EQ, flat - the shared head */
+        /* The fork is HERE: column 2 of the top row is the first thing on
+         * the branch, so nothing has to say "split at 2". */
+        api->set_param(in, "t2_type", "3");
+        api->set_param(in, "t2_fx", "12");        /* Boost, on the top rail */
+        api->set_param(in, "t2_p1", "0.6");
         api->set_param(in, "b2_type", "3");
-        api->set_param(in, "b2_fx", "12");        /* Boost, on the left  */
-        api->set_param(in, "b3_type", "3");
-        api->set_param(in, "b3_fx", "17");        /* Star Gate, on the right */
-        api->set_param(in, "b3_p1", "1.0");       /* wide open, so it passes */
-        api->set_param(in, "b2_p1", "0.6");
-        api->set_param(in, "split", "2");
-        api->set_param(in, "b2_lane", "0");
-        api->set_param(in, "b3_lane", "1");
+        api->set_param(in, "b2_fx", "17");        /* Star Gate, on the bottom */
+        api->set_param(in, "b2_p1", "1.0");       /* wide open, so it passes */
         api->set_param(in, "pan_a", "-1.0");
         api->set_param(in, "pan_b", "1.0");
 
@@ -348,7 +355,56 @@ int main(int argc, char **argv) {
         if (sqrt(r2 / 19200) > 0.002) {
             printf("   <-- the pan does not reach the output\n"); fails++;
         }
-        api->set_param(in, "split", "0");
+
+        /* EIGHT COLUMNS ON EACH SIDE, WHICH IS THE WHOLE POINT.
+         *
+         * The split used to be carved out of one row of eight, so forking
+         * at column 1 left SEVEN slots to share. Fork at column 1 here
+         * and load column EIGHT of the top row: if that slot is reached
+         * at all, each lane still has its full eight.
+         *
+         * Proved by CUTTING one lane from its last column - an EQ with
+         * every band at -12 dB - and asking whether the channel it is
+         * panned to dropped. A slot that is not in the path cannot do
+         * that. A cut rather than a boost because a boost would run into
+         * the output clamp, and a clamped channel is loud for a reason
+         * that has nothing to do with routing. */
+        api->set_param(in, "pan_a", "-1.0");
+        api->set_param(in, "pan_b", "1.0");
+        api->set_param(in, "t1_type", "3");
+        api->set_param(in, "t1_fx", "19");        /* EQ, flat: forks at col 1 */
+        api->set_param(in, "t8_type", "3");
+        api->set_param(in, "t8_fx", "19");        /* EQ ... */
+        api->set_param(in, "t8_p1", "0.0");       /* ... all three bands */
+        api->set_param(in, "t8_p2", "0.0");       /*     at -12 dB       */
+        api->set_param(in, "t8_p3", "0.0");
+        api->set_param(in, "t2_type", "0");
+        double el = 0, er = 0;
+        for (int blk = 0; blk < 300; blk++) {
+            for (int i = 0; i < 128; i++) {
+                double t = (blk * 128.0 + i) / 44100.0;
+                a[i * 2] = a[i * 2 + 1] =
+                    (int16_t)(0.30 * sin(2 * M_PI * 220.0 * t) * 20000);
+            }
+            api->process_block(in, a, 128);
+            if (blk < 100) continue;
+            for (int i = 0; i < 128; i++) {
+                el += (a[i * 2] / 32768.0) * (a[i * 2] / 32768.0);
+                er += (a[i * 2 + 1] / 32768.0) * (a[i * 2 + 1] / 32768.0);
+            }
+        }
+        printf("split: column 8 of the branch  L %.5f  R %.5f\n",
+               sqrt(el / 25600), sqrt(er / 25600));
+        if (!(sqrt(er / 25600) > 0.01)) {
+            printf("   <-- the main lane went quiet too\n"); fails++;
+        }
+        if (!(sqrt(el / 25600) < sqrt(er / 25600) * 0.6)) {
+            printf("   <-- the branch's 8th column is not in the path\n"); fails++;
+        }
+
+        for (int b = 1; b <= 8; b++) {
+            char k[16]; snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
+        }
     }
 
     api->destroy_instance(in);
