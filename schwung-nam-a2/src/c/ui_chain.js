@@ -633,6 +633,24 @@ function pright(xr, y, t, ink, w) {
 /* The layout, in one place, so a change to one band cannot silently land on
  * top of another. */
 const BOX_Y = 12, BOX_H = 18, BOX_W = 15, BOX_GAP = 1;   /* 8*15 + 7*1 = 127 */
+/*
+ * A SPLIT BLOCK MOVES; IT DOES NOT WEAR A LABEL.
+ *
+ * The lane was a letter inside a 15 px box and a one-pixel rail above or
+ * below the row. Both are true and neither is legible at arm's length -
+ * reported from the device as not being able to tell which side is being
+ * edited, and the same report said the whole row was uncomfortable to look
+ * at. It is: three facts (what, how much, which side) crammed into one
+ * cell, two of them as single characters.
+ *
+ * So the row becomes TWO rows once the board is split. A block on the left
+ * lane sits up, one on the right sits down, and the fork is the shape of
+ * the picture rather than something drawn on top of it. Nothing has to be
+ * read to see which side a block is on, which is the whole difference
+ * between a label and a diagram.
+ */
+const LANE_H = 9;                                        /* 12..20, 21..29  */
+const LANE_Y = [BOX_Y, BOX_Y + LANE_H];
 const SELBAR_Y = 31;                                     /* 31..32          */
 const CELL_Y = 34, CELL_H = 18, CELL_W = 31;             /* 4 * 32 = 128    */
 /* THE BAR SITS BELOW THE CELL'S HIGHLIGHT, NOT INSIDE IT. The selected
@@ -737,56 +755,57 @@ function drawHeader() {
         pright(126, 1, cpu, 1, cw);
     }
     drawMeter();
-    /* What is selected and what it is - the one line worth reading first. */
+    /* WHAT IS SELECTED, WHAT IT IS, AND WHICH SIDE - the one line worth
+     * reading first, and the side belongs in it. The row a box sits in
+     * says which lane it is on; this says which lane YOU are on, which is
+     * a different question and the one that was going unanswered. */
     const what = blockLabel(sel);
-    ptext(1, 1, 'B' + (sel + 1) + (what ? ' ' + what : ' --'), 1, MET_X - 3);
+    const side = (st.split > 0 && sel >= st.split - 1)
+                 ? (st.lane[sel] ? ' R' : ' L') : '';
+    ptext(1, 1, 'B' + (sel + 1) + side + (what ? ' ' + what : ' --'),
+          1, MET_X - 3);
     fill_rect(0, 10, 128, 1, 1);
 }
 
 function drawBoxes() {
+    const split = st.split > 0 ? st.split - 1 : -1;
+
     for (let b = 0; b < NUM_BLOCKS; b++) {
         const x = b * (BOX_W + BOX_GAP);
         const t = st.type[b];
         const live = t !== TYPE_OFF && st.on[b];
+        const forked = split >= 0 && b >= split;
 
-        if (live) fill_rect(x, BOX_Y, BOX_W, BOX_H, 1);
-        else      draw_rect(x, BOX_Y, BOX_W, BOX_H, 1);
+        const y = forked ? LANE_Y[st.lane[b] ? 1 : 0] : BOX_Y;
+        const h = forked ? LANE_H : BOX_H;
+
+        if (live) fill_rect(x, y, BOX_W, h, 1);
+        else      draw_rect(x, y, BOX_W, h, 1);
         const ink = live ? 0 : 1;
 
         if (t === TYPE_OFF) {
-            pcenter(x, BOX_W, BOX_Y + 6, '-', ink);
+            pcenter(x, BOX_W, y + (forked ? 1 : 6), '-', ink);
+        } else if (forked) {
+            /* One line, because the side is the ROW now and the cost has
+             * the header. Bypass keeps its letter: it is the one state
+             * that silences a block, and it is what the last report was
+             * actually looking at without seeing. */
+            pcenter(x, BOX_W, y + 1, st.on[b] ? blockLabel(b) : 'BYP', ink);
         } else {
             pcenter(x, BOX_W, BOX_Y + 2, blockLabel(b), ink);
-            /* A block that is switched off says so; one that is on shows
-             * what it costs, or which SIDE it is on once the board is
-             * split. Empty, bypassed and left-hand have to be tellable
-             * apart - that is most of what the picture is for.
-             *
-             * The side displaces the cost rather than sharing the row:
-             * "L12" clips to "L1" in fifteen pixels, and a number that
-             * might be cut in half is worse than no number. The total is
-             * in the header and the per-block figure is on the grid. */
-            const inSplit = st.split > 0 && b >= st.split - 1;
             pcenter(x, BOX_W, BOX_Y + 10,
-                    !st.on[b] ? 'B'
-                    : inSplit ? (st.lane[b] ? 'R' : 'L')
-                    : String(Math.round(st.blockCpu[b])), ink);
+                    st.on[b] ? String(Math.round(st.blockCpu[b])) : 'BYP', ink);
         }
 
-        /* THE SPLIT IS DRAWN WHERE MOVE DRAWS IT: a rail above the row for
-         * the left lane, below it for the right, and a vertical drop at
-         * the block where the two part company. Two rows of pixels that
-         * were empty, and it turns "L" and "R" from labels you read into a
-         * shape you see. */
-        if (st.split > 0 && b >= st.split - 1) {
-            const railY = st.lane[b] ? BOX_Y + BOX_H : BOX_Y - 2;
-            fill_rect(x, railY, BOX_W + BOX_GAP, 1, 1);
-            if (b === st.split - 1)
-                fill_rect(x, BOX_Y - 2, 1, BOX_H + 3, 1);
-        }
+        /* The fork itself: one vertical at the block where the lanes part,
+         * so the eye is told where to start reading two rows instead of
+         * one. */
+        if (b === split) fill_rect(x === 0 ? 0 : x - 1, BOX_Y, 1, BOX_H, 1);
 
-        /* Selection is a bar UNDER the box, not a border around it: a border
-         * needs a pixel on each side and there is not one to spare. */
+        /* Selection is a bar UNDER the column, not a border around the
+         * box: a border needs a pixel on each side and there is not one to
+         * spare, and under the COLUMN it means the same thing whichever
+         * row the block has moved to. */
         if (b === sel) fill_rect(x, SELBAR_Y, BOX_W, 2, 1);
     }
 }
@@ -991,12 +1010,12 @@ function routeTap(b) {
         st.split = b + 1;
         st.val['split'] = st.split;
         setp('split', st.split);
-        flash('Split at ' + st.split);
+        flash('Split at B' + st.split);
         return;
     }
     st.lane[b] = st.lane[b] ? 0 : 1;
     setp('b' + (b + 1) + '_lane', st.lane[b]);
-    flash('B' + (b + 1) + ' -> ' + (st.lane[b] ? 'R' : 'L'));
+    flash('B' + (b + 1) + ' -> ' + (st.lane[b] ? 'RIGHT' : 'LEFT'));
 }
 
 /* Rejoin, from any pad. One gesture that always means the same thing and
@@ -1007,12 +1026,23 @@ function routeHold(b) {
     st.split = 0;
     st.val['split'] = 0;
     setp('split', 0);
-    flash('No split');
+    flash('Rejoined');
 }
 
+/*
+ * A STOMP SAYS WHICH WAY IT WENT.
+ *
+ * A session was spent on "there is no sound, the amp is dead" with the
+ * board's only loaded block bypassed - the log said so plainly and the
+ * screen said it with the single letter B inside a fifteen-pixel box,
+ * next to a number that is also one or two characters. The thing that
+ * silences a block should not be the most easily missed thing on the
+ * panel.
+ */
 function stomp(b) {
     const nowOn = st.on[b];
     st.on[b] = nowOn ? 0 : 1;
+    flash('B' + (b + 1) + (st.on[b] ? ' ON' : ' BYPASS'));
     /* Written through rather than waiting for the rotation to notice: the
      * pad has to answer under the finger. */
     setp('b' + (b + 1) + '_on', st.on[b] ? 0 : 1);
@@ -1020,6 +1050,10 @@ function stomp(b) {
 
 function select(b) {
     sel = b;
+    /* The header carries this too, but the header is where it ALWAYS is -
+     * which makes it a state and not an answer to "did that hold take".
+     * Same reasoning as the routing messages. */
+    flash('Edit B' + (b + 1) + (blockLabel(b) ? ' ' + blockLabel(b) : ''));
     setp('sel_block', b);
     readSelected();
 }

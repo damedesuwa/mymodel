@@ -89,6 +89,19 @@ const fn = new Function('globalThis', 'leds', 'buttonLeds', ...names,
     stubs + src + '\nreturn globalThis.chain_ui;');
 const ui = fn({}, leds, buttonLeds, ...names.map(n => host[n]));
 
+/* ONE CLOCK, SKEWED, FOR THE WHOLE FILE.
+ *
+ * Two tests used to override Date.now locally to fire a pad hold, and the
+ * rest advanced a shared skew. That leaves timestamps recorded against one
+ * clock being compared with another: a 1.1 second message set at
+ * real+2100 outlived a check made at real+2050, and the failure landed on
+ * an unrelated assertion about the footer. One monotonic clock, advanced
+ * in one way, or the timing in these tests is not testing anything. */
+let clockSkew = 0;
+const realClock = Date.now;
+Date.now = () => realClock() + clockSkew;
+const advance = (ms) => { clockSkew += ms; };
+
 /* --- drive it ---------------------------------------------------------- */
 let fails = 0;
 const ok = (cond, what) => { console.log((cond ? 'ok   ' : 'FAIL ') + what); if (!cond) fails++; };
@@ -113,10 +126,8 @@ ok(writes.some(([k, v]) => k === 'b1_on' && v === '1'), 'pad tap bypasses the bl
 /* A pad HOLD selects. */
 writes.length = 0;
 ui.onMidiMessageInternal([0x90, 70, 127]);
-const realNow = Date.now;
-Date.now = () => realNow() + 1000;          /* past HOLD_MS */
+advance(1000);                              /* past HOLD_MS */
 ui.tick();
-Date.now = realNow;
 ok(writes.some(([k, v]) => k === 'sel_block' && v === '2'), 'pad hold selects the block');
 ui.onMidiMessageInternal([0x80, 70, 0]);
 
@@ -157,7 +168,7 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     /* Block 4 is Off; make it an FX block with knob 1. */
     writes.length = 0;
     ui.onMidiMessageInternal([0x90, 71, 127]);       /* hold pad 4 */
-    const rn = Date.now; Date.now = () => rn() + 1000; ui.tick(); Date.now = rn;
+    advance(1000); ui.tick();
     ui.onMidiMessageInternal([0x80, 71, 0]);
     ok(writes.some(([k, v]) => k === 'sel_block' && v === '3'), 'tree: pad 4 selected');
 
@@ -174,11 +185,8 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     /* draw() is throttled to 33 ms, so a burst of ticks in one millisecond
      * paints ONCE and every capture after it comes back empty - which
      * reads as "the feature draws nothing". Move the clock instead. */
-    let clockSkew = 0;
-    const realNow2 = Date.now;
-    Date.now = () => realNow2() + clockSkew;
     const repaint = (n = 1) => {
-        for (let i = 0; i < n; i++) { clockSkew += 50; ui.tick(); }
+        for (let i = 0; i < n; i++) { advance(50); ui.tick(); }
     };
     /* Off NAM Cab OD Dist Fuzz Boost Dyn Filter Mod Time Pitch */
     const CAT = { OFF:0, NAM:1, CAB:2, OD:3, DIST:4, FUZZ:5, BOOST:6,
@@ -281,7 +289,12 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
        'delay: and it now draws a division');
 
     /* THE FOOTER SAYS WHERE YOU ARE. Forty pedals behind two knobs is a
-     * place you can be lost in. */
+     * place you can be lost in.
+     *
+     * Past any flash first: a routing or stomp message owns this line
+     * while it is fresh, which is the whole point of it. */
+    advance(2000);
+    drawn.length = 0; repaint();
     ok(drawn.some(t => String(t) === 'Digital Dly  Time 1/8'),
        'footer: names the pedal, its family and its place in it');
 
@@ -393,7 +406,7 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     };
     const holdR = (n) => {
         ui.onMidiMessageInternal([0x90, R(n), 127]);
-        clockSkew += 1000; ui.tick();
+        advance(1000); ui.tick();
         ui.onMidiMessageInternal([0x80, R(n), 0]);
     };
 
@@ -451,7 +464,7 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(writes.some(([k]) => k === 'b1_on'), 'blocks: a tap still stomps');
     writes.length = 0;
     ui.onMidiMessageInternal([0x90, 74, 127]);
-    clockSkew += 1000; ui.tick();
+    advance(1000); ui.tick();
     ui.onMidiMessageInternal([0x80, 74, 0]);
     ok(writes.some(([k, v]) => k === 'sel_block' && v === '6'),
        'blocks: a hold still selects it for editing');
@@ -461,37 +474,70 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
      * is the question being asked while you change it. */
     tapR(2);
     drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => d[2] === 'Split at 3'), 'route: a split says itself');
+    ok(drawnAt.some(d => d[2] === 'Split at B3'), 'route: a split says itself');
     tapR(6);
     drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => /^B7 -> [LR]$/.test(d[2])), 'route: so does a flip');
-    clockSkew += 2000;
+    ok(drawnAt.some(d => /^B7 -> (LEFT|RIGHT)$/.test(d[2])), 'route: so does a flip');
+    advance(2000);
     drawnAt.length = 0; repaint();
     ok(!drawnAt.some(d => /^(Split at|B7 ->)/.test(d[2])),
        'route: the message is brief, not a mode');
 
-    /* THE PICTURE ON SCREEN. A rail above the row for the left lane,
-     * below for the right, and a drop where they part company - which is
-     * where Move draws it too. */
+    /* A STOMP SAYS WHICH WAY IT WENT. A whole session went to "no sound,
+     * the amp is dead" with the board's only loaded block bypassed - the
+     * screen said so with one letter in a fifteen-pixel box. */
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => /^B1 (ON|BYPASS)$/.test(d[2])),
+       'blocks: a stomp says which way it went');
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => /^B1 (ON|BYPASS)$/.test(d[2])),
+       'blocks: and says the other thing on the way back');
+
+    /* THE PICTURE ON SCREEN: a split block MOVES, it does not wear a
+     * label. The lane used to be a letter in a 15 px box and a one-pixel
+     * rail; both were true and neither was legible, which is what "I
+     * cannot tell which side I am editing" meant. */
+    for (let b = 1; b <= 8; b++) { params[`b${b}_type`] = '3'; params[`b${b}_on`] = '0'; }
     params['b3_lane'] = '0'; params['b4_lane'] = '1'; params['split'] = '3';
     ui.init();
     rects.length = 0; drawnAt.length = 0; repaint();
-    const BOXY = 12, BOXH = 18;
-    ok(rects.some(r => r[0] === 'fill' && r[2] === BOXY - 2 && r[4] === 1 && r[1] === 2 * 16),
-       'split: the left lane gets a rail above its boxes');
-    ok(rects.some(r => r[0] === 'fill' && r[2] === BOXY + BOXH && r[4] === 1 && r[1] === 3 * 16),
-       'split: the right lane gets one below');
-    ok(rects.some(r => r[0] === 'fill' && r[1] === 2 * 16 && r[2] === BOXY - 2 &&
-                       r[3] === 1 && r[4] === BOXH + 3),
-       'split: and they part company with a vertical drop');
-    ok(drawnAt.some(d => d[2] === 'L') && drawnAt.some(d => d[2] === 'R'),
-       'split: each box says which side it is on');
-    /* Width matters in this one: the header's own rule is a 128 px fill on
-     * exactly this row, so a test that only checked x and y would report
-     * the rule as a rail and pass for block 1 forever. */
-    ok(!rects.some(r => r[0] === 'fill' && r[2] === BOXY - 2 && r[4] === 1 &&
-                        r[1] === 0 && r[3] === 16),
-       'split: nothing before it wears a rail');
+    const BOXY = 12, BOXH = 18, LANEH = 9;
+    const boxAt = (col) => rects.find(
+        r => (r[0] === 'fill' || r[0] === 'draw') && r[1] === col * 16 && r[3] === 15);
+
+    ok(boxAt(0) && boxAt(0)[2] === BOXY && boxAt(0)[4] === BOXH,
+       'split: before the fork a block is full height');
+    ok(boxAt(2) && boxAt(2)[2] === BOXY && boxAt(2)[4] === LANEH,
+       'split: a left-lane block sits UP and is half height');
+    ok(boxAt(3) && boxAt(3)[2] === BOXY + LANEH && boxAt(3)[4] === LANEH,
+       'split: a right-lane block sits DOWN');
+    ok(boxAt(2)[2] !== boxAt(3)[2],
+       'split: so the two sides are two ROWS, not two letters');
+    ok(rects.some(r => r[0] === 'fill' && r[2] === BOXY && r[3] === 1 && r[4] === BOXH),
+       'split: and a vertical says where they part company');
+    /* The letter is gone from the box, because the row says it. */
+    ok(!drawnAt.some(d => d[2] === 'L' || d[2] === 'R'),
+       'split: no lane letters left in the boxes');
+
+    /* WHICH SIDE YOU ARE EDITING is a different question from which side
+     * a block is on, and it was the one going unanswered. */
+    ui.onMidiMessageInternal([0x90, 71, 127]);       /* hold pad 4 -> select */
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 71, 0]);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[1] === 1 && /^B4 R/.test(d[2])),
+       'split: the header names the side you are on');
+
+    /* BYPASS IS A WORD NOW. It was the letter B in a 15 px box, which is
+     * what the last no-sound report was looking straight at. */
+    params['b5_on'] = '1';
+    ui.init();
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'BYP'), 'split: a bypassed block says BYP');
 
     /* PAN, in its own units - a position between two names. */
     ui.onMidiMessageInternal([0xb0, 3, 127]);        /* open */

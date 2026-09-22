@@ -30,17 +30,16 @@
       "lines": [
         "The row ABOVE the blocks. Dark",
         "means no split.",
-        "  TAP a DARK pad",
-        "    the board parts there, and",
-        "    everything from there lights",
-        "    dark pink - the signal is",
-        "    now separated.",
-        "  TAP a LIT pad",
-        "    dark pink = left lane",
-        "    full pink = right lane",
-        "  HOLD anywhere  rejoin",
-        "Menu > Pan L / Pan R place them.",
-        "One amp + two cabs is ~110us."
+        "  TAP a DARK pad   part here",
+        "  TAP a LIT pad    other side",
+        "  HOLD anywhere    rejoin",
+        "Once split the boxes move: the",
+        "LEFT lane sits up, the RIGHT",
+        "sits down. You see two paths.",
+        "The header names the block, the",
+        "side you are on, and what it is.",
+        "BYP in a box = bypassed, which",
+        "is why it makes no sound."
       ]
     },
     {
