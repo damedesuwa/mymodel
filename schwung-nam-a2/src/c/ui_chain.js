@@ -22,6 +22,21 @@ import { setLED, setButtonLED, decodeDelta, invalidateLedCache } from '/data/Use
 
 const NUM_BLOCKS = 8;
 const PAD_BASE = 68;            /* bottom row, notes 68..75 */
+/*
+ * THE ROW ABOVE THE BLOCKS IS THE ROUTING ROW.
+ *
+ * The split started life on the menu, which is three gestures away from a
+ * thing you want to try and undo while listening - reported from the
+ * device as simply not working well, and the suggestion that came with it
+ * is the right one: press the pad ABOVE a block and the board parts there.
+ *
+ * It is the same picture as the screen. The rail is drawn above the boxes
+ * for the left lane and below for the right, and now the pads above the
+ * blocks carry the same information under your fingers.
+ */
+const ROUTE_BASE = 76;          /* second row, notes 76..83 */
+const LANE_LED = [16, 23];      /* AzureBlue for L, NeonPink for R */
+const LANE_LED_DIM = [95, 109];
 const HOLD_MS = 350;
 
 const CC_KNOB_BASE = 71;        /* knobs 1..8 are CC 71..78 */
@@ -530,7 +545,18 @@ function knobList() { return padToBoard(knobsFor(st.type[sel], st.fx[sel])); }
 
 function readSelected() {
     for (const s of knobList()) {
-        if (s.kind === 'gap') continue;
+        /* A DERIVED CONTROL IS NOT A PARAMETER, and asking for one costs
+         * a give-up every time.
+         *
+         * The Block knob reads `cat`, which the plugin does not serve and
+         * never could - the category is computed from `type` and `fx`,
+         * which it DOES serve. Asking for `b4_cat` got -1, which the wire
+         * calls "the read did not complete", so the host retried it and
+         * then logged `param_giveup ... last_key=fx1:b4_cat`, over and
+         * over, on every block change. Not audible, not harmless: those
+         * are real IPC round trips on a 2.8 ms channel, spent on a key
+         * that cannot answer. */
+        if (s.kind === 'gap' || s.kind === 'cat') continue;
         const k = fullKey(s);
         const v = getp(k);
         if (v !== null && v !== '') st.val[k] = Number(v);
@@ -893,24 +919,50 @@ function paintLeds() {
             c = (st.type[b] === TYPE_OFF) ? 0 : (st.on[b] ? led[0] : led[1]);
         }
         setLED(PAD_BASE + b, c);
+
+        /* THE ROUTING ROW SHOWS WHAT IT DOES. A dark pad sets the split, a
+         * white one is the split, and a coloured one is a lane you can
+         * flip - so every pad's colour IS its instruction. */
+        let rc = 0;
+        if (st.split > 0) {
+            if (b === st.split - 1) rc = White;
+            else if (b > st.split - 1)
+                rc = st.on[b] && st.type[b] !== TYPE_OFF
+                     ? LANE_LED[st.lane[b]] : LANE_LED_DIM[st.lane[b]];
+        }
+        setLED(ROUTE_BASE + b, rc);
     }
 }
 
 /* ----------------------------------------------------------------- input */
 
-/* SHIFT + PAD MOVES A BLOCK ACROSS, and it costs no encoder.
+/*
+ * ONE PAD, THREE UNAMBIGUOUS ANSWERS - and which one you get is whatever
+ * the pad under your finger is already showing.
  *
- * The lane is a rare, deliberate edit on a block you are already pointing
- * at with your foot - the same gesture as a stomp with a modifier, which
- * is how every other surface on this device spells "the other meaning of
- * this button". The alternative was a ninth knob on an instrument with
- * eight. */
-function flipLane(b) {
-    if (st.split <= 0 || b < st.split - 1) return false;
-    st.lane[b] = st.lane[b] ? 0 : 1;
-    setp('b' + (b + 1) + '_lane', st.lane[b]);
+ *   dark, or left of the split   ->  the split starts here
+ *   the split marker itself      ->  no split
+ *   right of the split           ->  this block changes sides
+ *
+ * Nothing about that is modal: the lit pads to the right of the marker ARE
+ * the lanes, so tapping one moving it is the only thing it could mean.
+ * Moving the marker rightward is the one case the rule cannot express, so
+ * Shift forces "split here" wherever you press it.
+ */
+function routePad(b, forceSplit) {
+    if (forceSplit || st.split <= 0 || b < st.split - 1) {
+        st.split = b + 1;
+    } else if (b === st.split - 1) {
+        st.split = 0;
+    } else {
+        st.lane[b] = st.lane[b] ? 0 : 1;
+        setp('b' + (b + 1) + '_lane', st.lane[b]);
+        lastPaint = 0;
+        return;
+    }
+    st.val['split'] = st.split;
+    setp('split', st.split);
     lastPaint = 0;
-    return true;
 }
 
 function stomp(b) {
@@ -1183,6 +1235,15 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
             return;
         }
 
+        /* The routing row acts on the PRESS: it changes nothing you can
+         * play, so waiting for the release would only make it feel slow.
+         * The block row waits, because there a press is the start of a
+         * hold and a hold means something else. */
+        if (d1 >= ROUTE_BASE && d1 < ROUTE_BASE + NUM_BLOCKS) {
+            if (status === 0x90 && d2 > 0) routePad(d1 - ROUTE_BASE, shiftHeld);
+            return;
+        }
+
         if (d1 < PAD_BASE || d1 >= PAD_BASE + NUM_BLOCKS) return;
         const b = d1 - PAD_BASE;
 
@@ -1190,13 +1251,12 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
             padDownAt[b] = Date.now();
             padHandled[b] = false;
         } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
-            /* Shift is read at the RELEASE, where the decision is made.
-             * Reading it at the press and remembering would mean a shift
-             * let go mid-tap still counted - and Shift is usually let go
-             * before the thing it modifies. */
-            if (padDownAt[b] && !padHandled[b]) {
-                if (!(shiftHeld && flipLane(b))) stomp(b);
-            }
+            /* A block pad stomps, full stop. Shift used to move it
+             * between lanes here as well, which was one gesture doing two
+             * jobs and an undocumented second way to do what the routing
+             * row above now does under your finger, next to the pad that
+             * shows the answer. */
+            if (padDownAt[b] && !padHandled[b]) stomp(b);
             padDownAt[b] = 0;
             padHandled[b] = false;
         }

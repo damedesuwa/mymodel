@@ -28,17 +28,19 @@
     {
       "title": "Splitting the board",
       "lines": [
-        "Menu > Split: pick the block the",
-        "two lanes start at.",
-        "SHIFT + a pad past that point",
-        "moves the block L <-> R.",
+        "The row ABOVE the blocks is the",
+        "routing row, and every pad there",
+        "says what it does:",
+        "  dark    tap = split here",
+        "  white   the split point",
+        "          tap = no split",
+        "  blue/pink  a lane",
+        "          tap = other side",
+        "SHIFT + a tap always splits, for",
+        "moving the point rightward.",
         "Menu > Pan L / Pan R place them.",
-        "The lanes never rejoin - that is",
-        "why each block keeps its own",
-        "delay and filter memory.",
-        "One amp + two cabs costs about",
-        "110us more. Two amps at Full do",
-        "NOT fit; Full + Slim does."
+        "One amp + two cabs is ~110us.",
+        "Two amps at Full do NOT fit."
       ]
     },
     {

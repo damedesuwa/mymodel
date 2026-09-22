@@ -50,6 +50,7 @@ for (let b = 1; b <= 8; b++) {
 
 const writes = [];
 const drawn = [];
+const reads = [];       /* every key the module asks the plugin for */
 const drawnAt = [];     /* the same text, with where it landed */
 const rects = [];
 const leds = {};
@@ -58,7 +59,7 @@ let padBlock = -1;
 const actionsRun = [];
 
 const host = {
-    host_module_get_param: (k) => (k in params ? params[k] : null),
+    host_module_get_param: (k) => { reads.push(k); return (k in params ? params[k] : null); },
     host_module_set_param: (k, v) => { params[k] = String(v); writes.push([k, String(v)]); },
     host_pad_block: (v) => { padBlock = v; },
     clear_screen: () => drawn.push('<clear>'),
@@ -371,55 +372,71 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
      * THE SPLIT                                                        *
      * ================================================================ */
 
-    /* Off by default, and Shift+pad does nothing but stomp while it is -
-     * a modifier that silently does nothing is better than one that
-     * silently does something to a board with no lanes in it. */
-    ok(menuGoTo(ui, 'Split', repaint), 'split: it is a row on the menu');
-    drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => d[2] === 'Off'), 'split: and it starts Off');
-
-    ui.onMidiMessageInternal([0xb0, 3, 127]);        /* close, or the pads
-                                                       are the menu's */
-    writes.length = 0;
-    ui.onMidiMessageInternal([0xb0, 49, 127]);       /* shift down */
-    ui.onMidiMessageInternal([0x90, 71, 127]);
-    ui.onMidiMessageInternal([0x80, 71, 0]);
-    ok(writes.some(([k]) => k === 'b4_on'), 'split: off, Shift+pad still stomps');
-    ok(!writes.some(([k]) => k === 'b4_lane'), 'split: and moves no lane');
-    ui.onMidiMessageInternal([0xb0, 49, 0]);         /* shift up */
-
-    /* Turn it on. menuGoTo only SCROLLS - it cannot know whether the menu
-     * is up, so the open is the caller's. */
-    ui.onMidiMessageInternal([0xb0, 3, 127]);        /* open */
-    ok(menuGoTo(ui, 'Split', repaint), 'split: back on the Split row');
-    writes.length = 0;
-    for (let i = 0; i < 9; i++) ui.onMidiMessageInternal([0xb0, K1, 1]);
-    ok(writes.some(([k, v]) => k === 'split' && v === '3'),
-       'split: three detents a step, so nine puts it at block 3');
-    drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => d[2] === 'at 3'), 'split: the row says where it is');
     ui.onMidiMessageInternal([0xb0, 3, 127]);        /* close the menu */
 
-    /* Now Shift+pad moves a block across, and only past the split. */
+    /* A DERIVED CONTROL IS NOT A PARAMETER. The Block knob reads `cat`,
+     * which is computed from type and fx and which the plugin cannot
+     * serve - and asking anyway cost a param give-up on the device every
+     * time a block changed. */
+    reads.length = 0;
+    gotoCat(CAT.OD);
+    ok(!reads.some(k => /_cat$/.test(k)),
+       'reads: nothing asks the plugin for a key it cannot answer');
+
+    /* THE ROW ABOVE THE BLOCKS IS THE ROUTING ROW, and a tap on a dark
+     * pad parts the board there. */
+    const R = (n) => 76 + n;
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, R(2), 127]);     /* above block 3 */
+    ui.onMidiMessageInternal([0x80, R(2), 0]);
+    ok(writes.some(([k, v]) => k === 'split' && v === '3'),
+       'route: a tap above block 3 splits there');
+
+    /* The marker itself turns it off, which is the undo you want while
+     * listening rather than three gestures into a menu. */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, R(2), 127]);
+    ui.onMidiMessageInternal([0x80, R(2), 0]);
+    ok(writes.some(([k, v]) => k === 'split' && v === '0'),
+       'route: tapping the marker again turns the split off');
+
+    /* Past the marker the pads ARE the lanes, so a tap there moves a
+     * block across rather than moving the split. */
+    ui.onMidiMessageInternal([0x90, R(2), 127]);
+    ui.onMidiMessageInternal([0x80, R(2), 0]);       /* split at 3 again */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, R(5), 127]);
+    ui.onMidiMessageInternal([0x80, R(5), 0]);
+    ok(writes.some(([k]) => k === 'b6_lane'), 'route: past it, a tap moves a lane');
+    ok(!writes.some(([k]) => k === 'split'), 'route: and does not move the split');
+
+    /* Which leaves one thing the rule cannot say - move the marker RIGHT -
+     * so Shift forces "split here" wherever it lands. */
     writes.length = 0;
     ui.onMidiMessageInternal([0xb0, 49, 127]);
-    ui.onMidiMessageInternal([0x90, 68, 127]);       /* pad 1 - before it */
-    ui.onMidiMessageInternal([0x80, 68, 0]);
-    ok(writes.some(([k]) => k === 'b1_on'), 'split: a block before it still stomps');
-    ok(!writes.some(([k]) => k === 'b1_lane'), 'split: it has no side to be on');
-
-    writes.length = 0;
-    ui.onMidiMessageInternal([0x90, 71, 127]);       /* pad 4 - past it */
-    ui.onMidiMessageInternal([0x80, 71, 0]);
-    ok(writes.some(([k]) => k === 'b4_lane'), 'split: a block past it moves side');
-    ok(!writes.some(([k]) => k === 'b4_on'),
-       'split: and does NOT also stomp, or one gesture would do two things');
+    ui.onMidiMessageInternal([0x90, R(5), 127]);
+    ui.onMidiMessageInternal([0x80, R(5), 0]);
     ui.onMidiMessageInternal([0xb0, 49, 0]);
+    ok(writes.some(([k, v]) => k === 'split' && v === '6'),
+       'route: Shift moves the marker rightward');
 
-    /* THE PICTURE. A rail above the row for the left lane, below for the
-     * right, and a drop at the block where they part company - which is
-     * where Move draws it too. */
+    /* THE ROW SHOWS WHAT IT DOES, so every pad colour is its own
+     * instruction: dark sets, white is the marker, coloured is a lane. */
+    ui.onMidiMessageInternal([0x90, R(2), 127]);
+    ui.onMidiMessageInternal([0x80, R(2), 0]);       /* back to 3 */
     for (let b = 1; b <= 8; b++) params[`b${b}_type`] = '3';
+    ui.init();
+    repaint();
+    ok(leds[R(0)] === 0, 'route: left of the marker is dark - a tap would set it');
+    ok(leds[R(2)] === 120, 'route: the marker is white');
+    ok(leds[R(3)] !== 0 && leds[R(3)] !== 120,
+       'route: past it wears its lane colour');
+    ok(leds[R(3)] !== leds[R(4)],
+       'route: and the two lanes are not the same colour');
+
+    /* THE PICTURE ON SCREEN. A rail above the row for the left lane,
+     * below for the right, and a drop where they part company - which is
+     * where Move draws it too. */
     params['b3_lane'] = '0'; params['b4_lane'] = '1';
     ui.init();
     rects.length = 0; drawnAt.length = 0; repaint();
@@ -433,16 +450,14 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
        'split: and they part company with a vertical drop');
     ok(drawnAt.some(d => d[2] === 'L') && drawnAt.some(d => d[2] === 'R'),
        'split: each box says which side it is on');
-    /* A block before the split is not on a side, so it keeps its cost. */
-    /* Width matters in this one: the header's own rule is a 128 px fill
-     * on exactly this row, so a test that only checked x and y would
-     * report the rule as a rail and pass for block 1 forever. */
+    /* Width matters in this one: the header's own rule is a 128 px fill on
+     * exactly this row, so a test that only checked x and y would report
+     * the rule as a rail and pass for block 1 forever. */
     ok(!rects.some(r => r[0] === 'fill' && r[2] === BOXY - 2 && r[4] === 1 &&
                         r[1] === 0 && r[3] === 16),
        'split: nothing before it wears a rail');
 
-    /* PAN, in its own units - a position between two names, not a
-     * percentage of something. */
+    /* PAN, in its own units - a position between two names. */
     ui.onMidiMessageInternal([0xb0, 3, 127]);        /* open */
     ok(menuGoTo(ui, 'Pan L', repaint), 'split: Pan L is a row');
     writes.length = 0;
@@ -452,7 +467,6 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     drawnAt.length = 0; repaint();
     ok(drawnAt.some(d => /^(L|R)\d+$|^C$/.test(d[2])),
        'pan: and it reads as a position, not a percentage');
-    ui.onMidiMessageInternal([0xb0, 3, 127]);
     ui.onMidiMessageInternal([0xb0, 3, 127]);        /* close */
 }
 
