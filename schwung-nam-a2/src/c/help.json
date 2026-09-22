@@ -12,6 +12,21 @@
       ]
     },
     {
+      "title": "Reading the board",
+      "lines": [
+        "It is a WIRE with boxes on it,",
+        "like an Axe-Fx grid.",
+        "  plain wire   slot is empty",
+        "  closed box   in circuit",
+        "  no side walls, wire through",
+        "               = BYPASSED",
+        "  FILLED box   the one you",
+        "               are editing",
+        "So a silent block is one you",
+        "can see the signal going past."
+      ]
+    },
+    {
       "title": "The encoders",
       "lines": [
         "1  Block: Off / NAM / Cab, then",
@@ -33,13 +48,11 @@
         "  TAP a DARK pad   part here",
         "  TAP a LIT pad    other side",
         "  HOLD anywhere    rejoin",
-        "Once split the boxes move: the",
-        "LEFT lane sits up, the RIGHT",
-        "sits down. You see two paths.",
-        "The header names the block, the",
-        "side you are on, and what it is.",
-        "BYP in a box = bypassed, which",
-        "is why it makes no sound."
+        "Once split the board becomes",
+        "TWO WIRES: the LEFT lane runs",
+        "along the top, the RIGHT along",
+        "the bottom. A block before the",
+        "fork is tall - it feeds both."
       ]
     },
     {

@@ -632,26 +632,38 @@ function pright(xr, y, t, ink, w) {
 
 /* The layout, in one place, so a change to one band cannot silently land on
  * top of another. */
-const BOX_Y = 12, BOX_H = 18, BOX_W = 15, BOX_GAP = 1;   /* 8*15 + 7*1 = 127 */
 /*
- * A SPLIT BLOCK MOVES; IT DOES NOT WEAR A LABEL.
+ * THE GRID IS A SIGNAL PATH, AND AN EMPTY SLOT IS A WIRE.
  *
- * The lane was a letter inside a 15 px box and a one-pixel rail above or
- * below the row. Both are true and neither is legible at arm's length -
- * reported from the device as not being able to tell which side is being
- * edited, and the same report said the whole row was uncomfortable to look
- * at. It is: three facts (what, how much, which side) crammed into one
- * cell, two of them as single characters.
+ * Eight boxes were drawn edge to edge whether or not anything was in them,
+ * each carrying a name AND a number AND, after the split, a side - so a
+ * board with three pedals on it drew five empty boxes with a dash in each,
+ * and the three that mattered had to be found among them. Reported, twice,
+ * as messy and hard to read. It is.
  *
- * So the row becomes TWO rows once the board is split. A block on the left
- * lane sits up, one on the right sits down, and the fork is the shape of
- * the picture rather than something drawn on top of it. Nothing has to be
- * read to see which side a block is on, which is the whole difference
- * between a label and a diagram.
+ * Axe-Edit's grid is the answer and it is not a styling choice: an unused
+ * slot there is a SHUNT - a plain wire - so the picture only contains what
+ * is in the chain, and the wire between the input and the output is
+ * continuous whatever is on it. Everything else follows from that:
+ *
+ *   nothing there   a wire passes through, no box at all
+ *   in circuit      a FILLED box with its name knocked out
+ *   bypassed        an OUTLINED box, name in ink - the signal is visibly
+ *                   not being taken by it
+ *   selected        corner ticks outside the box, so the mark is separate
+ *                   from what the box is saying about itself
+ *
+ * Four states, four different pictures, none of them a letter you have to
+ * read in fifteen pixels.
  */
-const LANE_H = 9;                                        /* 12..20, 21..29  */
-const LANE_Y = [BOX_Y, BOX_Y + LANE_H];
-const SELBAR_Y = 31;                                     /* 31..32          */
+const GRID_X = 4;                  /* the input bar sits left of this  */
+const COL_W = 14, COL_GAP = 1;     /* 8*14 + 7*1 = 119, 4..122         */
+const GRID_Y = 12, GRID_H = 16;    /* 12..27 when there is no split    */
+const LANE_H = 9, LANE_GAP = 1;    /* 12..20 and 22..30 when there is  */
+const BAND_H = LANE_H * 2 + LANE_GAP;            /* 12..30, clear of 32 */
+const IO_W = 2;
+
+function colX(b) { return GRID_X + b * (COL_W + COL_GAP); }
 const CELL_Y = 34, CELL_H = 18, CELL_W = 31;             /* 4 * 32 = 128    */
 /* THE BAR SITS BELOW THE CELL'S HIGHLIGHT, NOT INSIDE IT. The selected
  * cell is filled white, and a bar drawn inside that would have to invert
@@ -767,46 +779,96 @@ function drawHeader() {
     fill_rect(0, 10, 128, 1, 1);
 }
 
+/* Where a block's box sits, and where its wire runs through the column. */
+function blockGeom(b) {
+    const split = st.split > 0 ? st.split - 1 : -1;
+    const forked = split >= 0 && b >= split;
+    /* A BLOCK BEFORE THE FORK SPANS BOTH LANES, because that is what it
+     * does: one amp feeding two cabs is drawn as one tall block meeting
+     * two short ones, which is the picture Axe-Edit draws and the reason
+     * the fork needs no arrow to explain it. */
+    const y = !forked ? GRID_Y
+            : (st.lane[b] ? GRID_Y + LANE_H + LANE_GAP : GRID_Y);
+    const h = forked ? LANE_H : (split >= 0 ? BAND_H : GRID_H);
+    return { x: colX(b), y: y, h: h, wire: y + (h >> 1), forked: forked };
+}
+
 function drawBoxes() {
     const split = st.split > 0 ? st.split - 1 : -1;
+    const bandH = split >= 0 ? BAND_H : GRID_H;
+    const midWire = GRID_Y + (bandH >> 1);
+    const laneWire = [GRID_Y + (LANE_H >> 1),
+                      GRID_Y + LANE_H + LANE_GAP + (LANE_H >> 1)];
+
+    /* THE INPUT AND THE OUTPUT ARE PART OF THE PICTURE. Without them the
+     * row is eight things in a line; with them it is a path, and which end
+     * the signal comes in at stops being something you have to know. */
+    fill_rect(0, GRID_Y, IO_W, bandH, 1);
+    fill_rect(128 - IO_W, GRID_Y, IO_W, bandH, 1);
+
+    /* THE WIRE IS DRAWN WHOLE, THEN THE BOXES SIT ON IT.
+     *
+     * It used to be laid down per column, and an EMPTY slot assigned to
+     * the lower lane punched a hole in the UPPER lane's wire: both lanes
+     * run to the output whatever is or is not on either of them, and a
+     * per-column loop cannot know that. Two continuous runs and one
+     * vertical; the boxes clear their own interiors afterwards. */
+    const fx = colX(split) - 1;
+    if (split < 0) {
+        fill_rect(IO_W, midWire, 128 - IO_W * 2, 1, 1);
+    } else {
+        fill_rect(IO_W, midWire, fx - IO_W + 1, 1, 1);
+        fill_rect(fx, laneWire[0], 1, laneWire[1] - laneWire[0] + 1, 1);
+        for (let r = 0; r < 2; r++)
+            fill_rect(fx, laneWire[r], 128 - IO_W - fx, 1, 1);
+    }
 
     for (let b = 0; b < NUM_BLOCKS; b++) {
-        const x = b * (BOX_W + BOX_GAP);
         const t = st.type[b];
-        const live = t !== TYPE_OFF && st.on[b];
-        const forked = split >= 0 && b >= split;
+        const g = blockGeom(b);
 
-        const y = forked ? LANE_Y[st.lane[b] ? 1 : 0] : BOX_Y;
-        const h = forked ? LANE_H : BOX_H;
+        if (t !== TYPE_OFF) {
+            /* THE FILL IS THE SELECTION, NOT THE STATE.
+             *
+             * It was the other way round - every block in circuit drawn
+             * solid - and with eight columns of fourteen pixels that is a
+             * row of black slabs with two clipped characters knocked out
+             * of each. Rendered and looked at rather than reasoned about,
+             * which is how it should have been done three rounds ago.
+             *
+             * Exactly ONE box is ever filled, so the screen is mostly
+             * light and the thing you are editing is the only thing
+             * shouting. */
+            const chosen = (b === sel);
+            const live = !!st.on[b];
+            if (chosen) fill_rect(g.x, g.y, COL_W, g.h, 1);
+            else        fill_rect(g.x, g.y, COL_W, g.h, 0);   /* off the wire */
+            const ink = chosen ? 0 : 1;
 
-        if (live) fill_rect(x, y, BOX_W, h, 1);
-        else      draw_rect(x, y, BOX_W, h, 1);
-        const ink = live ? 0 : 1;
-
-        if (t === TYPE_OFF) {
-            pcenter(x, BOX_W, y + (forked ? 1 : 6), '-', ink);
-        } else if (forked) {
-            /* One line, because the side is the ROW now and the cost has
-             * the header. Bypass keeps its letter: it is the one state
-             * that silences a block, and it is what the last report was
-             * actually looking at without seeing. */
-            pcenter(x, BOX_W, y + 1, st.on[b] ? blockLabel(b) : 'BYP', ink);
-        } else {
-            pcenter(x, BOX_W, BOX_Y + 2, blockLabel(b), ink);
-            pcenter(x, BOX_W, BOX_Y + 10,
-                    st.on[b] ? String(Math.round(st.blockCpu[b])) : 'BYP', ink);
+            /* A BYPASSED BLOCK HAS NO SIDE WALLS, and the wire runs
+             * straight through where they would be.
+             *
+             * A whole session went to "no sound, the amp is dead" with the
+             * board's one loaded block bypassed. It was drawn then as a
+             * closed box with the letter B in it - a difference of two
+             * characters from a working one. This is a difference of
+             * SHAPE: the signal visibly does not turn aside for it. */
+            fill_rect(g.x, g.y, COL_W, 1, ink);
+            fill_rect(g.x, g.y + g.h - 1, COL_W, 1, ink);
+            if (live) {
+                fill_rect(g.x, g.y, 1, g.h, ink);
+                fill_rect(g.x + COL_W - 1, g.y, 1, g.h, ink);
+            } else {
+                fill_rect(g.x, g.wire, COL_W, 1, ink);
+            }
+            pcenter(g.x, COL_W, g.y + ((g.h - 7) >> 1), blockLabel(b), ink);
+        } else if (b === sel) {
+            /* An empty slot still has to be selectable - that is how a
+             * block is given a type at all - so it gets the frame without
+             * the fill. */
+            draw_rect(g.x, g.y, COL_W, g.h, 1);
         }
 
-        /* The fork itself: one vertical at the block where the lanes part,
-         * so the eye is told where to start reading two rows instead of
-         * one. */
-        if (b === split) fill_rect(x === 0 ? 0 : x - 1, BOX_Y, 1, BOX_H, 1);
-
-        /* Selection is a bar UNDER the column, not a border around the
-         * box: a border needs a pixel on each side and there is not one to
-         * spare, and under the COLUMN it means the same thing whichever
-         * row the block has moved to. */
-        if (b === sel) fill_rect(x, SELBAR_Y, BOX_W, 2, 1);
     }
 }
 
@@ -824,9 +886,13 @@ function drawCells() {
         /* A blank encoder draws nothing at all - not a box, not a dash.
          * Its ring is dark for the same reason and the two have to agree. */
         if (spec.kind === 'gap') continue;
+        /* THE SAME INVERSION AS THE GRID: a filled 31x18 cell is the
+         * second biggest black slab on the screen, and it is marking the
+         * one thing you already know - the knob your hand is on. A frame
+         * says it and leaves the panel light. */
         const on = (i === lastKnob);
-        if (on) fill_rect(x, CELL_Y - 2, CELL_W, CELL_H, 1);
-        const ink = on ? 0 : 1;
+        if (on) draw_rect(x, CELL_Y - 2, CELL_W, CELL_H, 1);
+        const ink = 1;
 
         let shown;
         const v = st.val[fullKey(spec)];

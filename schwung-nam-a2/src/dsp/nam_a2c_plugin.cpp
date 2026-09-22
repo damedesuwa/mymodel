@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "twolane"
+#define NAM_A2C_BUILD_ID "axegrid"
 
 #define NUM_BLOCKS 8
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */

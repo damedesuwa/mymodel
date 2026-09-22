@@ -160,7 +160,8 @@ for (let i = 0; i < 10; i++) ui.onMidiMessageInternal([0xb0, 14, 1]);  /* to the
 ui.onMidiMessageInternal([0xb0, 3, 127]);
 drawn.length = 0;
 ui.tick();
-ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
+ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
+   'Close returns to the pedalboard');
 
 /* --- the three-knob tree ---------------------------------------------- */
 /* Coarse to fine: knob 1 the kind, knob 2 the family, knob 3 the pedal. */
@@ -505,26 +506,75 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     params['b3_lane'] = '0'; params['b4_lane'] = '1'; params['split'] = '3';
     ui.init();
     rects.length = 0; drawnAt.length = 0; repaint();
-    const BOXY = 12, BOXH = 18, LANEH = 9;
+    const GY = 12, LH = 9, CW = 14, BAND = 19;
+    const colX = (c) => 4 + c * (CW + 1);
+    /* Height > 1 matters: the WIRE through a column is also COL_W wide,
+     * so a finder that only matched the width would report every empty
+     * slot as a box and pass whatever the drawing did. */
     const boxAt = (col) => rects.find(
-        r => (r[0] === 'fill' || r[0] === 'draw') && r[1] === col * 16 && r[3] === 15);
+        r => (r[0] === 'fill' || r[0] === 'draw') &&
+             r[1] === colX(col) && r[3] === CW && r[4] > 1);
 
-    ok(boxAt(0) && boxAt(0)[2] === BOXY && boxAt(0)[4] === BOXH,
-       'split: before the fork a block is full height');
-    ok(boxAt(2) && boxAt(2)[2] === BOXY && boxAt(2)[4] === LANEH,
+    /* A block BEFORE the fork spans BOTH lanes - one amp visibly feeding
+     * two cabs - so its height is the band, not a lane. */
+    ok(boxAt(0) && boxAt(0)[2] === GY && boxAt(0)[4] === BAND,
+       'split: before the fork a block spans both lanes');
+    ok(boxAt(2) && boxAt(2)[2] === GY && boxAt(2)[4] === LH,
        'split: a left-lane block sits UP and is half height');
-    ok(boxAt(3) && boxAt(3)[2] === BOXY + LANEH && boxAt(3)[4] === LANEH,
+    ok(boxAt(3) && boxAt(3)[2] === GY + LH + 1 && boxAt(3)[4] === LH,
        'split: a right-lane block sits DOWN');
     ok(boxAt(2)[2] !== boxAt(3)[2],
        'split: so the two sides are two ROWS, not two letters');
-    ok(rects.some(r => r[0] === 'fill' && r[2] === BOXY && r[3] === 1 && r[4] === BOXH),
-       'split: and a vertical says where they part company');
-    /* The letter is gone from the box, because the row says it. */
+    /* The fork is a wire joining the two lane centres, as Axe-Edit draws a
+     * block feeding two cabs. */
+    ok(rects.some(r => r[0] === 'fill' && r[3] === 1 && r[4] >= LH),
+       'split: and a vertical wire says where they part company');
     ok(!drawnAt.some(d => d[2] === 'L' || d[2] === 'R'),
        'split: no lane letters left in the boxes');
 
+    /* AN EMPTY SLOT IS A WIRE, NOT A BOX. Five empty boxes with a dash in
+     * each is what "messy" meant: the three blocks that were there had to
+     * be found among them. */
+    for (let b = 1; b <= 8; b++) params[`b${b}_type`] = '0';
+    params['b1_type'] = '3'; params['split'] = '0';
+    ui.init();
+    rects.length = 0; drawnAt.length = 0; repaint();
+    ok(boxAt(0), 'grid: a loaded block still draws a box');
+    ok(!boxAt(3) && !boxAt(5), 'grid: an empty slot draws no box at all');
+    ok(!drawnAt.some(d => d[2] === '-'), 'grid: and no dash to read either');
+    /* But the path is unbroken: input bar, wire, output bar. */
+    ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
+       'grid: the input is part of the picture');
+    ok(rects.some(r => r[0] === 'fill' && r[1] === 126 && r[3] === 2),
+       'grid: so is the output');
+    ok(rects.some(r => r[0] === 'fill' && r[4] === 1 && r[3] > 5 &&
+                       r[2] === GY + (16 >> 1)),
+       'grid: and a wire runs the whole way between them');
+
+    /* A BYPASSED BLOCK HAS NO SIDE WALLS AND THE WIRE GOES THROUGH IT.
+     *
+     * The letter B in a fourteen-pixel box cost a session to "no sound,
+     * the amp is dead". A missing pair of walls is a difference of SHAPE,
+     * legible without reading anything. */
+    /* `b<N>_on` is the wire's BYPASS flag - 0 is live - so this is one
+     * bypassed block on an otherwise live board. */
+    for (let b = 1; b <= 8; b++) { params[`b${b}_type`] = '3'; params[`b${b}_on`] = '0'; }
+    params['b2_on'] = '1';
+    ui.init();
+    rects.length = 0; repaint();
+    const wallAt = (c) => rects.some(
+        r => r[0] === 'fill' && r[1] === colX(c) && r[3] === 1 && r[4] === 16);
+    ok(wallAt(0), 'grid: a block in circuit is a closed box');
+    ok(!wallAt(1), 'grid: a bypassed one has no side walls');
+    ok(rects.some(r => r[0] === 'fill' && r[1] === colX(1) &&
+                       r[3] === CW && r[4] === 1 && r[2] === GY + 8),
+       'grid: and the wire runs straight through it');
+
     /* WHICH SIDE YOU ARE EDITING is a different question from which side
      * a block is on, and it was the one going unanswered. */
+    for (let b = 1; b <= 8; b++) { params[`b${b}_type`] = '3'; params[`b${b}_on`] = '0'; }
+    params['b3_lane'] = '0'; params['b4_lane'] = '1'; params['split'] = '3';
+    ui.init();
     ui.onMidiMessageInternal([0x90, 71, 127]);       /* hold pad 4 -> select */
     advance(1000); ui.tick();
     ui.onMidiMessageInternal([0x80, 71, 0]);
@@ -532,12 +582,6 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(drawnAt.some(d => d[1] === 1 && /^B4 R/.test(d[2])),
        'split: the header names the side you are on');
 
-    /* BYPASS IS A WORD NOW. It was the letter B in a 15 px box, which is
-     * what the last no-sound report was looking straight at. */
-    params['b5_on'] = '1';
-    ui.init();
-    drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => d[2] === 'BYP'), 'split: a bypassed block says BYP');
 
     /* PAN, in its own units - a position between two names. */
     ui.onMidiMessageInternal([0xb0, 3, 127]);        /* open */
