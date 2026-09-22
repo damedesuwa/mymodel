@@ -257,9 +257,29 @@ const MENU_VISIBLE = 5;
 
 let padDownAt = [];             /* when each pad went down, or 0 */
 let padHandled = [];            /* hold already fired, so the release is not a tap */
+let routeDownAt = [];           /* the same two, for the routing row */
+let routeHandled = [];
 let lastPaint = 0;
 let lastKnob = 0;   /* which cell the row is following */
-let shiftHeld = false;
+/*
+ * WHAT JUST HAPPENED, IN WORDS, FOR A MOMENT.
+ *
+ * The routing is drawn - rails above and below the row, L or R in each box
+ * - and that is a picture of the STATE. It is not an answer to "did that
+ * tap do what I meant", which is the question you are asking while you are
+ * changing it, and which a picture you have to find in a 15 px box does
+ * not answer quickly. So a routing change also says itself, in the footer,
+ * for long enough to read and not long enough to be in the way.
+ */
+let flashText = '';
+let flashUntil = 0;
+const FLASH_MS = 1100;
+
+function flash(t) {
+    flashText = t;
+    flashUntil = Date.now() + FLASH_MS;
+    lastPaint = 0;
+}
 
 /*
  * THE ENCODERS ARE NOT DETENTED AND THE SHIM COALESCES, so one CC can carry
@@ -793,6 +813,12 @@ function drawCells() {
 }
 
 function drawFooter(list) {
+    /* The last routing change wins the line while it is fresh: it is the
+     * thing you just did, and the pedal's name is not going anywhere. */
+    if (flashText && Date.now() < flashUntil) {
+        ptext(1, FOOT_Y, flashText, 1, 126);
+        return;
+    }
     /* One line, and it prefers the thing that had to be cut above: a model
      * or pedal name is longer than a 31 px cell and is the one string here
      * you actually need in full.
@@ -923,46 +949,49 @@ function paintLeds() {
         /* THE ROUTING ROW SHOWS WHAT IT DOES. A dark pad sets the split, a
          * white one is the split, and a coloured one is a lane you can
          * flip - so every pad's colour IS its instruction. */
-        let rc = 0;
-        if (st.split > 0) {
-            if (b === st.split - 1) rc = White;
-            else if (b > st.split - 1)
-                rc = st.on[b] && st.type[b] !== TYPE_OFF
-                     ? LANE_LED[st.lane[b]] : LANE_LED_DIM[st.lane[b]];
-        }
-        setLED(ROUTE_BASE + b, rc);
+        /* EVERY PAD IS LIT, and the colour is the side it will give you -
+         * so the row is read rather than worked out. Brightness is the
+         * other fact: dim means the side is set but not in circuit yet,
+         * because the split has not started. The boundary between dim and
+         * bright IS the split point, which needs no colour of its own. */
+        const live = st.split > 0 && b >= st.split - 1;
+        setLED(ROUTE_BASE + b,
+               (live ? LANE_LED : LANE_LED_DIM)[st.lane[b] ? 1 : 0]);
     }
 }
 
 /* ----------------------------------------------------------------- input */
 
 /*
- * ONE PAD, THREE UNAMBIGUOUS ANSWERS - and which one you get is whatever
- * the pad under your finger is already showing.
+ * THE ROUTING ROW KEEPS THE SAME RHYTHM AS THE BLOCK ROW.
  *
- *   dark, or left of the split   ->  the split starts here
- *   the split marker itself      ->  no split
- *   right of the split           ->  this block changes sides
+ * It had three meanings on one tap, decided by where the pad sat relative
+ * to the split marker, with Shift as an escape hatch for the one case the
+ * rule could not express. Every one of those was defensible on its own and
+ * together they were reported from the device as simply too hard to use -
+ * which is the right verdict: the pad's meaning changed under your finger
+ * as the marker moved, so there was nothing to learn.
  *
- * Nothing about that is modal: the lit pads to the right of the marker ARE
- * the lanes, so tapping one moving it is the only thing it could mean.
- * Moving the marker rightward is the one case the rule cannot express, so
- * Shift forces "split here" wherever you press it.
+ * It is the row below's rhythm instead, which is already in the hand:
+ *
+ *   TAP   flip this block's side
+ *   HOLD  the board parts HERE (hold the marker again to rejoin)
+ *
+ * One meaning per gesture, the same two gestures as the pads underneath,
+ * and every pad lit with the side it will give you - so the row can be
+ * read rather than worked out.
  */
-function routePad(b, forceSplit) {
-    if (forceSplit || st.split <= 0 || b < st.split - 1) {
-        st.split = b + 1;
-    } else if (b === st.split - 1) {
-        st.split = 0;
-    } else {
-        st.lane[b] = st.lane[b] ? 0 : 1;
-        setp('b' + (b + 1) + '_lane', st.lane[b]);
-        lastPaint = 0;
-        return;
-    }
+function routeTap(b) {
+    st.lane[b] = st.lane[b] ? 0 : 1;
+    setp('b' + (b + 1) + '_lane', st.lane[b]);
+    flash('B' + (b + 1) + ' -> ' + (st.lane[b] ? 'R' : 'L'));
+}
+
+function routeHold(b) {
+    st.split = (st.split === b + 1) ? 0 : b + 1;
     st.val['split'] = st.split;
     setp('split', st.split);
-    lastPaint = 0;
+    flash(st.split ? ('Split at ' + st.split) : 'No split');
 }
 
 function stomp(b) {
@@ -1088,7 +1117,10 @@ function onKnob(idx, ccValue) {
 
 globalThis.chain_ui = {
     init() {
-        for (let i = 0; i < NUM_BLOCKS; i++) { padDownAt[i] = 0; padHandled[i] = false; }
+        for (let i = 0; i < NUM_BLOCKS; i++) {
+            padDownAt[i] = 0; padHandled[i] = false;
+            routeDownAt[i] = 0; routeHandled[i] = false;
+        }
         /* The shim replays Move's own LED state on the way in, so what the
          * cache believes is stale. Re-emit everything once. */
         invalidateLedCache();
@@ -1149,6 +1181,10 @@ function tickBody() {
                 padHandled[b] = true;
                 select(b);
             }
+            if (routeDownAt[b] && !routeHandled[b] && now - routeDownAt[b] >= HOLD_MS) {
+                routeHandled[b] = true;
+                routeHold(b);
+            }
         }
 
         paintLeds();
@@ -1160,7 +1196,11 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
         const status = data[0] & 0xf0;
         const d1 = data[1], d2 = data[2];
 
-        if (status === 0xb0 && d1 === CC_SHIFT) { shiftHeld = d2 > 0; return; }
+        /* Nothing here is modified by Shift any more - the routing row's
+         * tap and hold cover what it used to. It is still swallowed rather
+         * than ignored, so it cannot fall through to a branch that reads
+         * CC numbers it does not own. */
+        if (status === 0xb0 && d1 === CC_SHIFT) return;
 
         /* Jog: click opens the menu, turn scrolls it. The jog is free here -
          * the host's own COMPONENT_EDIT jog handler never runs, because MIDI
@@ -1235,12 +1275,16 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
             return;
         }
 
-        /* The routing row acts on the PRESS: it changes nothing you can
-         * play, so waiting for the release would only make it feel slow.
-         * The block row waits, because there a press is the start of a
-         * hold and a hold means something else. */
         if (d1 >= ROUTE_BASE && d1 < ROUTE_BASE + NUM_BLOCKS) {
-            if (status === 0x90 && d2 > 0) routePad(d1 - ROUTE_BASE, shiftHeld);
+            const r = d1 - ROUTE_BASE;
+            if (status === 0x90 && d2 > 0) {
+                routeDownAt[r] = Date.now();
+                routeHandled[r] = false;
+            } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
+                if (routeDownAt[r] && !routeHandled[r]) routeTap(r);
+                routeDownAt[r] = 0;
+                routeHandled[r] = false;
+            }
             return;
         }
 

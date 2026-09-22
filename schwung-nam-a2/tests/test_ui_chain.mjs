@@ -383,56 +383,83 @@ ok(drawn.some(t => t === 'NAM'), 'Close returns to the pedalboard');
     ok(!reads.some(k => /_cat$/.test(k)),
        'reads: nothing asks the plugin for a key it cannot answer');
 
-    /* THE ROW ABOVE THE BLOCKS IS THE ROUTING ROW, and a tap on a dark
-     * pad parts the board there. */
+    /* THE ROUTING ROW KEEPS THE BLOCK ROW'S RHYTHM: tap flips a side,
+     * hold parts the board. It had three meanings on one tap decided by
+     * where the pad sat, and the device's verdict was that there was
+     * nothing to learn. */
     const R = (n) => 76 + n;
+    const tapR = (n) => {
+        ui.onMidiMessageInternal([0x90, R(n), 127]);
+        ui.onMidiMessageInternal([0x80, R(n), 0]);
+    };
+    const holdR = (n) => {
+        ui.onMidiMessageInternal([0x90, R(n), 127]);
+        clockSkew += 1000; ui.tick();
+        ui.onMidiMessageInternal([0x80, R(n), 0]);
+    };
+
     writes.length = 0;
-    ui.onMidiMessageInternal([0x90, R(2), 127]);     /* above block 3 */
-    ui.onMidiMessageInternal([0x80, R(2), 0]);
+    tapR(5);
+    ok(writes.some(([k]) => k === 'b6_lane'), 'route: a tap flips that block side');
+    ok(!writes.some(([k]) => k === 'split'), 'route: a tap never moves the split');
+    const firstSide = writes.find(([k]) => k === 'b6_lane')[1];
+    writes.length = 0;
+    tapR(5);
+    ok(writes.some(([k, v]) => k === 'b6_lane' && v !== firstSide),
+       'route: and tapping again puts it back');
+
+    writes.length = 0;
+    holdR(2);
     ok(writes.some(([k, v]) => k === 'split' && v === '3'),
-       'route: a tap above block 3 splits there');
-
-    /* The marker itself turns it off, which is the undo you want while
-     * listening rather than three gestures into a menu. */
+       'route: a hold parts the board there');
     writes.length = 0;
-    ui.onMidiMessageInternal([0x90, R(2), 127]);
-    ui.onMidiMessageInternal([0x80, R(2), 0]);
+    holdR(2);
     ok(writes.some(([k, v]) => k === 'split' && v === '0'),
-       'route: tapping the marker again turns the split off');
+       'route: holding the same pad rejoins it');
+    holdR(2);
 
-    /* Past the marker the pads ARE the lanes, so a tap there moves a
-     * block across rather than moving the split. */
-    ui.onMidiMessageInternal([0x90, R(2), 127]);
-    ui.onMidiMessageInternal([0x80, R(2), 0]);       /* split at 3 again */
+    /* THE BLOCK ROW IS UNTOUCHED - tap stomps, hold edits. */
     writes.length = 0;
-    ui.onMidiMessageInternal([0x90, R(5), 127]);
-    ui.onMidiMessageInternal([0x80, R(5), 0]);
-    ok(writes.some(([k]) => k === 'b6_lane'), 'route: past it, a tap moves a lane');
-    ok(!writes.some(([k]) => k === 'split'), 'route: and does not move the split');
-
-    /* Which leaves one thing the rule cannot say - move the marker RIGHT -
-     * so Shift forces "split here" wherever it lands. */
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    ok(writes.some(([k]) => k === 'b1_on'), 'blocks: a tap still stomps');
     writes.length = 0;
-    ui.onMidiMessageInternal([0xb0, 49, 127]);
-    ui.onMidiMessageInternal([0x90, R(5), 127]);
-    ui.onMidiMessageInternal([0x80, R(5), 0]);
-    ui.onMidiMessageInternal([0xb0, 49, 0]);
-    ok(writes.some(([k, v]) => k === 'split' && v === '6'),
-       'route: Shift moves the marker rightward');
+    ui.onMidiMessageInternal([0x90, 74, 127]);
+    clockSkew += 1000; ui.tick();
+    ui.onMidiMessageInternal([0x80, 74, 0]);
+    ok(writes.some(([k, v]) => k === 'sel_block' && v === '6'),
+       'blocks: a hold still selects it for editing');
 
-    /* THE ROW SHOWS WHAT IT DOES, so every pad colour is its own
-     * instruction: dark sets, white is the marker, coloured is a lane. */
-    ui.onMidiMessageInternal([0x90, R(2), 127]);
-    ui.onMidiMessageInternal([0x80, R(2), 0]);       /* back to 3 */
-    for (let b = 1; b <= 8; b++) params[`b${b}_type`] = '3';
+    /* EVERY ROUTING PAD IS LIT, because the colour is the side it gives
+     * you. Brightness is the other fact: dim before the split, bright in
+     * circuit - and the boundary between them IS the split point. */
+    for (let b = 1; b <= 8; b++) { params[`b${b}_type`] = '3'; params[`b${b}_lane`] = '0'; }
+    params['b4_lane'] = '1';
     ui.init();
     repaint();
-    ok(leds[R(0)] === 0, 'route: left of the marker is dark - a tap would set it');
-    ok(leds[R(2)] === 120, 'route: the marker is white');
-    ok(leds[R(3)] !== 0 && leds[R(3)] !== 120,
-       'route: past it wears its lane colour');
-    ok(leds[R(3)] !== leds[R(4)],
-       'route: and the two lanes are not the same colour');
+    for (let b = 0; b < 8; b++)
+        ok(leds[R(b)] !== 0, `route: pad ${b + 1} is lit`);
+    ok(leds[R(0)] !== leds[R(2)],
+       'route: before the split is dim, at it is bright');
+    ok(leds[R(2)] !== leds[R(3)],
+       'route: and the two sides are different colours');
+
+    /* AND THE SCREEN SAYS WHAT JUST HAPPENED. The drawing is a picture of
+     * the state; it does not answer "did that tap do what I meant", which
+     * is the question being asked while you change it. */
+    tapR(6);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => /^B7 -> [LR]$/.test(d[2])),
+       'route: a flip says itself in the footer');
+    holdR(4);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'Split at 5'), 'route: so does a split');
+    /* And it gets out of the way. */
+    clockSkew += 2000;
+    drawnAt.length = 0; repaint();
+    ok(!drawnAt.some(d => /^Split at/.test(d[2])),
+       'route: the message is brief, not a mode');
+    holdR(2);
 
     /* THE PICTURE ON SCREEN. A rail above the row for the left lane,
      * below for the right, and a drop where they part company - which is
