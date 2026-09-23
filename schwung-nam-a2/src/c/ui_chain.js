@@ -75,18 +75,29 @@ function forkCol() {
         if (st.type[slotOf(ROW_BR, c)] !== TYPE_OFF) return c;
     return -1;
 }
-/* And where they come back together: the LAST top-row block. Same
- * principle as the fork - the branch is as long as the blocks on it, and
- * everything past its end is one signal again. Two amps into a shared
- * reverb needs no verb of its own.
+/* The LAST column the two lanes are still apart on.
  *
- * A branch reaching the last column merges with nothing after it, which
- * is the same thing as merging at the output - so "two lanes, two
- * outputs" is not a special case, it is this one with an empty tail. */
+ * DERIVED FROM THE BLOCKS FOR ONE RELEASE, AND IT MOVED UNDER PEOPLE.
+ * "Right after the last top-row block" is symmetric with the fork and
+ * reads well written down, but it meant adding a pedal to the branch
+ * silently relocated the merge - the topology changed as a side effect of
+ * editing a block. Reported as exactly that: the split is easy, the way
+ * it comes back together is not.
+ *
+ * It is the `Merge` row on the menu now, and its default is the OUTPUT -
+ * a board that forks and never rejoins, which is what this did before the
+ * join existed. Nothing moves unless you move it.
+ *
+ * The fork still wins, so the parallel section is never narrower than one
+ * column, and a branch block PAST the merge is off the path - no box, pad
+ * dark - exactly as one before the fork is. The setting cannot quietly
+ * delete audio. */
 function joinCol() {
-    for (let c = NUM_COLS - 1; c >= 0; c--)
-        if (st.type[slotOf(ROW_BR, c)] !== TYPE_OFF) return c;
-    return -1;
+    const f = forkCol();
+    if (f < 0) return -1;
+    const m = num(st.val['merge'], 0);
+    if (m < 2) return NUM_COLS - 1;                 /* 0 = at the output */
+    return Math.max(f, Math.min(NUM_COLS - 1, m - 2));
 }
 /* Is this slot in the signal path at all? The branch row outside
  * [fork, join] is not - by construction it is empty there. */
@@ -536,6 +547,11 @@ function openMenu() {
      * The pans are named for the RAIL they move, not for a side, because
      * the side is what they SET. "Pan L" on a row you can drag to the
      * right was the question the device kept asking back. */
+    /* WHERE THE BRANCH ENDS. The split is a placement and this is a
+     * setting, and they are different kinds of thing on purpose: you
+     * choose where to fork by putting a pedal there, and the merge then
+     * STAYS where you put it however many pedals you add afterwards. */
+    menuRows.push({ label: 'Merge', action: null, edit: 'merge', kind: 'merge' });
     menuRows.push({ label: 'Pan Top', action: null, edit: 'pan_a', kind: 'pan' });
     menuRows.push({ label: 'Pan Btm', action: null, edit: 'pan_b', kind: 'pan' });
 
@@ -553,6 +569,10 @@ function openMenu() {
  * and the split is a block number or the word Off. */
 function menuValueText(row, v) {
     if (v === undefined || !Number.isFinite(v)) return '-';
+    /* "Out" is a place, not an off switch - the lanes do merge, at the
+     * output, and calling it Off would say they never meet. */
+    if (row.kind === 'merge')
+        return (v < 2) ? 'Out' : ('col ' + Math.round(v));
     if (row.kind === 'pan') {
         const p = Math.round(v * 100);
         if (p === 0) return 'C';
@@ -1283,7 +1303,7 @@ globalThis.chain_ui = {
             st.fx[b] = num(getp(keyOf(b, 'fx')), 0);
         }
         st.cpu = num(getp('cpu'), 0);
-        for (const key of ['in_level', 'out_level', 'pan_a', 'pan_b']) {
+        for (const key of ['in_level', 'out_level', 'merge', 'pan_a', 'pan_b']) {
             const v = getp(key);
             if (v !== null && v !== '') st.val[key] = Number(v);
         }
@@ -1384,7 +1404,21 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
                 const dd = decodeDelta(d2);
                 if (row && row.edit && dd) {
                     let v = st.val[row.edit];
-                    if (row.kind === 'pan') {
+                    if (row.kind === 'merge') {
+                        /* A COLUMN, so it steps - at the same three
+                         * detents everything discrete on this screen
+                         * costs. Column 1 is skipped rather than clamped:
+                         * nothing can be one signal again before the
+                         * earliest column it could have parted at. */
+                        const step = knobSteps(d1 - CC_KNOB_BASE, dd);
+                        if (!step) return;
+                        v = Math.round(v === undefined ? 0 : v) + step;
+                        if (v === 1) v = step > 0 ? 2 : 0;
+                        if (v < 0) v = 0;
+                        if (v > NUM_COLS) v = NUM_COLS;
+                        st.val[row.edit] = v;
+                        setp(row.edit, v);
+                    } else if (row.kind === 'pan') {
                         v = (v === undefined ? 0 : v) + dd * FLOAT_STEP * 2;
                         if (v < -1) v = -1;
                         if (v > 1) v = 1;

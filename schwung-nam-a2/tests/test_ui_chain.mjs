@@ -543,17 +543,29 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ok(!upperAt(0) && !upperAt(1),
        'split: nothing is drawn on the branch before it forks');
 
-    /* THE LANES COME BACK TOGETHER WHERE THE BRANCH ENDS, by the same
-     * rule that parted them. Two amps into a shared reverb: the reverb
-     * is one block, after the join, spanning both rails - the same
-     * picture as the head, read the other way round. */
+    /* THE MERGE IS A SETTING, AND ITS DEFAULT IS THE OUTPUT.
+     *
+     * It was derived - "right after the last top-row block" - and that
+     * moved the topology as a side effect of adding a pedal, which is
+     * what was reported as unintuitive. Out by default means a board that
+     * forks and never rejoins: nothing moves unless you move it. */
     board({ b1: 3, b2: 3, t2: 3, b5: 3, b6: 3 });
+    delete params['merge'];
     ui.init();
     rects.length = 0; repaint();
+    ok(lowerAt(4) && !boxesAt(4).some(r => r[4] === BAND),
+       'merge: at Out a block after the branch stays on its own rail');
+
+    /* SET IT, AND THE TAIL IS SHARED. Two amps into one reverb: the
+     * reverb is a single block, after the join, spanning both rails -
+     * the same picture as the head, read the other way round. */
+    params['merge'] = '4';       /* column 4 is one signal again */
+    ui.init();
+    rects.length = 0; drawnAt.length = 0; repaint();
     ok(upperAt(1) && lowerAt(1),
        'merge: the parallel section is two rails');
     ok(!upperAt(4) && !lowerAt(4),
-       'merge: and after the branch ends there is only one');
+       'merge: past the merge column there is only one rail');
     ok(boxAt(4) && boxAt(4)[2] === GY && boxAt(4)[4] === BAND,
        'merge: a block in the tail spans both rails, as the head does');
     /* TWO verticals, not one: the fork AND the join. Drawing the parting
@@ -563,6 +575,21 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ok(rails.length >= 2, 'merge: the join is drawn exactly as the fork is');
     ok(rails.some(r => r[1] > 4 + 1 * (CW + 1)),
        'merge: and it sits AFTER the branch, not at it');
+
+    /* THE ROW SAYS WHERE, and says "Out" rather than "Off" - the lanes do
+     * merge when it is not set, at the output, and "Off" would say they
+     * never meet. */
+    ui.onMidiMessageInternal([0xb0, 3, 127]);
+    ok(menuGoTo(ui, 'Merge', repaint), 'merge: it is a menu row');
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => /col 4/.test(d[2])), 'merge: naming its column');
+    /* AND A KNOB SETS IT IN PLACE, like every other value row. */
+    writes.length = 0;
+    for (let i = 0; i < 9; i++) ui.onMidiMessageInternal([0xb0, K1, 1]);
+    ok(writes.some(([k, v]) => k === 'merge' && Number(v) > 4),
+       'merge: a knob moves it along the board');
+    ui.onMidiMessageInternal([0xb0, 3, 127]);     /* close */
+    delete params['merge'];
 
     /* AN EMPTY SLOT IS A WIRE, NOT A BOX. Five empty boxes with a dash in
      * each is what "messy" meant: the three blocks that were there had to
@@ -604,6 +631,7 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     /* WHICH SIDE YOU ARE EDITING is a different question from which side
      * a block is on, and it was the one going unanswered. */
     board({ b1: 3, b2: 3, b3: 3, b4: 3, t3: 3, t4: 3 });
+    delete params['merge'];                          /* lanes run to the out */
     ui.init();
     ui.onMidiMessageInternal([0x90, 71, 127]);       /* hold pad 4 -> select */
     advance(1000); ui.tick();

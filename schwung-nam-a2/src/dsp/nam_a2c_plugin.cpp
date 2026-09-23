@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "merge"
+#define NAM_A2C_BUILD_ID "mergeset"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -64,11 +64,11 @@
  * what may sit on the card. */
 #define MAX_LISTED 48
 
-/* BLK_NAM is any .nam capture, which is NOT the same thing as an amp: the
- * bundled OCD is a pedal, captured at the same architecture (3ch/8ch
- * WaveNet, identical weight counts) and therefore at the same cost. Naming
- * the type "Amp" would put a fuzz pedal under a label that says otherwise
- * and hide that two of them do not fit in a frame. */
+/* BLK_NAM is any .nam capture, which is NOT the same thing as an amp: a
+ * PEDAL capture is the same architecture (3ch/8ch WaveNet, identical
+ * weight counts) and therefore the same cost. Naming the type "Amp" would
+ * put a fuzz pedal under a label that says otherwise and hide that two of
+ * them do not fit in a frame. */
 enum { BLK_OFF = 0, BLK_NAM = 1, BLK_CAB = 2, BLK_FX = 3, BLK_TYPES = 4 };
 
 /* THE NAME COLUMN OF FX_PEDALS, not a second list.
@@ -196,6 +196,10 @@ typedef struct {
     float laneA[FRAMES_PER_BLOCK];
     float laneB[FRAMES_PER_BLOCK];
     float pan_a, pan_b;             /* A = top row, B = bottom row, -1 .. +1 */
+    /* WHERE THE LANES COME BACK TOGETHER: 0 = at the output, else the
+     * 1-based COLUMN that is one signal again. Set, not derived - see
+     * join_col. */
+    int   merge_at;
     float scratch[FRAMES_PER_BLOCK];
 
     req_ring_t   reqs;
@@ -241,21 +245,32 @@ static int fork_col(const a2c_t *s) {
     return -1;
 }
 
-/* And the column they come back TOGETHER after: the LAST top-row block.
+/* The LAST column the two lanes are still apart on.
  *
- * Same principle as the fork, and deliberately so - the branch is simply
- * as long as the blocks on it, and everything past its end is one signal
- * again. A parallel section in the middle of a chain (two amps into a
- * shared reverb) needs no verb of its own, and there is no join setting
- * to disagree with where the blocks actually are.
+ * DERIVED FROM THE BLOCKS FOR ONE RELEASE, AND IT MOVED UNDER PEOPLE.
+ * The join was "right after the last top-row block", which is symmetric
+ * with the fork and reads well written down - but it meant that adding a
+ * pedal to the branch silently relocated the merge, so the topology
+ * changed as a side effect of editing a block. Reported as exactly that:
+ * the split is easy, the way it comes back together is not.
  *
- * A branch reaching the LAST column merges with nothing after it, which
- * is the same arithmetic as merging at the output - so "two lanes to two
- * outputs" is not a special case, it is this one with an empty tail. */
+ * It is a SETTING now (`merge`), and the default is the output - which is
+ * a board that forks and never rejoins, the shape this had before the
+ * join existed at all. Nothing moves unless you move it.
+ *
+ * The fork still wins: a merge set before the branch even starts would be
+ * a parallel section of negative width, so it is clamped to the fork and
+ * the section is one column. A branch block PAST the merge is off the
+ * path - drawn as nothing, its pad dark - exactly as one before the fork
+ * is, so the setting can never quietly delete audio. */
 static int join_col(const a2c_t *s) {
-    for (int c = NUM_COLS - 1; c >= 0; c--)
-        if (s->type[SLOT(ROW_BR, c)] != BLK_OFF) return c;
-    return -1;
+    const int f = fork_col(s);
+    if (f < 0) return -1;
+    if (s->merge_at < 2) return NUM_COLS - 1;       /* 0 = at the output */
+    int j = s->merge_at - 2;
+    if (j < f) j = f;
+    if (j > NUM_COLS - 1) j = NUM_COLS - 1;
+    return j;
 }
 
 /* ======================================================================== */
@@ -309,8 +324,8 @@ static void *worker_thread(void *arg) {
         if (r.block < 0 || r.block >= NUM_BLOCKS) continue;
 
         /* SUPERSEDED? Turning the Model knob queues one request per detent,
-         * and the device log has a block reloading OCD, Recto, OCD, Recto
-         * six times in two seconds - six full .nam parses, of which five are
+         * and the device log has a block reloading two models back and
+         * forth six times in two seconds - six full .nam parses, of which five are
          * thrown away, delaying the one that matters by a second. The
          * producer writes `index` at request time, so a request whose index
          * is no longer the block's current one has already been overtaken.
@@ -540,6 +555,7 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     s->in_gain = knob_to_gain(s->in_level);
     s->out_gain = knob_to_gain(s->out_level);
     s->sel_block = SLOT(ROW_MAIN, 0);
+    s->merge_at = 0;                /* at the output */
     s->pan_a = -1.0f;
     s->pan_b = 1.0f;
 
@@ -556,9 +572,9 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
      * guess that also costs 1500 us of the frame before they have asked for
      * anything. The pickers are one knob away.
      *
-     * It used to build OCD -> Recto -> Cab so a fresh install made a sound
-     * rather than reading as broken; the pedalboard picture answers that
-     * now - eight empty boxes are visibly eight empty boxes. */
+     * It used to build a pedal -> amp -> cab chain so a fresh install made
+     * a sound rather than reading as broken; the pedalboard picture
+     * answers that now - an empty board is visibly an empty board. */
 
     s->diag_stop = 0;
     s->diag_running = start_low_prio_thread(&s->diag_tid, diag_thread, s, 0);
@@ -863,6 +879,12 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         /* Derived from the board now; kept settable so an older state
          * blob loads without an error for every key in it. */
         (void)v;
+    } else if (strcmp(key, "merge") == 0) {
+        int m = atoi(val);
+        if (m < 0) m = 0;
+        if (m > NUM_COLS) m = NUM_COLS;
+        if (m == 1) m = 2;          /* nothing can merge before column 2 */
+        s->merge_at = m;
     } else if (strcmp(key, "pan_a") == 0) {
         s->pan_a = clampf(atof(val), -1.0f, 1.0f);
     } else if (strcmp(key, "pan_b") == 0) {
@@ -931,6 +953,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     /* The fork as a 1-based COLUMN, 0 for a mono board - the same shape
      * the setting had, so every reader of it still reads. */
     if (strcmp(key, "split") == 0)  return snprintf(buf, buf_len, "%d", fork_col(s) + 1);
+    if (strcmp(key, "merge") == 0)  return snprintf(buf, buf_len, "%d", s->merge_at);
     if (strcmp(key, "pan_a") == 0)  return snprintf(buf, buf_len, "%.4f", s->pan_a);
     if (strcmp(key, "pan_b") == 0)  return snprintf(buf, buf_len, "%.4f", s->pan_b);
     if (strcmp(key, "sel_block") == 0) return snprintf(buf, buf_len, "%d", s->sel_block);
@@ -991,8 +1014,9 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         int w = 0;
         w += snprintf(buf + w, buf_len - w,
                       "{\"in_level\":%.4f,\"out_level\":%.4f,\"rows\":%d,"
-                      "\"pan_a\":%.4f,\"pan_b\":%.4f,\"blocks\":[",
-                      s->in_level, s->out_level, NUM_ROWS, s->pan_a, s->pan_b);
+                      "\"merge\":%d,\"pan_a\":%.4f,\"pan_b\":%.4f,\"blocks\":[",
+                      s->in_level, s->out_level, NUM_ROWS, s->merge_at,
+                      s->pan_a, s->pan_b);
         for (int i = 0; i < NUM_BLOCKS && w < buf_len - 256; i++) {
             w += snprintf(buf + w, buf_len - w,
                 "%s{\"type\":%d,\"on\":%d,\"model\":%d,\"quality\":%d,\"cab\":%d,"
@@ -1095,12 +1119,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
              "{\"key\":\"sel_block\",\"name\":\"Block\",\"type\":\"int\","
               "\"min\":0,\"max\":%d,\"default\":0,\"step\":1},"
              "{\"key\":\"split\",\"name\":\"Split\",\"type\":\"int\","
+              "\"min\":0,\"max\":%d,\"default\":0,\"step\":1,"
+              "\"access\":\"read\"},"
+             "{\"key\":\"merge\",\"name\":\"Merge\",\"type\":\"int\","
               "\"min\":0,\"max\":%d,\"default\":0,\"step\":1},"
-             "{\"key\":\"pan_a\",\"name\":\"Pan L\",\"type\":\"float\","
+             "{\"key\":\"pan_a\",\"name\":\"Pan Top\",\"type\":\"float\","
               "\"min\":-1.0,\"max\":1.0,\"default\":-1.0,\"step\":0.02},"
-             "{\"key\":\"pan_b\",\"name\":\"Pan R\",\"type\":\"float\","
+             "{\"key\":\"pan_b\",\"name\":\"Pan Btm\",\"type\":\"float\","
               "\"min\":-1.0,\"max\":1.0,\"default\":1.0,\"step\":0.02}",
-             NUM_BLOCKS - 1, NUM_BLOCKS);
+             NUM_BLOCKS - 1, NUM_COLS, NUM_COLS);
 
         char fxopts[1024]; int fw = 0;
         fw += snprintf(fxopts + fw, sizeof(fxopts) - fw, "[");

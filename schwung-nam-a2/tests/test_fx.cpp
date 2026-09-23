@@ -419,7 +419,11 @@ int main(int argc, char **argv) {
         api->set_param(in, "pan_a", "-1.0");      /* branch hard left   */
         api->set_param(in, "pan_b", "1.0");       /* main hard right    */
         api->set_param(in, "t2_type", "3");
-        api->set_param(in, "t2_fx", "19");        /* EQ flat: forks and joins at col 2 */
+        api->set_param(in, "t2_fx", "19");        /* EQ flat: forks at col 2 */
+        /* THE MERGE IS A SETTING NOW, and its default is the output - so
+         * without this line the tail would still be two lanes and the
+         * block below would only reach the one it sits on. */
+        api->set_param(in, "merge", "4");
         /* One measurement, twice, so the two runs cannot differ in
          * anything but the block being switched. */
         double ml = 0, mr = 0, bl = 0, br = 0;
@@ -457,6 +461,7 @@ int main(int argc, char **argv) {
             printf("   <-- the tail does not reach the RIGHT lane\n"); fails++;
         }
 
+        api->set_param(in, "merge", "0");
         for (int b = 1; b <= 8; b++) {
             char k[16]; snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
         }
