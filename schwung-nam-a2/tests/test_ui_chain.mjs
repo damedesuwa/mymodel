@@ -194,7 +194,10 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     /* ONE STEP IS THREE DETENTS on every discrete control - the encoders
      * are not detented and the shim coalesces, so a message carries
      * however many ticks arrived in that audio frame. */
-    const STEP = 3;
+    /* DETENTS_PER_STEP in ui_chain.js. It went 3 -> 5 when the knobs came
+     * back as still too sensitive to find anything with; this file has to
+     * move with it or every discrete assertion tests the old scale. */
+    const STEP = 5;
     const turn = (cc, dir, steps = 1) => {
         for (let i = 0; i < steps * STEP; i++)
             ui.onMidiMessageInternal([0xb0, cc, dir > 0 ? 1 : 127]);
@@ -212,15 +215,30 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
                   DYN:7, FILTER:8, MOD:9, TIME:10, PITCH:11 };
     const gotoCat = (c) => { turn(K1, -1, 12); turn(K1, +1, c); };
 
-    /* The sensitivity itself, which is the thing that was wrong: two
-     * detents must move NOTHING, and the third must move exactly one. */
+    /* The sensitivity itself, which is the thing that was wrong twice:
+     * four detents must move NOTHING, and the fifth must move exactly
+     * one. */
     turn(K1, -1, 12);                                /* park on Off */
     writes.length = 0;
+    for (let i = 0; i < STEP - 1; i++) ui.onMidiMessageInternal([0xb0, K1, 1]);
+    ok(writes.length === 0, 'knob: a part turn does not make a step');
     ui.onMidiMessageInternal([0xb0, K1, 1]);
-    ui.onMidiMessageInternal([0xb0, K1, 1]);
-    ok(writes.length === 0, 'knob: two detents do not make a step');
-    ui.onMidiMessageInternal([0xb0, K1, 1]);
-    ok(params['b4_type'] === '1', 'knob: the third detent makes exactly one step (Off->NAM)');
+    ok(params['b4_type'] === '1', 'knob: the last detent makes exactly one step (Off->NAM)');
+
+    /* A BURST IS CLIPPED. The shim coalesces, so one CC can carry ten
+     * ticks - and at three ticks a step that was three items per message
+     * on a fifty-entry list. The cap is what stops a real turn crossing
+     * the whole list faster than it can be read. */
+    turn(K1, -1, 12);                                /* park on Off */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, K1, 20]);        /* twenty ticks at once */
+    ok(params['b4_type'] === '0',
+       'knob: one huge message cannot step further than the cap allows');
+    /* Re-select, which drops the part-turn that message banked - a stale
+     * remainder would silently shift every count below by one. */
+    ui.onMidiMessageInternal([0x90, 71, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 71, 0]);
 
     /* ONE KNOB NOW DECIDES WHAT THE BLOCK IS. Type and family were two
      * encoders and are one, which is what freed the fifth parameter slot
@@ -415,6 +433,31 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ok(!reads.some(k => /_cat$/.test(k)),
        'reads: nothing asks the plugin for a key it cannot answer');
 
+    /* A NEW BLOCK ARRIVES BYPASSED. Turning knob 1 past Off used to put a
+     * pedal straight into the signal at its defaults, and a .nam is the
+     * worst case - the device log has `out pk` stepping 0.08 -> 1.32
+     * across one load, through headphones, while you are still looking
+     * for the pedal. */
+    board({});
+    ui.init();
+    ui.onMidiMessageInternal([0x90, 68, 127]);       /* hold pad 1 -> select */
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    writes.length = 0;
+    for (let i = 0; i < 5; i++) ui.onMidiMessageInternal([0xb0, 71, 1]);
+    ok(writes.some(([k, v]) => k === 'b1_type' && v !== '0'),
+       'bypass: knob 1 past Off gives the block a type');
+    ok(writes.some(([k, v]) => k === 'b1_on' && v === '1'),
+       'bypass: and it arrives BYPASSED, not in the signal');
+    /* Only on the way OUT of Off - changing a live block's category must
+     * not silence it, or auditioning costs a stomp per candidate. */
+    writes.length = 0;
+    for (let i = 0; i < 5; i++) ui.onMidiMessageInternal([0xb0, 71, 1]);
+    ok(writes.some(([k]) => k === 'b1_type'),
+       'bypass: the next category still lands');
+    ok(!writes.some(([k]) => k === 'b1_on'),
+       'bypass: but a live block is not re-bypassed under you');
+
     /* THE TOP ROW IS BLOCKS NOW, not a routing row.
      *
      * It used to carry its own language - tap a dark pad to split, tap a
@@ -550,7 +593,7 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
      * what was reported as unintuitive. Out by default means a board that
      * forks and never rejoins: nothing moves unless you move it. */
     board({ b1: 3, b2: 3, t2: 3, b5: 3, b6: 3 });
-    delete params['merge'];
+    params['merge'] = '0';
     ui.init();
     rects.length = 0; repaint();
     ok(lowerAt(4) && !boxesAt(4).some(r => r[4] === BAND),
@@ -582,14 +625,46 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ui.onMidiMessageInternal([0xb0, 3, 127]);
     ok(menuGoTo(ui, 'Merge', repaint), 'merge: it is a menu row');
     drawnAt.length = 0; repaint();
-    ok(drawnAt.some(d => /col 4/.test(d[2])), 'merge: naming its column');
+    ok(drawnAt.some(d => /after 4/.test(d[2])), 'merge: naming how far the branch runs');
     /* AND A KNOB SETS IT IN PLACE, like every other value row. */
     writes.length = 0;
     for (let i = 0; i < 9; i++) ui.onMidiMessageInternal([0xb0, K1, 1]);
     ok(writes.some(([k, v]) => k === 'merge' && Number(v) > 4),
        'merge: a knob moves it along the board');
     ui.onMidiMessageInternal([0xb0, 3, 127]);     /* close */
-    delete params['merge'];
+
+    /* SHIFT + A PAD IS THE GESTURE. The menu row survives as a readout,
+     * but it is six rows down a list that scrolls at five - which is why
+     * the setting came back as "still hard". */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0xb0, 49, 127]);             /* shift down  */
+    ui.onMidiMessageInternal([0x90, 76 + 5, 127]);         /* top pad 6   */
+    ui.onMidiMessageInternal([0x80, 76 + 5, 0]);
+    ok(writes.some(([k, v]) => k === 'merge' && v === '6'),
+       'merge: shift + a pad sets how far the branch runs');
+    ok(!writes.some(([k]) => /_on$/.test(k)),
+       'merge: and the pad under it is not stomped as well');
+    /* The same pad again puts it back - one gesture, both directions. */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 76 + 5, 127]);
+    ui.onMidiMessageInternal([0x80, 76 + 5, 0]);
+    ok(writes.some(([k, v]) => k === 'merge' && v === '0'),
+       'merge: pressing it again goes back to Out');
+    /* EITHER ROW, because a column is what is being chosen. */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 68 + 2, 127]);         /* bottom pad 3 */
+    ui.onMidiMessageInternal([0x80, 68 + 2, 0]);
+    ok(writes.some(([k, v]) => k === 'merge' && v === '3'),
+       'merge: the bottom row does it too');
+    ui.onMidiMessageInternal([0xb0, 49, 0]);               /* shift up */
+    /* And with Shift released the pad stomps again. */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 68 + 2, 127]);
+    ui.onMidiMessageInternal([0x80, 68 + 2, 0]);
+    ok(writes.some(([k]) => k === 'b3_on'),
+       'merge: releasing shift gives the pad back to the block');
+
+    params['merge'] = '0';
 
     /* AN EMPTY SLOT IS A WIRE, NOT A BOX. Five empty boxes with a dash in
      * each is what "messy" meant: the three blocks that were there had to
@@ -631,7 +706,7 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     /* WHICH SIDE YOU ARE EDITING is a different question from which side
      * a block is on, and it was the one going unanswered. */
     board({ b1: 3, b2: 3, b3: 3, b4: 3, t3: 3, t4: 3 });
-    delete params['merge'];                          /* lanes run to the out */
+    params['merge'] = '0';                           /* lanes run to the out */
     ui.init();
     ui.onMidiMessageInternal([0x90, 71, 127]);       /* hold pad 4 -> select */
     advance(1000); ui.tick();

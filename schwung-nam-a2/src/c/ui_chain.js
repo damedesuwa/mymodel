@@ -96,8 +96,8 @@ function joinCol() {
     const f = forkCol();
     if (f < 0) return -1;
     const m = num(st.val['merge'], 0);
-    if (m < 2) return NUM_COLS - 1;                 /* 0 = at the output */
-    return Math.max(f, Math.min(NUM_COLS - 1, m - 2));
+    if (m < 1) return NUM_COLS - 1;                 /* 0 = at the output */
+    return Math.max(f, Math.min(NUM_COLS - 1, m - 1));
 }
 /* Is this slot in the signal path at all? The branch row outside
  * [fork, join] is not - by construction it is empty there. */
@@ -324,6 +324,7 @@ let menuCursor = 0;
 let menuTop = 0;
 const MENU_VISIBLE = 5;
 
+let shiftHeld = false;
 let padDownAt = [];             /* when each pad went down, or 0 */
 let padHandled = [];            /* hold already fired, so the release is not a tap */
 let routeDownAt = [];           /* the same two, for the routing row */
@@ -373,11 +374,41 @@ function flash(t) {
  * The remainder is per KNOB and is dropped whenever the knob list changes
  * underneath, or a half-turn saved up for Pedal lands on Drive.
  */
-const DETENTS_PER_STEP = 3;
-const FLOAT_STEP = 0.01;
+/* AND ONE MESSAGE IS STILL NOT ONE TICK.
+ *
+ * The accumulator fixed the relationship between the turn and the move;
+ * it did not fix the SCALE. At ten ticks a message and three ticks a
+ * step, a discrete control advanced three items per CC - and the shim
+ * emits one CC per audio frame, so a real turn crossed a fifty-entry list
+ * faster than it could be read. Reported again, the same words: the knobs
+ * are too sensitive to find anything with.
+ *
+ * Three numbers, and they are independent:
+ *
+ *   DETENT_CAP       the most ticks ONE message may spend. A burst past
+ *                    this is a turn faster than anyone means, and the
+ *                    remainder is dropped rather than banked - banking it
+ *                    would just move the overshoot one message later.
+ *   DETENTS_PER_STEP ticks per item on a discrete control.
+ *   FLOAT_STEP       how far one tick moves a continuous one, as a
+ *                    fraction of its range.
+ */
+const DETENT_CAP = 4;
+const DETENTS_PER_STEP = 5;
+const FLOAT_STEP = 0.005;
 const knobAcc = new Array(NUM_KNOBS).fill(0);
 
 function resetKnobAcc() { for (let i = 0; i < NUM_KNOBS; i++) knobAcc[i] = 0; }
+
+/* decodeDelta, with the burst clipped. Every read of an encoder on this
+ * screen goes through here so the cap cannot apply to some knobs and not
+ * others - which is how "the pedal list is too fast but the drive knob is
+ * fine" would have been true. */
+function detents(ccValue) {
+    const d = decodeDelta(ccValue);
+    if (!d) return 0;
+    return (d > DETENT_CAP) ? DETENT_CAP : (d < -DETENT_CAP) ? -DETENT_CAP : d;
+}
 
 function knobSteps(idx, d) {
     knobAcc[idx] += d;
@@ -551,6 +582,9 @@ function openMenu() {
      * setting, and they are different kinds of thing on purpose: you
      * choose where to fork by putting a pedal there, and the merge then
      * STAYS where you put it however many pedals you add afterwards. */
+    /* Still here as a READOUT and a fallback - the gesture is Shift + a
+     * pad, and a row that can only be reached by scrolling is not where
+     * anyone will look for it. */
     menuRows.push({ label: 'Merge', action: null, edit: 'merge', kind: 'merge' });
     menuRows.push({ label: 'Pan Top', action: null, edit: 'pan_a', kind: 'pan' });
     menuRows.push({ label: 'Pan Btm', action: null, edit: 'pan_b', kind: 'pan' });
@@ -572,7 +606,7 @@ function menuValueText(row, v) {
     /* "Out" is a place, not an off switch - the lanes do merge, at the
      * output, and calling it Off would say they never meet. */
     if (row.kind === 'merge')
-        return (v < 2) ? 'Out' : ('col ' + Math.round(v));
+        return (v < 1) ? 'Out' : ('after ' + Math.round(v));
     if (row.kind === 'pan') {
         const p = Math.round(v * 100);
         if (p === 0) return 'C';
@@ -1153,6 +1187,29 @@ function paintLeds() {
  * silences a block should not be the most easily missed thing on the
  * panel.
  */
+/* SHIFT + A PAD SAYS HOW FAR THE BRANCH RUNS.
+ *
+ * The merge was a menu row for one release and came back as still hard:
+ * it is six rows down a list that scrolls at five, and it is the only
+ * thing about the routing that is not under your hands. The split is a
+ * pad, so this is a pad.
+ *
+ * The COLUMN you press is the last parallel one - "it runs this far" -
+ * which is what the lit run on the top row already shows, so the gesture
+ * changes the length of a thing you can see. Pressing the column it is
+ * already set to puts it back to Out.
+ *
+ * Either row, because a column is what you are choosing and making the
+ * top row the only one that works would be a rule to learn for nothing.
+ */
+function setMergeCol(c) {
+    const cur = num(st.val['merge'], 0);
+    const v = (cur === c + 1) ? 0 : c + 1;
+    st.val['merge'] = v;
+    setp('merge', v);
+    flash(v === 0 ? 'Merge: at Out' : ('Merge after ' + v));
+}
+
 function stomp(b) {
     const nowOn = st.on[b];
     st.on[b] = nowOn ? 0 : 1;
@@ -1182,7 +1239,7 @@ function onKnob(idx, ccValue) {
     if (s.kind === 'gap') return;
     lastKnob = idx;
     lastPaint = 0;
-    const d = decodeDelta(ccValue);
+    const d = detents(ccValue);
     if (!d) return;
     const k = fullKey(s);
     let v = st.val[k];
@@ -1190,6 +1247,7 @@ function onKnob(idx, ccValue) {
     if (s.kind === 'cat') {
         const step = knobSteps(idx, d);
         if (!step) return;
+        const was = st.type[sel];
         let c = catOfBlock(sel) + step;
         if (c < 0) c = 0;
         if (c > CATS.length - 1) c = CATS.length - 1;
@@ -1204,9 +1262,27 @@ function onKnob(idx, ccValue) {
             st.val[selKey('fx')] = cat.items[0];
             setp(selKey('fx'), cat.items[0]);
         }
+        /* A NEW BLOCK ARRIVES BYPASSED.
+         *
+         * Turning knob 1 past Off used to put a pedal straight into the
+         * signal at whatever its defaults were, and a .nam is the worst
+         * case: the device log has `out pk` stepping from 0.08 to 1.32
+         * across one load. Through headphones that is "오디오가 팍 튀어서
+         * 귀아파", and it happens while you are still LOOKING for the
+         * pedal, so it happens once per candidate.
+         *
+         * Only on the way OUT of Off. Changing a live block's category
+         * must not silence it - you are auditioning, and having to stomp
+         * it back in every time would be its own complaint. */
+        if (was === TYPE_OFF && cat.type !== TYPE_OFF) {
+            st.on[sel] = 0;
+            st.val[selKey('on')] = 1;
+            setp(selKey('on'), 1);
+        }
         st.type[sel] = cat.type;
         st.val[selKey('type')] = cat.type;
         setp(selKey('type'), cat.type);
+        if (st.on[sel] === 0) flash(blockName(sel) + ' ADDED - BYPASSED');
         readSelected();
         return;
     }
@@ -1361,11 +1437,11 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
         const status = data[0] & 0xf0;
         const d1 = data[1], d2 = data[2];
 
-        /* Nothing here is modified by Shift any more - the routing row's
-         * tap and hold cover what it used to. It is still swallowed rather
-         * than ignored, so it cannot fall through to a branch that reads
-         * CC numbers it does not own. */
-        if (status === 0xb0 && d1 === CC_SHIFT) return;
+        /* Shift is a MODIFIER again, for one thing: Shift + a pad sets how
+         * far the branch runs. Tracked rather than ignored, and still
+         * swallowed, so it cannot fall through to a branch reading CC
+         * numbers it does not own. */
+        if (status === 0xb0 && d1 === CC_SHIFT) { shiftHeld = d2 > 0; return; }
 
         /* Jog: click opens the menu, turn scrolls it. The jog is free here -
          * the host's own COMPONENT_EDIT jog handler never runs, because MIDI
@@ -1380,7 +1456,7 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
             return;
         }
         if (status === 0xb0 && d1 === CC_JOG_TURN && menuOpen) {
-            const d = decodeDelta(d2);
+            const d = detents(d2);
             if (d) {
                 menuCursor += (d > 0 ? 1 : -1);
                 if (menuCursor < 0) menuCursor = 0;
@@ -1401,7 +1477,7 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
         if (menuOpen) {
             if (status === 0xb0 && d1 >= CC_KNOB_BASE && d1 < CC_KNOB_BASE + 8) {
                 const row = menuRows[menuCursor];
-                const dd = decodeDelta(d2);
+                const dd = detents(d2);
                 if (row && row.edit && dd) {
                     let v = st.val[row.edit];
                     if (row.kind === 'merge') {
@@ -1413,7 +1489,6 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
                         const step = knobSteps(d1 - CC_KNOB_BASE, dd);
                         if (!step) return;
                         v = Math.round(v === undefined ? 0 : v) + step;
-                        if (v === 1) v = step > 0 ? 2 : 0;
                         if (v < 0) v = 0;
                         if (v > NUM_COLS) v = NUM_COLS;
                         st.val[row.edit] = v;
@@ -1447,6 +1522,10 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
         if (d1 >= ROUTE_BASE && d1 < ROUTE_BASE + NUM_COLS) {
             const r = d1 - ROUTE_BASE;
             if (status === 0x90 && d2 > 0) {
+                /* Handled on the DOWN edge and marked done, so the
+                 * release cannot also stomp the block underneath it. */
+                if (shiftHeld) { routeDownAt[r] = 0; routeHandled[r] = true;
+                                 setMergeCol(r); return; }
                 routeDownAt[r] = Date.now();
                 routeHandled[r] = false;
             } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
@@ -1461,6 +1540,8 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
         const b = d1 - PAD_BASE;
 
         if (status === 0x90 && d2 > 0) {
+            if (shiftHeld) { padDownAt[b] = 0; padHandled[b] = true;
+                             setMergeCol(b); return; }
             padDownAt[b] = Date.now();
             padHandled[b] = false;
         } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {

@@ -63,7 +63,7 @@ if (scen === 'merge') {
     set('b1', 3, 0); set('b2', 1); set('b3', 2);
     set('t3', 2);
     set('b6', 3, 44); set('b7', 3, 30);
-    params.merge = '4';       /* column 4 is one signal again */
+    params.merge = '3';       /* the branch runs to column 3 */
 }
 
 const host = {

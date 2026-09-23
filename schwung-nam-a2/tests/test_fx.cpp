@@ -423,7 +423,7 @@ int main(int argc, char **argv) {
         /* THE MERGE IS A SETTING NOW, and its default is the output - so
          * without this line the tail would still be two lanes and the
          * block below would only reach the one it sits on. */
-        api->set_param(in, "merge", "4");
+        api->set_param(in, "merge", "3");   /* parallel to column 3 */
         /* One measurement, twice, so the two runs cannot differ in
          * anything but the block being switched. */
         double ml = 0, mr = 0, bl = 0, br = 0;

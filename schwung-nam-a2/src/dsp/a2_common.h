@@ -625,10 +625,14 @@ static void nam_block_apply_quality(nam_block_t *b) {
 }
 
 /* Adopt a model the loader published. Called from the audio thread, which is
- * why it is a plain exchange and never a wait. */
-static void nam_block_adopt_pending(nam_block_t *b) {
+ * why it is a plain exchange and never a wait.
+ *
+ * Returns 1 when a model actually changed hands, so the caller can ramp
+ * the block in: two captures do not agree about level and the swap is a
+ * step discontinuity otherwise. */
+static int nam_block_adopt_pending(nam_block_t *b) {
     NeuralAudio::NeuralModel *fresh = b->pending.exchange(nullptr, std::memory_order_acq_rel);
-    if (!fresh) return;
+    if (!fresh) return 0;
     NeuralAudio::NeuralModel *old = b->model;
     b->model = fresh;
     b->in_gain = b->pending_in_gain;
@@ -636,6 +640,7 @@ static void nam_block_adopt_pending(nam_block_t *b) {
     b->dc_x1 = b->dc_y1 = 0.0f;
     nam_block_apply_quality(b);
     delete old;
+    return 1;
 }
 
 static void nam_block_process(nam_block_t *b, float *mono, float *scratch,

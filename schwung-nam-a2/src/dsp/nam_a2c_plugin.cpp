@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "mergeset"
+#define NAM_A2C_BUILD_ID "shiftmerge"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -58,6 +58,10 @@
 #define SLOT(r, c) ((r) * NUM_COLS + (c))
 #define NUM_BLOCKS (NUM_ROWS * NUM_COLS)
 #define IR_RUN_TAPS 1024        /* 23 ms - a cabinet, not a room */
+
+/* 30 ms. Long enough that a full-scale step is inaudible as a click,
+ * short enough that coming off bypass still feels like a switch. */
+#define FADE_IN_SAMPLES 1323
 
 /* How many entries the model and cab pickers offer. The lists are served as
  * enum options inside chain_params, so this bounds that JSON rather than
@@ -152,6 +156,19 @@ typedef struct {
      * page shows the total, and a block's own page shows its share. */
     double us_peak[NUM_BLOCKS];
 
+    /* SAMPLES OF RAMP LEFT ON A BLOCK THAT JUST CAME ALIVE.
+     *
+     * A .nam that finishes parsing is switched in between one block and
+     * the next, and two captures do not agree about level - the device
+     * log has `out pk` going from 0.08 to 1.32 across one load. That is a
+     * step discontinuity into a speaker, reported as "오디오가 팍 튀어서
+     * 귀아파", and it is the same event whether the block was just
+     * created, just adopted a model, or just came off bypass.
+     *
+     * 30 ms of linear ramp costs one multiply per sample while it runs
+     * and nothing at all afterwards. */
+    int fade_in[NUM_BLOCKS];
+
     int  sel_block;               /* which block the grid is editing */
 
     float in_level, out_level;
@@ -197,8 +214,9 @@ typedef struct {
     float laneB[FRAMES_PER_BLOCK];
     float pan_a, pan_b;             /* A = top row, B = bottom row, -1 .. +1 */
     /* WHERE THE LANES COME BACK TOGETHER: 0 = at the output, else the
-     * 1-based COLUMN that is one signal again. Set, not derived - see
-     * join_col. */
+     * 1-based LAST PARALLEL COLUMN - "the branch runs this far". Named
+     * for the pad you press rather than for the first mono column,
+     * because the gesture is Shift + that pad. */
     int   merge_at;
     float scratch[FRAMES_PER_BLOCK];
 
@@ -266,8 +284,8 @@ static int fork_col(const a2c_t *s) {
 static int join_col(const a2c_t *s) {
     const int f = fork_col(s);
     if (f < 0) return -1;
-    if (s->merge_at < 2) return NUM_COLS - 1;       /* 0 = at the output */
-    int j = s->merge_at - 2;
+    if (s->merge_at < 1) return NUM_COLS - 1;       /* 0 = at the output */
+    int j = s->merge_at - 1;
     if (j < f) j = f;
     if (j > NUM_COLS - 1) j = NUM_COLS - 1;
     return j;
@@ -614,7 +632,8 @@ static void run_block(a2c_t *s, int b, float *buf, int n, float bpm) {
     /* Adopt a finished load even while bypassed: coming off bypass
      * should not then wait for a model that has been ready for a
      * minute. */
-    if (t == BLK_NAM) nam_block_adopt_pending(&s->amp[b]);
+    if (t == BLK_NAM && nam_block_adopt_pending(&s->amp[b]))
+        s->fade_in[b] = FADE_IN_SAMPLES;
 
     if (!s->on[b]) { s->us_peak[b] *= CPU_PEAK_DECAY; return; }
 
@@ -642,6 +661,17 @@ static void run_block(a2c_t *s, int b, float *buf, int n, float bpm) {
         default: break;
     }
     clock_gettime(CLOCK_MONOTONIC, &b1);
+
+    /* THE RAMP IS APPLIED TO THE BLOCK'S OWN OUTPUT, not to the master.
+     * A block that just arrived is the only thing that stepped, and
+     * fading the whole board would duck everything else with it. */
+    if (s->fade_in[b] > 0) {
+        for (int i = 0; i < n && s->fade_in[b] > 0; i++) {
+            buf[i] *= 1.0f - (float)s->fade_in[b] / (float)FADE_IN_SAMPLES;
+            s->fade_in[b]--;
+        }
+    }
+
     double us = (b1.tv_sec - b0.tv_sec) * 1e6 + (b1.tv_nsec - b0.tv_nsec) / 1e3;
     double decayed = s->us_peak[b] * CPU_PEAK_DECAY;
     s->us_peak[b] = (us > decayed) ? us : decayed;
@@ -834,9 +864,12 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             if (t == BLK_CAB && s->cab[b].index < 0 && s->cab_count > 0)
                 request_load(s, b, BLK_CAB, 0);
             if (t == BLK_FX) fx_block_reset(&s->fx[b]);
+            s->fade_in[b] = FADE_IN_SAMPLES;
         } else if (strcmp(sub, "on") == 0) {
             /* Enum: 0 = On, 1 = Bypass. Reads the way the pad does. */
+            const int was = s->on[b];
             s->on[b] = (atoi(val) == 0) ? 1 : 0;
+            if (!was && s->on[b]) s->fade_in[b] = FADE_IN_SAMPLES;
         } else if (strcmp(sub, "model") == 0) {
             int i = atoi(val);
             if (i != s->amp[b].index) request_load(s, b, BLK_NAM, i);
@@ -883,7 +916,6 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         int m = atoi(val);
         if (m < 0) m = 0;
         if (m > NUM_COLS) m = NUM_COLS;
-        if (m == 1) m = 2;          /* nothing can merge before column 2 */
         s->merge_at = m;
     } else if (strcmp(key, "pan_a") == 0) {
         s->pan_a = clampf(atof(val), -1.0f, 1.0f);
