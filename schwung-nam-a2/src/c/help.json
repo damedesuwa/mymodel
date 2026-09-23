@@ -10,12 +10,12 @@
         "16 slots, not 8.",
         "TAP a pad to stomp it.",
         "HOLD a pad to edit it.",
-        "SHIFT + a pad sets the merge.",
+        "JOG TURN sets where the two",
+        "lanes meet again.",
+        "JOG CLICK opens the menu.",
         "A NEW block arrives BYPASSED,",
         "so nothing jumps in your ears",
-        "while you hunt for it - tap",
-        "the pad to bring it in.",
-        "JOG CLICK opens the menu."
+        "- tap the pad to bring it in."
       ]
     },
     {
@@ -54,18 +54,17 @@
         "row. It parts at that column.",
         "  top row    = LEFT",
         "  bottom row = RIGHT",
-        "MERGE: SHIFT + any pad. That",
-        "column is the LAST parallel",
-        "one - the branch runs this",
-        "far. Shift + the same pad",
-        "again = back to Out (they",
-        "meet at the output).",
+        "MERGE: turn the JOG. It walks",
+        "the meeting point along the",
+        "board. Out = they meet at the",
+        "output (the default).",
+        "The footer shows M:<col> the",
+        "whole time the board is",
+        "forked. Shift + a pad sets it",
+        "directly if Shift reaches us.",
         "A block outside the parallel",
         "part is drawn TALL: it feeds,",
         "or is fed by, both rails.",
-        "Amp -> two cabs -> reverb:",
-        "amp b1, cabs t2/b2,",
-        "Shift+pad 2, reverb b3.",
         "Menu: Pan Top / Pan Btm."
       ]
     },

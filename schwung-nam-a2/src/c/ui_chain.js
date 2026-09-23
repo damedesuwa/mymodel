@@ -325,6 +325,10 @@ let menuTop = 0;
 const MENU_VISIBLE = 5;
 
 let shiftHeld = false;
+/* Two jog detents per column. One is a brush of the wrist re-routing the
+ * board; three is a control nobody believes is doing anything. */
+const JOG_PER_STEP = 2;
+let jogAcc = 0;
 let padDownAt = [];             /* when each pad went down, or 0 */
 let padHandled = [];            /* hold already fired, so the release is not a tap */
 let routeDownAt = [];           /* the same two, for the routing row */
@@ -1043,24 +1047,40 @@ function drawFooter(list) {
      * group held or which of them this was. Asked from the device as
      * "where did the EQ go" - it had not gone anywhere, it is the first of
      * four in Filter, and that is the sentence the screen now prints. */
+    /* WHERE THE LANES MEET, ALWAYS ON SCREEN WHILE THERE ARE TWO.
+     *
+     * The jog sets it and the flash says so for a second, which answers
+     * "did that take" and not "where is it now". A forked board has a
+     * number worth carrying, and it is the only thing about the routing
+     * that is not already a picture. Unforked there is nothing to say,
+     * so the line is the full width again. */
+    let right = 0;
+    if (forkCol() >= 0) {
+        const m = num(st.val['merge'], 0);
+        const txt = 'M:' + (m < 1 ? 'Out' : String(m));
+        right = text_width(txt) + 3;
+        pright(126, FOOT_Y, txt, 1, right);
+    }
+    const w = 126 - right;
+
     if (st.type[sel] === TYPE_FX) {
         const id = st.fx[sel] | 0;
         const c = catOfBlock(sel);
         const items = CATS[c].items || [id];
         const at = items.indexOf(id);
         ptext(1, FOOT_Y, (st.names.fx[id] || String(id)) + '  ' +
-              CATS[c].name + ' ' + (at + 1) + '/' + items.length, 1, 126);
+              CATS[c].name + ' ' + (at + 1) + '/' + items.length, 1, w);
         return;
     }
     const full = list.find(k => k.kind === 'list');
     if (full) {
         const v = st.val[fullKey(full)];
         if (v !== undefined) {
-            ptext(1, FOOT_Y, listNameFor(full.key, v), 1, 126);
+            ptext(1, FOOT_Y, listNameFor(full.key, v), 1, w);
             return;
         }
     }
-    ptext(1, FOOT_Y, 'tap:stomp  hold:edit', 1, 126);
+    ptext(1, FOOT_Y, 'hold:edit  jog:merge', 1, w);
 }
 
 function draw() {
@@ -1202,9 +1222,13 @@ function paintLeds() {
  * Either row, because a column is what you are choosing and making the
  * top row the only one that works would be a rule to learn for nothing.
  */
-function setMergeCol(c) {
+function setMergeCol(c, absolute) {
     const cur = num(st.val['merge'], 0);
-    const v = (cur === c + 1) ? 0 : c + 1;
+    /* A PAD TOGGLES, A JOG SETS. Pressing the pad it is already on means
+     * "undo that", which is the only sane reading of pressing it twice;
+     * the jog is a position, so -1 is simply Out. */
+    const v = absolute ? (c + 1) : ((cur === c + 1) ? 0 : c + 1);
+    if (v === cur) return;
     st.val['merge'] = v;
     setp('merge', v);
     flash(v === 0 ? 'Merge: at Out' : ('Merge after ' + v));
@@ -1455,14 +1479,37 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
             if (menuOpen) runMenuRow(); else openMenu();
             return;
         }
-        if (status === 0xb0 && d1 === CC_JOG_TURN && menuOpen) {
+        if (status === 0xb0 && d1 === CC_JOG_TURN) {
             const d = detents(d2);
-            if (d) {
+            if (!d) return;
+            if (menuOpen) {
                 menuCursor += (d > 0 ? 1 : -1);
                 if (menuCursor < 0) menuCursor = 0;
                 if (menuCursor > menuRows.length - 1) menuCursor = menuRows.length - 1;
                 lastPaint = 0;   /* the cursor moved; show it */
+                return;
             }
+            /* THE JOG IS THE MERGE, and it is the jog because the jog is
+             * the one control on this screen that is PROVEN to arrive.
+             *
+             * Shift + a pad was the gesture and came back as not working,
+             * with nothing in the device log either way - Shift is a
+             * modifier several layers below us claim, and a gesture that
+             * may or may not reach the module is not a gesture. The jog
+             * CLICK is in that same log opening this module's own menu,
+             * so the jog TURN is on the same wire. It is also free here:
+             * with the menu closed it did nothing at all.
+             *
+             * Shift + a pad is kept beside it. If it works it is faster;
+             * if it does not, nothing is lost. */
+            jogAcc += d;
+            const step = (jogAcc / JOG_PER_STEP) | 0;
+            if (!step) return;
+            jogAcc -= step * JOG_PER_STEP;
+            let v = num(st.val['merge'], 0) + step;
+            if (v < 0) v = 0;
+            if (v > NUM_COLS) v = NUM_COLS;
+            setMergeCol(v - 1, true);
             return;
         }
         /* While the menu is up the encoders and pads are ITS business, not

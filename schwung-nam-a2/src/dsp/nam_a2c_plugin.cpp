@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "shiftmerge"
+#define NAM_A2C_BUILD_ID "jogmerge"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -407,20 +407,28 @@ static void *diag_thread(void *arg) {
         /* THE ROUTING IS IN THE LINE, because a split board whose log
          * looks exactly like a series one is a board nobody can diagnose
          * from a paste. Two rows, printed as two: `T` is the parallel
-         * branch, `B` the main chain, and `/` marks the column they part
-         * at. A `-` is an empty slot and `(` a bypassed one. */
+         * branch, `B` the main chain, `/` marks the column they part at
+         * and `\\` the last column they are still apart on. A `-` is an
+         * empty slot and `(` a bypassed one.
+         *
+         * THE JOIN WAS MISSING FROM THIS LINE for two releases, which is
+         * why a report of "the merge does not work" could not be checked
+         * against a log that was otherwise complete. A routing fact with
+         * no printed form is a routing fact nobody can diagnose. */
         char chain[440]; int w = 0;
         const int dfork = fork_col(s);
+        const int djoin = join_col(s);
         for (int r = 0; r < NUM_ROWS; r++) {
             w += snprintf(chain + w, sizeof(chain) - w, "%s%c",
                           r ? " | " : "", r == ROW_BR ? 'T' : 'B');
             for (int c = 0; c < NUM_COLS; c++) {
                 const int i = SLOT(r, c);
-                w += snprintf(chain + w, sizeof(chain) - w, " %s%s%.0f",
+                w += snprintf(chain + w, sizeof(chain) - w, " %s%s%.0f%s",
                               (dfork == c) ? "/" : "",
                               s->type[i] == BLK_OFF ? "-" :
                               (s->on[i] ? block_type_name(s->type[i]) : "("),
-                              s->type[i] == BLK_OFF ? 0.0 : s->us_peak[i]);
+                              s->type[i] == BLK_OFF ? 0.0 : s->us_peak[i],
+                              (djoin == c) ? "\\" : "");
             }
         }
 

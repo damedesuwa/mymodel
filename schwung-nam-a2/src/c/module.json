@@ -2,7 +2,7 @@
   "id": "nam-a2c",
   "name": "Nam A2c",
   "abbrev": "A2C",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Eight blocks, splittable into two panned lanes - NAM capture, cab IR, or any of 50 modelled pedals",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",

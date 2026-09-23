@@ -633,7 +633,42 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
        'merge: a knob moves it along the board');
     ui.onMidiMessageInternal([0xb0, 3, 127]);     /* close */
 
-    /* SHIFT + A PAD IS THE GESTURE. The menu row survives as a readout,
+    /* THE JOG IS THE GESTURE, because the jog is the one control on this
+     * screen that is PROVEN to arrive - the device log has its CLICK
+     * opening this module's own menu. Shift + a pad came back as not
+     * working, with nothing in the log either way. */
+    params['merge'] = '0';
+    ui.init();
+    writes.length = 0;
+    for (let i = 0; i < 6; i++) ui.onMidiMessageInternal([0xb0, 14, 1]);
+    ok(writes.some(([k, v]) => k === 'merge' && v === '3'),
+       'merge: the jog walks it along the board');
+    writes.length = 0;
+    for (let i = 0; i < 6; i++) ui.onMidiMessageInternal([0xb0, 14, 127]);
+    ok(writes.some(([k, v]) => k === 'merge' && v === '0'),
+       'merge: and back down to Out');
+    /* It must not keep going below Out, or the value the plugin holds and
+     * the value this screen shows part company at the bottom. */
+    writes.length = 0;
+    for (let i = 0; i < 6; i++) ui.onMidiMessageInternal([0xb0, 14, 127]);
+    ok(!writes.some(([k]) => k === 'merge'),
+       'merge: Out is the floor, and a write past it is not sent');
+    /* THE FOOTER CARRIES IT while the board is forked - the flash says
+     * "did that take", not "where is it now". */
+    board({ b1: 3, b2: 3, t2: 3 });
+    params['merge'] = '4';
+    ui.init();
+    /* Past the flash, which owns the whole footer line while it is up. */
+    advance(2000);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'M:4'), 'merge: the footer carries it');
+    board({ b1: 3, b2: 3 });
+    ui.init();
+    drawnAt.length = 0; repaint();
+    ok(!drawnAt.some(d => /^M:/.test(d[2])),
+       'merge: and says nothing on a board with one lane');
+
+    /* SHIFT + A PAD IS KEPT BESIDE IT. The menu row survives as a readout,
      * but it is six rows down a list that scrolls at five - which is why
      * the setting came back as "still hard". */
     writes.length = 0;
