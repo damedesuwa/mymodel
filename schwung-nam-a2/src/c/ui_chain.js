@@ -53,7 +53,7 @@ const NUM_BLOCKS = NUM_COLS * NUM_ROWS;      /* slots, not columns */
 const ROW_BR = 0;               /* top pad row - the parallel branch */
 const ROW_MAIN = 1;             /* bottom pad row - the main chain   */
 const PAD_BASE = 68;            /* bottom row, notes 68..75 */
-const ROUTE_BASE = 76;          /* top row,    notes 76..83 */
+const TOP_BASE = 76;            /* top row,    notes 76..83 */
 
 function slotOf(row, col) { return row * NUM_COLS + col; }
 function rowOf(b) { return (b / NUM_COLS) | 0; }
@@ -100,11 +100,28 @@ function joinCol() {
     return Math.max(f, Math.min(NUM_COLS - 1, m - 1));
 }
 /* Is this slot in the signal path at all? The branch row outside
- * [fork, join] is not - by construction it is empty there. */
+ * [fork, join] is not. */
 function inPath(b) {
     if (rowOf(b) === ROW_MAIN) return true;
     const f = forkCol();
     return f >= 0 && colOf(b) >= f && colOf(b) <= joinCol();
+}
+
+/* A BRANCH SLOT PAST THE MERGE IS DEAD, AND THE TWO OFF-PATH REGIONS ARE
+ * NOT THE SAME THING.
+ *
+ * Before the fork a branch slot is empty by construction, and holding it
+ * is the ONLY way to put a block there - which moves the fork earlier and
+ * puts it in the signal. So it stays holdable, dark but alive.
+ *
+ * Past the merge there is nothing you can do to the slot that would put
+ * it in the signal; the merge is a setting and placing a block does not
+ * move it. `inPath` was checked by the DRAW path alone, so those slots
+ * drew no box while their pads stayed lit and took both gestures -
+ * reported from the device as exactly that. Dead means dead: no light,
+ * no stomp, no edit. */
+function branchDead(b) {
+    return rowOf(b) === ROW_BR && forkCol() >= 0 && colOf(b) > joinCol();
 }
 const HOLD_MS = 350;
 
@@ -324,15 +341,14 @@ let menuCursor = 0;
 let menuTop = 0;
 const MENU_VISIBLE = 5;
 
-let shiftHeld = false;
 /* Two jog detents per column. One is a brush of the wrist re-routing the
  * board; three is a control nobody believes is doing anything. */
 const JOG_PER_STEP = 2;
 let jogAcc = 0;
 let padDownAt = [];             /* when each pad went down, or 0 */
 let padHandled = [];            /* hold already fired, so the release is not a tap */
-let routeDownAt = [];           /* the same two, for the routing row */
-let routeHandled = [];
+let topDownAt = [];             /* the same two, for the TOP block row */
+let topHandled = [];
 let lastPaint = 0;
 let lastKnob = 0;   /* which cell the row is following */
 /*
@@ -1172,7 +1188,7 @@ function paintLeds() {
      * its own block's category, dim when bypassed, dark when empty. */
     const pathFork = forkCol();
     for (let b = 0; b < NUM_BLOCKS; b++) {
-        const note = (rowOf(b) === ROW_BR ? ROUTE_BASE : PAD_BASE) + colOf(b);
+        const note = (rowOf(b) === ROW_BR ? TOP_BASE : PAD_BASE) + colOf(b);
         /* Selection BLINKS rather than taking a colour of its own, because
          * "which one am I editing" and "what is this block" are different
          * questions and one colour cannot answer both - and now that the
@@ -1181,11 +1197,11 @@ function paintLeds() {
         let c;
         if (b === sel && (Date.now() % 700) < 350) {
             c = White;
-        } else if (rowOf(b) === ROW_BR && pathFork >= 0 && colOf(b) < pathFork) {
-            /* Off the path: before the fork the branch row carries no
-             * signal, and lighting it would offer a stomp with nothing
-             * to stomp. It is still HOLDable - that is how you move the
-             * fork earlier. */
+        } else if (rowOf(b) === ROW_BR && pathFork >= 0 &&
+                   (colOf(b) < pathFork || colOf(b) > joinCol())) {
+            /* Off the path, either side. Before the fork it is still
+             * HOLDable - that is how you move the fork earlier. Past the
+             * merge it is inert; see branchDead. */
             c = 0;
         } else {
             const led = CATS[catOfBlock(b)].led;
@@ -1207,34 +1223,35 @@ function paintLeds() {
  * silences a block should not be the most easily missed thing on the
  * panel.
  */
-/* SHIFT + A PAD SAYS HOW FAR THE BRANCH RUNS.
+/* HOW FAR THE BRANCH RUNS. The jog sets it; see the jog branch in
+ * onMidiMessageInternal for why it is the jog and not a modifier.
  *
- * The merge was a menu row for one release and came back as still hard:
- * it is six rows down a list that scrolls at five, and it is the only
- * thing about the routing that is not under your hands. The split is a
- * pad, so this is a pad.
- *
- * The COLUMN you press is the last parallel one - "it runs this far" -
- * which is what the lit run on the top row already shows, so the gesture
- * changes the length of a thing you can see. Pressing the column it is
- * already set to puts it back to Out.
- *
- * Either row, because a column is what you are choosing and making the
- * top row the only one that works would be a rule to learn for nothing.
+ * Shift + a pad did this too for one release and is GONE. It could not be
+ * shown to arrive - the report was "안되는데" with nothing in the log
+ * either way - and once the jog worked it was strictly downside: a stray
+ * Shift under a pad press would silently re-route the board instead of
+ * stomping the block. One gesture, one meaning.
  */
-function setMergeCol(c, absolute) {
+function setMergeCol(c) {
     const cur = num(st.val['merge'], 0);
-    /* A PAD TOGGLES, A JOG SETS. Pressing the pad it is already on means
-     * "undo that", which is the only sane reading of pressing it twice;
-     * the jog is a position, so -1 is simply Out. */
-    const v = absolute ? (c + 1) : ((cur === c + 1) ? 0 : c + 1);
+    const v = c + 1;                  /* -1 is Out; the jog is a position */
     if (v === cur) return;
     st.val['merge'] = v;
     setp('merge', v);
     flash(v === 0 ? 'Merge: at Out' : ('Merge after ' + v));
+    /* MOVING THE MERGE CAN KILL THE SLOT YOU ARE EDITING, and an editor
+     * pointing at a dead block is eight encoders that change nothing you
+     * can hear. Step down to the main row in the same column, which is
+     * always in the signal. */
+    if (branchDead(sel)) {
+        sel = slotOf(ROW_MAIN, colOf(sel));
+        setp('sel_block', sel);
+        readSelected();
+    }
 }
 
 function stomp(b) {
+    if (branchDead(b)) { flash(blockName(b) + ' PAST MERGE'); return; }
     const nowOn = st.on[b];
     st.on[b] = nowOn ? 0 : 1;
     flash(blockName(b) + (st.on[b] ? ' ON' : ' BYPASS'));
@@ -1244,6 +1261,7 @@ function stomp(b) {
 }
 
 function select(b) {
+    if (branchDead(b)) { flash(blockName(b) + ' PAST MERGE'); return; }
     sel = b;
     /* The header carries this too, but the header is where it ALWAYS is -
      * which makes it a state and not an answer to "did that hold take".
@@ -1383,7 +1401,7 @@ globalThis.chain_ui = {
     init() {
         for (let i = 0; i < NUM_COLS; i++) {
             padDownAt[i] = 0; padHandled[i] = false;
-            routeDownAt[i] = 0; routeHandled[i] = false;
+            topDownAt[i] = 0; topHandled[i] = false;
         }
         /* The shim replays Move's own LED state on the way in, so what the
          * cache believes is stale. Re-emit everything once. */
@@ -1446,8 +1464,8 @@ function tickBody() {
                 padHandled[b] = true;
                 select(slotOf(ROW_MAIN, b));
             }
-            if (routeDownAt[b] && !routeHandled[b] && now - routeDownAt[b] >= HOLD_MS) {
-                routeHandled[b] = true;
+            if (topDownAt[b] && !topHandled[b] && now - topDownAt[b] >= HOLD_MS) {
+                topHandled[b] = true;
                 select(slotOf(ROW_BR, b));
             }
         }
@@ -1461,11 +1479,10 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
         const status = data[0] & 0xf0;
         const d1 = data[1], d2 = data[2];
 
-        /* Shift is a MODIFIER again, for one thing: Shift + a pad sets how
-         * far the branch runs. Tracked rather than ignored, and still
-         * swallowed, so it cannot fall through to a branch reading CC
+        /* Nothing here is modified by Shift. It is swallowed rather than
+         * ignored, so it cannot fall through to a branch that reads CC
          * numbers it does not own. */
-        if (status === 0xb0 && d1 === CC_SHIFT) { shiftHeld = d2 > 0; return; }
+        if (status === 0xb0 && d1 === CC_SHIFT) return;
 
         /* Jog: click opens the menu, turn scrolls it. The jog is free here -
          * the host's own COMPONENT_EDIT jog handler never runs, because MIDI
@@ -1566,19 +1583,15 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
 
         /* THE TOP ROW IS BLOCKS, AND IT TAKES THE SAME TWO GESTURES.
          * One rule for sixteen pads: tap stomps, hold edits. */
-        if (d1 >= ROUTE_BASE && d1 < ROUTE_BASE + NUM_COLS) {
-            const r = d1 - ROUTE_BASE;
+        if (d1 >= TOP_BASE && d1 < TOP_BASE + NUM_COLS) {
+            const r = d1 - TOP_BASE;
             if (status === 0x90 && d2 > 0) {
-                /* Handled on the DOWN edge and marked done, so the
-                 * release cannot also stomp the block underneath it. */
-                if (shiftHeld) { routeDownAt[r] = 0; routeHandled[r] = true;
-                                 setMergeCol(r); return; }
-                routeDownAt[r] = Date.now();
-                routeHandled[r] = false;
+                topDownAt[r] = Date.now();
+                topHandled[r] = false;
             } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
-                if (routeDownAt[r] && !routeHandled[r]) stomp(slotOf(ROW_BR, r));
-                routeDownAt[r] = 0;
-                routeHandled[r] = false;
+                if (topDownAt[r] && !topHandled[r]) stomp(slotOf(ROW_BR, r));
+                topDownAt[r] = 0;
+                topHandled[r] = false;
             }
             return;
         }
@@ -1587,8 +1600,6 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
         const b = d1 - PAD_BASE;
 
         if (status === 0x90 && d2 > 0) {
-            if (shiftHeld) { padDownAt[b] = 0; padHandled[b] = true;
-                             setMergeCol(b); return; }
             padDownAt[b] = Date.now();
             padHandled[b] = false;
         } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {

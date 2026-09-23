@@ -60,11 +60,13 @@
         "output (the default).",
         "The footer shows M:<col> the",
         "whole time the board is",
-        "forked. Shift + a pad sets it",
-        "directly if Shift reaches us.",
+        "forked.",
         "A block outside the parallel",
         "part is drawn TALL: it feeds,",
         "or is fed by, both rails.",
+        "Top-row pads PAST the merge",
+        "are dark and do nothing -",
+        "there is no signal there.",
         "Menu: Pan Top / Pan Btm."
       ]
     },

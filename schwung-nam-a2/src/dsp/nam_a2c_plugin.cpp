@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "jogmerge"
+#define NAM_A2C_BUILD_ID "v1"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *

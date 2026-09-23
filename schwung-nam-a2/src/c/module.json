@@ -2,8 +2,8 @@
   "id": "nam-a2c",
   "name": "Nam A2c",
   "abbrev": "A2C",
-  "version": "0.9.4",
-  "description": "Eight blocks, splittable into two panned lanes - NAM capture, cab IR, or any of 50 modelled pedals",
+  "version": "1.0.0",
+  "description": "Sixteen blocks in two rows - a main chain and a parallel one, panned and merged where you choose. NAM captures, cab IRs and 50 modelled pedals.",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
   "dsp": "nam-a2c.so",
@@ -66,7 +66,7 @@
         "name": "Block",
         "type": "int",
         "min": 0,
-        "max": 7,
+        "max": 15,
         "default": 0,
         "step": 1
       }

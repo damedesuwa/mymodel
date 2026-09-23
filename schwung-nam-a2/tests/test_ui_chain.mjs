@@ -668,36 +668,53 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ok(!drawnAt.some(d => /^M:/.test(d[2])),
        'merge: and says nothing on a board with one lane');
 
-    /* SHIFT + A PAD IS KEPT BESIDE IT. The menu row survives as a readout,
-     * but it is six rows down a list that scrolls at five - which is why
-     * the setting came back as "still hard". */
+    /* A BRANCH SLOT PAST THE MERGE IS DEAD - no light, no stomp, no edit.
+     * `inPath` was checked by the DRAW path alone, so those slots drew no
+     * box while their pads stayed lit and took both gestures. */
+    board({ b1: 3, b2: 3, t2: 3, t6: 3 });
+    params['merge'] = '3';                       /* parallel to column 3 */
+    ui.init();
+    repaint();
+    ok(leds[76 + 1] !== 0, 'dead: a branch pad inside the fork is lit');
+    ok(leds[76 + 5] === 0, 'dead: one past the merge is dark');
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 76 + 5, 127]);
+    ui.onMidiMessageInternal([0x80, 76 + 5, 0]);
+    ok(!writes.some(([k]) => k === 't6_on'), 'dead: and a tap does not stomp it');
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 76 + 5, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 76 + 5, 0]);
+    ok(!writes.some(([k]) => k === 'sel_block'), 'dead: nor a hold select it');
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => /PAST MERGE/.test(d[2])),
+       'dead: and the screen says why rather than doing nothing');
+    /* BEFORE the fork is a different region: empty by construction, and
+     * holding it is the only way to move the fork earlier. */
+    writes.length = 0;
+    board({ b1: 3, b2: 3, t3: 3 });
+    params['merge'] = '0';
+    ui.init();
+    ui.onMidiMessageInternal([0x90, 76 + 0, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 76 + 0, 0]);
+    ok(writes.some(([k, v]) => k === 'sel_block' && v === '0'),
+       'dead: but before the fork a hold still selects, or nothing can move it');
+
+    /* SHIFT + A PAD IS GONE. It did this too for one release and could
+     * not be shown to arrive; once the jog worked it was strictly
+     * downside - a stray Shift under a pad press would silently re-route
+     * the board instead of stomping the block. */
+    board({ b1: 3, b2: 3, t2: 3 });
+    params['merge'] = '0';
+    ui.init();
     writes.length = 0;
     ui.onMidiMessageInternal([0xb0, 49, 127]);             /* shift down  */
     ui.onMidiMessageInternal([0x90, 76 + 5, 127]);         /* top pad 6   */
     ui.onMidiMessageInternal([0x80, 76 + 5, 0]);
-    ok(writes.some(([k, v]) => k === 'merge' && v === '6'),
-       'merge: shift + a pad sets how far the branch runs');
-    ok(!writes.some(([k]) => /_on$/.test(k)),
-       'merge: and the pad under it is not stomped as well');
-    /* The same pad again puts it back - one gesture, both directions. */
-    writes.length = 0;
-    ui.onMidiMessageInternal([0x90, 76 + 5, 127]);
-    ui.onMidiMessageInternal([0x80, 76 + 5, 0]);
-    ok(writes.some(([k, v]) => k === 'merge' && v === '0'),
-       'merge: pressing it again goes back to Out');
-    /* EITHER ROW, because a column is what is being chosen. */
-    writes.length = 0;
-    ui.onMidiMessageInternal([0x90, 68 + 2, 127]);         /* bottom pad 3 */
-    ui.onMidiMessageInternal([0x80, 68 + 2, 0]);
-    ok(writes.some(([k, v]) => k === 'merge' && v === '3'),
-       'merge: the bottom row does it too');
-    ui.onMidiMessageInternal([0xb0, 49, 0]);               /* shift up */
-    /* And with Shift released the pad stomps again. */
-    writes.length = 0;
-    ui.onMidiMessageInternal([0x90, 68 + 2, 127]);
-    ui.onMidiMessageInternal([0x80, 68 + 2, 0]);
-    ok(writes.some(([k]) => k === 'b3_on'),
-       'merge: releasing shift gives the pad back to the block');
+    ok(!writes.some(([k]) => k === 'merge'),
+       'merge: shift + a pad no longer re-routes the board');
+    ui.onMidiMessageInternal([0xb0, 49, 0]);
 
     params['merge'] = '0';
 
