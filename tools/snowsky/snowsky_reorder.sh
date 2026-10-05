@@ -261,7 +261,17 @@ def nkey: .name | norm | nkeyof;
 def okey: [nkey, .name];
 # 폴더(작품·하위 폴더)는 RJ 코드를 빼고 비교한다. RJ 코드의 숫자가 제목의 일부처럼 비교되면
 # "SEXTHEEND2RJ…" 가 "SEXTHEENDRJ…"(1편) 보다 앞에 온다.
-def fkey: [(.name | norm | gsub("[rv]j[0-9]{6,8}"; "") | nkeyof), (.name | norm | nkeyof), .name];
+# 이름 앞의 【태그】·[태그] 도 빼고 비교한다 → 태그가 붙은 제목도 본 제목 기준 가나다순.
+# (비교 기준에서만 빠질 뿐, 실제 폴더 이름은 그대로다.)
+# 글자·숫자가 아닌 앞머리 기호(♥ 「 - 공백 등)도 비교에서 뺀다.
+def untag: sub("^([^\\p{L}\\p{N}【\\[]|【[^】]*】|\\[[^\\]]*\\])+"; "");
+def fkey: [(.name | norm | untag | gsub("[rv]j[0-9]{6,8}"; "") | nkeyof), (.name | norm | nkeyof), .name];
+# 트랙: 공통 앞부분을 뺀 이름이 숫자로 시작하면 그 번호가 먼저 결정하고, 번호가 같으면
+# 프롤로그(プロローグ/프롤로그/prologue)가 먼저 온다. 예: "1）禁断…" 와 "01：프롤로그" → 프롤로그 먼저.
+def tkey($pre): (.name | norm) as $n
+  | ($n | if startswith($pre) then .[($pre | length):] else . end | [match("^[0-9]+")] | first | .string) as $d
+  | [ (if $d then [0, ($d | tonumber), (if ($n | test("プロローグ|프롤로그|prologue")) then 0 else 1 end)] else [1] end),
+      nkey, .name ];
 # 이름이 "." 으로 시작하는 파일(.__CONVERTING__ 같은 임시/숨김 파일)은 맨 뒤
 def hidden: .name | startswith(".");
 # 같은 폴더 MP3 들의 공통 앞부분(끝의 숫자는 제외)을 뺀 뒤 처음 나오는 숫자 = 화면에 보여 줄 트랙 번호
@@ -282,7 +292,7 @@ def dirplan:
   | [$e[] | select(.type != $dir and ismp3)] as $mp30
   | ([$mp30[] | select(hidden | not) | .name | norm] | lcp) as $pre
   | [$mp30[] | . + {tok: (if hidden then null else tracklabel($pre) end)}] as $mp3
-  | ([$mp3[] | select((hidden | not) and hasnum)] | sort_by(okey)) as $numd
+  | ([$mp3[] | select((hidden | not) and hasnum)] | sort_by(tkey($pre))) as $numd
   | ([$mp3[] | select((hidden | not) and (hasnum | not))] | sort_by(okey)) as $unnum
   | ([$mp3[] | select(hidden)] | sort_by(.name)) as $hid
   | [$e[] | select(.type != $dir and (ismp3 | not))] as $others
@@ -621,7 +631,7 @@ if [ "$MODE" = report ]; then
       | ([$m[] | .name | norm] | lcp) as $pre
       | { work: $w.name, path: .path, pre: $pre,
           files: [$m | sort_by(.idx)[] | {name, pat: pat($pre), tok: tracklabel($pre)}],
-          planned: ( ([$m[] | select((hidden | not) and hasnum)] | sort_by(okey) | map(.name))
+          planned: ( ([$m[] | select((hidden | not) and hasnum)] | sort_by(tkey($pre)) | map(.name))
                    + ([$m[] | select((hidden | not) and (hasnum | not))] | sort_by(okey) | map(.name))
                    + ([$m[] | select(hidden)] | sort_by(.name) | map(.name)) ) } ] as $F
     | ([$F[].files[]] | length) as $nf
