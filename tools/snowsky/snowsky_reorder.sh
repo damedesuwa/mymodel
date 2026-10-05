@@ -455,10 +455,26 @@ write_phase() {
 # 패드: 아주 짧은 이름의 빈 파일. 앞쪽 빈 엔트리를 메우는 용도이며 실행이 끝나면 모두 지운다.
 # 짧은 이름은 어떤 빈자리에도 들어가므로, 패드가 맨 뒤에 생겼다면 그보다 앞에는 (더 긴 이름이
 # 들어갈 수 있는) 빈자리가 없다는 뜻이다.
-# 패드를 n 개 만든다 (루트 ls 없음)
+# 패드를 n 개 만든다 (루트 ls 없음). 패드는 이름만 서로 다르면 되고 순서가 상관없어서 JOBS 개씩 동시에 만든다.
 make_pads() {   # $1 = 개수
-  local k name u
-  for ((k = 0; k < $1; k++)); do
+  local n=$1 k name u bad=0 tmp
+  local -a pids=()
+  tmp=$(mktemp -d "$TMPDIR/snowsky_pads.XXXXXX") || fail "임시 폴더 생성 실패"
+  for ((k = 0; k < n; k++)); do
+    PADN=$((PADN + 1)); name=$(printf "$PAD_FMT" "$PADN")
+    ( termux-saf-create -t application/octet-stream "$ROOT" "$name" > "$tmp/$k" 2>&1 < /dev/null ) &
+    pids[k]=$!
+    [ "$k" -ge "$JOBS" ] && wait "${pids[k - JOBS]}"
+  done
+  for u in "${pids[@]}"; do wait "$u"; done
+  for ((k = 0; k < n; k++)); do   # 성공한 패드는 모두 기록해 둔다 (정리할 때 필요)
+    u=$(cat "$tmp/$k")
+    if [[ $u == content://* ]]; then printf '%s\n' "$u" >> "$PADS_FILE"; else bad=$((bad + 1)); log "  패드 동시 생성 실패 1건: ${u:0:100}"; fi
+  done
+  rm -rf -- "$tmp"
+  # 동시에 만들다 실패한 것은 새 이름으로 하나씩 다시 만든다. (실패한 쪽이 실제로는 만들어졌더라도
+  # 다음 실행의 prepare_pads 가 이름 패턴으로 찾아 지우므로 남지 않는다)
+  for ((k = 0; k < bad; k++)); do
     PADN=$((PADN + 1)); name=$(printf "$PAD_FMT" "$PADN")
     u=$(termux-saf-create -t application/octet-stream "$ROOT" "$name" 2>&1)
     [[ $u == content://* ]] || fail "패드 생성 실패: ${u:0:200}"
@@ -469,7 +485,7 @@ make_pads() {   # $1 = 개수
 # 앞쪽 빈자리를 모두 막는다: 패드를 만들고 루트 ls 로 맨 뒤가 패드인지 확인 (처음이거나 확인에 실패했을 때만 쓴다)
 plug_holes() {   # $1 = 처음 한 번에 만들 패드 수
   local total=0 b=${1:-1} last
-  [ "$b" -ge 1 ] && [ "$b" -le 32 ] || b=1
+  [ "$b" -ge 1 ] && [ "$b" -le 64 ] || b=1
   while :; do
     log "  패드 $b 개 만드는 중… (누적 $((total + b)))"
     make_pads "$b"; total=$((total + b))
@@ -477,7 +493,7 @@ plug_holes() {   # $1 = 처음 한 번에 만들 패드 수
     last=$(saf_ls "$ROOT" | jq -r '.[-1].name') || fail "루트 ls 실패"
     [[ $last =~ $PAD_RE ]] && break
     [ "$total" -ge 5000 ] && fail "빈자리 채우기가 끝나지 않음 (패드 $total 개)"
-    b=$(( b < 32 ? b * 2 : 32 ))
+    b=$(( b < 64 ? b * 2 : 64 ))
   done
   log "  루트 빈자리 채움: 패드 $total 개"
   return 0
