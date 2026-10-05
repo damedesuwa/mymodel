@@ -34,7 +34,8 @@ JOBS=4 IO_JOBS=3
 GAP=0
 
 MODE=dry YES=0 FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=auto
-PAD_FMT="~P%04d" PAD_RE='^~P[0-9]{4}$' PADN=0 PADS_FILE=""
+PAD_FMT="~P%05d" PAD_RE='^~P[0-9]{4,6}$' PADN=0 PADS_FILE=""
+PRE_DONE=0 PREP_PID="" PREP_B="" NEXT_P="" IGNORE_BACKUPS=0
 
 usage() {
   cat <<'U'
@@ -59,6 +60,7 @@ usage() {
   --jobs <N>          스캔 시 병렬 ls 개수 (기본 4, 읽기 전용)
   --io-jobs <N>       백업·검증 때 동시에 읽는 파일 수 (기본 3). 읽기만 동시에 하고 쓰기·생성은 항상 순서대로
   --restore <백업>     실패로 남은 백업 폴더에서 작품을 다시 생성
+  --ignore-backups    복구하지 않은 백업이 남아 있어도 --apply/--test 를 진행 (기본: 먼저 --restore 하라고 알리고 멈춤)
   -h, --help          이 도움말
 
 하위 폴더도 모두 스캔/처리한다. 작품 = Asmr 바로 아래의 폴더.
@@ -73,6 +75,7 @@ while [ $# -gt 0 ]; do
     --dry-run) MODE=dry ;;
     --apply)   MODE=apply ;;
     --yes)     YES=1 ;;
+    --ignore-backups) IGNORE_BACKUPS=1 ;;
     --test)    MODE=test; FOLDER=${2:?--test 에 작품명 필요}; shift ;;
     --folder)  FOLDER=${2:?--folder 에 작품명 필요}; shift ;;
     --limit)   LIMIT=${2:?--limit 에 숫자 필요}; shift ;;
@@ -387,6 +390,7 @@ write_phase() {
   make_work_folder "$name"
   nw=$NEW_WORK_URI
   DU[.]=$nw
+  start_prep   # (--yes) 다음 작품의 원본 삭제와 빈자리 메우기를 이 작품의 파일을 쓰는 동안 미리 한다
 
   STAGE=write
   local tw0; tw0=$(now)
@@ -527,10 +531,11 @@ plug_holes() {   # $1 = 처음 한 번에 만들 패드 수
 FAST_PLUG=0
 # 작품 폴더를 만든다. 작품 순서 모드에서는 루트 맨 뒤에 생겼는지 확인한다. 결과: NEW_WORK_URI
 make_work_folder() {
-  local name=$1 try nw nm last tp tl hint
+  local name=$1 try nw nm last tp tl hint pre=$PRE_DONE
+  PRE_DONE=0
   hint=$(( (${#name} + 12) / 13 + 2 ))   # 긴 이름은 13 글자마다 한 칸 + 1 칸을 쓴다(FAT LFN)
   for try in 1 2 3 4; do
-    if [ "$TRACKS_ONLY" != 1 ]; then
+    if [ "$TRACKS_ONLY" != 1 ] && ! { [ "$pre" = 1 ] && [ "$try" = 1 ]; }; then
       tp=$(now)
       if [ "$FAST_PLUG" = 1 ] && [ "$try" = 1 ]; then
         log "  지운 폴더 자리 메우는 중: 패드 $hint 개"
@@ -729,15 +734,64 @@ finish_backup() {  # $1 pid  $2 백업 디렉터리
   rm -f "$2.log"
   [ "$rc" = 0 ] && [ -f "$2/.complete" ]
 }
-# 미리 읽기(다음 작품 백업)는 SD 를 읽기만 한다. 취소하면 그 백업만 지우고 원본은 그대로다.
+# 프로세스와 그 자식들을 모두 종료한다 (백업 작업은 여러 읽기 프로세스를 거느린다)
+kill_tree() {
+  local c
+  for c in $(ps -A -o PID,PPID 2>/dev/null | awk -v p="$1" '$2 == p { print $1 }'); do kill_tree "$c"; done
+  kill "$1" 2>/dev/null
+  return 0
+}
+# 다음 작품 미리 읽기(백업) + (--yes 일 때) 미리 지우기. 백업은 SD 를 읽기만 하지만, 미리 지우기가 시작됐다면
+# 그 작품의 원본은 이미 없을 수 있으므로 백업을 지우지 않고 복구 명령을 알려 준다.
 PF_PID="" PF_B=""
 kill_prefetch() {
+  if [ -n "$PREP_PID" ]; then kill_tree "$PREP_PID"; wait "$PREP_PID" 2>/dev/null; PREP_PID=""; fi
   [ -n "$PF_PID" ] || return 0
-  kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null
-  rm -rf -- "$PF_B" "$PF_B.log"
-  log "미리 읽던 다음 작품의 백업을 취소함 (원본은 그대로)"
+  kill_tree "$PF_PID"; wait "$PF_PID" 2>/dev/null
+  if [ -f "$PF_B/.deleting" ]; then
+    log "※ 다음 작품의 원본 삭제가 이미 시작됐습니다. 검증된 백업을 유지합니다 → 복구: bash $0 --restore '$PF_B'"
+  else
+    rm -rf -- "$PF_B" "$PF_B.log" "$PF_B.prep.log" "$PF_B.nodes.jsonl" "$PF_B.mini.json"
+    log "미리 읽던 다음 작품의 백업을 취소함 (원본은 그대로)"
+  fi
   PF_PID="" PF_B=""
 }
+
+# 현재 작품의 폴더를 만든 뒤(맨 뒤에 놓인 뒤) 시작한다: 다음 작품의 백업이 끝나면 그 원본을 지우고 빈자리를 패드로 메워 둔다.
+# 현재 작품의 파일을 쓰는 동안 일어나므로, 다음 작품 차례에는 폴더 생성과 위치 확인만 남는다.
+start_prep() {
+  [ "$YES" = 1 ] && [ -n "$PF_PID" ] && [ -n "$NEXT_P" ] || return 0
+  PREP_B=$PF_B
+  local nm uri hint pfpid=$PF_PID
+  nm=$(jq -r .name <<<"$NEXT_P"); uri=$(jq -r .uri <<<"$NEXT_P"); hint=$(( (${#nm} + 12) / 13 + 2 ))
+  (
+    trap - EXIT INT TERM
+    fail() { log "오류 [사전 작업] $*"; exit 1; }   # 이 서브셸 안에서는 전체를 중단하지 않고 자기만 끝낸다
+    while [ ! -f "$PREP_B/.complete" ]; do kill -0 "$pfpid" 2>/dev/null || exit 1; sleep 2; done
+    : > "$PREP_B/.deleting"
+    log "  [다음 작품 미리 준비] 원본 삭제"
+    rm_checked "$uri" "$nm" "$ROOT" || fail "원본 폴더 삭제 실패"
+    if [ "$TRACKS_ONLY" != 1 ]; then
+      log "  [다음 작품 미리 준비] 빈자리 메우는 중: 패드 $hint 개"
+      make_pads "$hint"
+    fi
+    printf '%s' "$PADN" > "$PREP_B/.padn"
+    : > "$PREP_B/.predeleted"
+    log "  [다음 작품 미리 준비] 완료"
+  ) > "$PREP_B.prep.log" 2>&1 &
+  PREP_PID=$!
+}
+# 다음 작품 차례가 되면 미리 준비가 끝나길 기다린다. 결과: PRE_DONE = 0 안 함 / 1 완료 / 2 실패
+join_prep() {   # $1 = 그 작품의 백업 디렉터리
+  PRE_DONE=0
+  [ -n "$PREP_PID" ] || return 0
+  wait "$PREP_PID" 2>/dev/null; PREP_PID=""
+  [ -f "$1.prep.log" ] && { cat "$1.prep.log"; rm -f "$1.prep.log"; }
+  local pn; [ -f "$1/.padn" ] && { pn=$(cat "$1/.padn"); [ "$pn" -gt "$PADN" ] && PADN=$pn; }
+  if [ -f "$1/.predeleted" ]; then PRE_DONE=1; else PRE_DONE=2; fi
+  return 0
+}
+
 # y 로 진행, n 으로 중단. 입력에 섞여 오는 \r·공백·전각은 무시하고, 한글 자판(ㅛ/ㅜ)도 받는다.
 # 빈 입력이나 알 수 없는 입력은 중단으로 치지 않고 다시 묻는다 (실수로 멈추지 않도록).
 ask_continue() {
@@ -760,8 +814,12 @@ rebuild_work() {   # $1 plan  $2 검증된 백업 디렉터리  $3 시작 시각
   name=$(jq -r .name <<<"$P"); wuri=$(jq -r .uri <<<"$P")
   CUR_WORK=$name CUR_BACKUP=$B
   STAGE=delete
-  rm_checked "$wuri" "$name" "$ROOT" || fail "원본 폴더 삭제 실패 — 아직 SD 에 남아 있음"
-  log "  원본 작품 폴더 삭제"
+  if [ "$PRE_DONE" = 1 ]; then
+    log "  (원본 삭제와 빈자리 메우기는 앞 작품을 쓰는 동안 이미 끝남)"
+  else
+    rm_checked "$wuri" "$name" "$ROOT" || fail "원본 폴더 삭제 실패 — 아직 SD 에 남아 있음"
+    log "  원본 작품 폴더 삭제"
+  fi
   write_phase "$B"
   log "=== [$name] 성공 (총 $(ms "$t0") ms)"
   CUR_WORK=""
@@ -971,6 +1029,21 @@ if [ "$MODE" = test ]; then
   [ "$TRACKS_ONLY" = 1 ] || log "참고: 이 작품은 루트 맨 뒤로 옮겨집니다. 전체 적용 때 작품 순서는 다시 맞춰집니다."
 fi
 if [ "$TRACKS_ONLY" = 1 ]; then PADS_FILE=$CACHE_DIR/pads.$$; : > "$PADS_FILE"; else prepare_pads; fi
+# 복구하지 않은 백업이 남아 있으면 그 작품은 SD 에 없거나 불완전할 수 있다 → 먼저 --restore. (불완전한 백업은 원본이 그대로이므로 지운다)
+LEFT=0
+for d in "$BACKUP_BASE"/*/; do
+  [ -d "$d" ] || continue
+  d=${d%/}
+  if [ -f "$d/.complete" ]; then
+    LEFT=$((LEFT + 1)); log "복구하지 않은 백업: [$(jq -r .work "$d/meta.json" 2>/dev/null)] → bash $0 --restore '$d'"
+  else
+    rm -rf -- "$d" "$d.log" "$d.prep.log" "$d.nodes.jsonl" "$d.mini.json"
+  fi
+done
+if [ "$LEFT" -gt 0 ] && [ "$IGNORE_BACKUPS" = 0 ]; then
+  log "위 작품을 먼저 복구한 뒤 다시 실행하세요. (무시하고 진행하려면 --ignore-backups)"
+  exit 1
+fi
 log "실제 적용: $NT 개 작품 (로그: $LOG)"
 for ((t = 0; t < NT; t++)); do
   P=$(jq -c ".[$t]" <<<"$TARGETS"); NAME=$(jq -r .name <<<"$P")
@@ -984,14 +1057,19 @@ for ((t = 0; t < NT; t++)); do
     B=$(backup_dir "$t"); start_backup "$P" "$B"; PID=$BG_PID
   fi
   finish_backup "$PID" "$B" || { log "중단: [$NAME] 사전 확인/백업 실패 — 원본은 그대로입니다."; rm -f "$B.nodes.jsonl" "$B.mini.json"; exit 1; }
+  join_prep "$B"
+  if [ -f "$B/.deleting" ]; then CUR_WORK=$NAME CUR_BACKUP=$B STAGE=delete; fi   # 지금부터 멈추면 복구 명령을 안내한다
+  if [ "$PRE_DONE" = 2 ]; then fail "미리 준비(원본 삭제/빈자리 메우기)가 실패함 — 원본이 이미 삭제됐을 수 있음"; fi
   if [ -f "$B/refreshed.jsonl" ]; then   # 스캔 이후 바뀐 작품: 갱신된 정보로 이어간다
     update_manifest_keep "$NAME" "$B/refreshed.jsonl" || log "경고: 매니페스트 갱신 실패 (다음 실행 시 --rescan 권장)"
     P=$(cat "$B/plan.json")
     log "  갱신된 계획: 파일 $(jq .nfiles <<<"$P")개, 하위 폴더 $(jq .ndirs <<<"$P")개"
   fi
   # 다음 작품은 지금 작품을 쓰는 동안 미리 읽는다 (SD 읽기와 쓰기를 겹쳐 전체 시간을 줄인다)
+  NEXT_P=""
   if [ $((t + 1)) -lt "$NT" ]; then
-    PF_B=$(backup_dir $((t + 1))); start_backup "$(jq -c ".[$((t + 1))]" <<<"$TARGETS")" "$PF_B"; PF_PID=$BG_PID
+    NEXT_P=$(jq -c ".[$((t + 1))]" <<<"$TARGETS")
+    PF_B=$(backup_dir $((t + 1))); start_backup "$NEXT_P" "$PF_B"; PF_PID=$BG_PID
   fi
   rebuild_work "$P" "$B" "$T0"
   if [ "$MODE" = apply ] && [ "$YES" = 0 ] && [ $((t + 1)) -lt "$NT" ]; then
