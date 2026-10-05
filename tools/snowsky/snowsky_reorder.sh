@@ -633,8 +633,24 @@ if [ "$MODE" = report ]; then
                          (if $np > 1 then "패턴 \($np)종" else empty end) ] | join(", ")),
           "  공통 앞부분: " + (if .pre == "" then "(없음)" else .pre end),
           "  계획된 순서:",
-          (.planned | to_entries[] | "    \(.key + 1). \(.value)") )
+          (.planned | to_entries[] | "    \(.key + 1). \(.value)") ),
+      "",
+      "==== 전체 MP3 폴더 (작품 이름순). 줄 형식: 계획순번. [표시번호] 파일명   (현재 위치가 다르면 ← 현재 N번째)",
+      ( $F | sort_by([.work, .path])[]
+        | (.files | map({key: .name, value: .}) | from_entries) as $by
+        | (.files | to_entries | map({key: .value.name, value: (.key + 1)}) | from_entries) as $cur
+        | "",
+          "[\(.work)\(if .path == "" then "" else "/" + .path end)]" + (if [.files[].name] == .planned then "  (순서 정상)" else "" end),
+          (.planned | to_entries[]
+            | "  \(.key + 1). [\($by[.value].tok // "-")] \(.value)"
+              + (if $cur[.value] != .key + 1 then "   ← 현재 \($cur[.value])번째" else "" end)) )
   ' "$MANIFEST" > "$REPORT" || { log "리포트 생성 실패"; exit 1; }
+  jq -r --arg dir "$DIR_MIME" "$COMMON_JQ"'
+    "", "==== 작품 폴더 순서 (Asmr 바로 아래). 줄 형식: 목표순번. 작품명   (현재 위치가 다르면 ← 현재 N번째)",
+    ( [.works[] | {name, pos}] | (sort_by(.pos) | to_entries | map({key: .value.name, value: (.key + 1)}) | from_entries) as $cur
+      | sort_by(okey) | to_entries[]
+      | "  \(.key + 1). \(.value.name)" + (if $cur[.value.name] != .key + 1 then "   ← 현재 \($cur[.value.name])번째" else "" end) )
+  ' "$MANIFEST" >> "$REPORT" || { log "리포트 생성 실패"; exit 1; }
   log "리포트: $REPORT ($(wc -l < "$REPORT") 줄, $(wc -c < "$REPORT") 바이트)"
   exit 0
 fi
