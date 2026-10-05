@@ -30,7 +30,7 @@ CACHE_DIR=${SNOWSKY_CACHE:-$HOME/.cache/snowsky}
 MANIFEST=$CACHE_DIR/manifest.json
 BACKUP_BASE=${TMPDIR:?TMPDIR 가 비어 있음}/snowsky_backup
 LOG_DIR=${SNOWSKY_LOGS:-$HOME/snowsky_logs}
-JOBS=4
+JOBS=4 IO_JOBS=3
 GAP=0
 
 MODE=dry YES=0 FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=auto
@@ -57,6 +57,7 @@ usage() {
                       → ~/snowsky_report.txt
   --gap <초>          파일 생성 사이 대기 시간 (기본 0)
   --jobs <N>          스캔 시 병렬 ls 개수 (기본 4, 읽기 전용)
+  --io-jobs <N>       백업·검증 때 동시에 읽는 파일 수 (기본 3). 읽기만 동시에 하고 쓰기·생성은 항상 순서대로
   --restore <백업>     실패로 남은 백업 폴더에서 작품을 다시 생성
   -h, --help          이 도움말
 
@@ -84,6 +85,7 @@ while [ $# -gt 0 ]; do
     --report)  MODE=report ;;
     --gap)     GAP=${2:?}; shift ;;
     --jobs)    JOBS=${2:?}; shift ;;
+    --io-jobs) IO_JOBS=${2:?}; shift ;;
     --restore) MODE=restore; RESTORE=${2:?--restore 에 백업 경로 필요}; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "알 수 없는 옵션: $1" >&2; usage >&2; exit 2 ;;
@@ -92,6 +94,7 @@ while [ $# -gt 0 ]; do
 done
 [[ $LIMIT =~ ^[0-9]+$ ]] || { echo "--limit 은 숫자" >&2; exit 2; }
 [[ $JOBS =~ ^[1-9][0-9]*$ ]] || { echo "--jobs 는 1 이상" >&2; exit 2; }
+[[ $IO_JOBS =~ ^[1-9][0-9]*$ ]] || { echo "--io-jobs 는 1 이상" >&2; exit 2; }
 [[ $GAP =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "--gap 은 초 단위 숫자" >&2; exit 2; }
 [ "$MODE" = test ] && FORCE=1
 
@@ -161,6 +164,13 @@ saf_ls() {   # stdout: JSON 배열. 실패 시 return 1
     sleep $(( i < 3 ? i : 3 ))
   done
   return 1
+}
+# createDocument/mkdir 가 돌려준 URI 의 마지막 %2F 뒤가 실제로 붙은 이름이다 (같은 이름이 있으면 "z (1).mp3" 가 된다).
+# 그 이름을 URI 에서 바로 읽어 stat 호출(약 1 초)을 줄인다. 읽을 수 없으면 빈 값.
+uri_name() {
+  local t=${1##*%2F}
+  [ "$t" != "$1" ] && [ -n "$t" ] || return 1
+  printf '%b' "${t//%/\\x}"
 }
 saf_stat_name() {   # $1 URI  $2 부모 폴더 URI. stdout: 실제 이름 (stat, 안 되면 부모 ls 로 확인). 실패 시 빈 문자열
   local out i
@@ -388,7 +398,8 @@ write_phase() {
     if [ "$kind" = d ]; then
       u=$(termux-saf-mkdir "${DU[$parent]}" "$fname" 2>&1)
       [[ $u == content://* ]] || fail "mkdir 실패 ($key): ${u:0:200}"
-      nm=$(saf_stat_name "$u" "${DU[$parent]}")
+      nm=$(uri_name "$u") || nm=""
+      [ -n "$nm" ] || nm=$(saf_stat_name "$u" "${DU[$parent]}")
       [ "$nm" = "$fname" ] || fail "하위 폴더 이름이 '$nm' 로 생성됨 (원래: '$fname')"
       DU[$key]=$u
       log "  [$k/$n] 폴더 $key/"
@@ -424,13 +435,26 @@ write_phase() {
       '{path: $p, uri: $u, entries: (to_entries | map(.value + {idx: .key}))}' <<<"$L" >> "$B/final_nodes.jsonl"
   done
   log "  엔트리 순서 확인 OK (폴더 ${#DU[@]}개)"
-  k=0
+  # 다시 읽어 sha256 을 구하는 일은 IO_JOBS 개씩 동시에 한다 (읽기만 하므로 순서와 무관). 비교와 로그는 순서대로.
+  local -a VF=() vp=()
+  local nv=0 vj
   while IFS=$'\t' read -r -u 3 seq kind parent fname ftype flen fsha; do
     [ "$kind" = f ] || continue
-    k=$((k + 1)); key=$(jp "$parent" "$fname")
+    key=$(jp "$parent" "$fname")
     uri=$(jq -r --arg n "$fname" '.[] | select(.name == $n) | .uri' "${DLS[$parent]}")
     [[ $uri == content://* ]] || fail "검증: URI 없음 ($key)"
-    sha=$(saf_sha "$uri" "$fsha")
+    VF+=("$seq"$'\t'"$key"$'\t'"$uri"$'\t'"$fsha")
+    ( printf '%s' "$(saf_sha "$uri" "$fsha")" > "$B/vsha_$seq" ) &
+    vp[nv]=$!
+    [ "$nv" -ge "$IO_JOBS" ] && wait "${vp[nv - IO_JOBS]}"
+    nv=$((nv + 1))
+  done 3< "$B/index.tsv"
+  for vj in "${vp[@]}"; do wait "$vj"; done
+  k=0
+  for vj in "${VF[@]}"; do
+    IFS=$'\t' read -r seq key uri fsha <<<"$vj"
+    k=$((k + 1))
+    sha=$(cat "$B/vsha_$seq" 2>/dev/null); rm -f "$B/vsha_$seq"
     # SD 쓰기가 잘못 기록됐을 수 있다 → 같은 파일(같은 엔트리, 순서 그대로)에 백업을 다시 써서 최대 2번 재시도
     for rw in 1 2; do
       [ "$sha" = "$fsha" ] && break
@@ -440,7 +464,7 @@ write_phase() {
     done
     [ "$sha" = "$fsha" ] || fail "sha256 불일치 ($key): 원본 $fsha / 새 파일 $sha — 다시 써도 틀림. SD 카드 상태를 확인하세요"
     log "  [$k/$nf] 검증 OK $key"
-  done 3< "$B/index.tsv"
+  done
   [ "$k" = "$nf" ] || fail "검증 단계가 $k/$nf 파일에서 끝남"
 
   update_manifest "$name" "$nw" "$B/final_nodes.jsonl" || log "경고: manifest 갱신 실패 (다음 실행 시 --rescan 권장)"
@@ -518,7 +542,8 @@ make_work_folder() {
     fi
     nw=$(termux-saf-mkdir "$ROOT" "$name" 2>&1)
     [[ $nw == content://* ]] || fail "mkdir 실패: ${nw:0:200}"
-    nm=$(saf_stat_name "$nw" "$ROOT")
+    nm=$(uri_name "$nw") || nm=""
+    [ -n "$nm" ] || nm=$(saf_stat_name "$nw" "$ROOT")
     [ "$nm" = "$name" ] || fail "새 폴더 이름이 '$nm' 로 생성됨 (원래: '$name') — 같은 이름이 남아 있는지 확인"
     if [ "$TRACKS_ONLY" = 1 ]; then break; fi
     tl=$(now)
@@ -650,22 +675,42 @@ backup_work() {   # $1 = plan 객체(JSON)  $2 = 백업 디렉터리
   jq -n --arg w "$name" --arg at "$(date '+%F %T')" '{work: $w, created: $at}' > "$B/meta.json"
   if [ "$changed" = 1 ]; then printf '%s\n' "$P" > "$B/plan.json"; mv "$B.nodes.jsonl" "$B/refreshed.jsonl"; fi
   : > "$B/index.tsv"
-  i=0
+  # 파일 읽기(SD 읽기 전용)는 IO_JOBS 개씩 동시에 한다. 목록(index.tsv)은 항상 계획 순서대로 만든다.
+  local -a OPS=() pids=()
+  local nfiles=0 sf
   while IFS=$'\t' read -r -u 3 kind parent fname furi ftype flen; do
+    OPS+=("$kind"$'\t'"$parent"$'\t'"$fname"$'\t'"$furi"$'\t'"$ftype"$'\t'"$flen")
+  done 3< <(jq -r '.ops[] | [.op, (if .parent == "" then "." else .parent end), .name, (.uri // "-"),
+                            (if (.type // "") == "" then "-" else .type end), (.length // 0)] | @tsv' <<<"$P")
+  i=0
+  for op in "${OPS[@]}"; do
     i=$((i + 1))
+    IFS=$'\t' read -r kind parent fname furi ftype flen <<<"$op"
+    [ "$kind" = d ] && continue
+    f=$B/$(printf %05d "$i").bin
+    ( set -o pipefail; sha=$(termux-saf-read "$furi" 2>/dev/null | tee "$f" | sha256sum | cut -d' ' -f1) && printf '%s' "$sha" > "$f.sha" ) &
+    pids[nfiles]=$!
+    [ "$nfiles" -ge "$IO_JOBS" ] && wait "${pids[nfiles - IO_JOBS]}"
+    nfiles=$((nfiles + 1))
+  done
+  for sf in "${pids[@]}"; do wait "$sf"; done
+  i=0
+  for op in "${OPS[@]}"; do
+    i=$((i + 1))
+    IFS=$'\t' read -r kind parent fname furi ftype flen <<<"$op"
     if [ "$kind" = d ]; then
       printf '%s\td\t%s\t%s\t-\t0\t-\n' "$i" "$parent" "$fname" >> "$B/index.tsv"
       continue
     fi
     key=$(jp "$parent" "$fname"); f=$B/$(printf %05d "$i").bin
-    sha=$(termux-saf-read "$furi" | tee "$f" | sha256sum | cut -d' ' -f1) || fail "읽기 실패 ($key)"
+    [ -s "$f.sha" ] || [ "$flen" = 0 ] || fail "읽기 실패 ($key) (원본 변경 없음)"
+    sha=$(cat "$f.sha" 2>/dev/null); rm -f "$f.sha"
     lsz=$(stat -c %s "$f")
     [ "$lsz" = "$flen" ] || fail "읽은 크기 불일치 ($key): SD $flen / 로컬 $lsz"
     lsha=$(sha256sum < "$f" | cut -d' ' -f1)
     [ "$lsha" = "$sha" ] || fail "로컬 백업 sha256 불일치 ($key)"
     printf '%s\tf\t%s\t%s\t%s\t%s\t%s\n' "$i" "$parent" "$fname" "$ftype" "$flen" "$sha" >> "$B/index.tsv"
-  done 3< <(jq -r '.ops[] | [.op, (if .parent == "" then "." else .parent end), .name, (.uri // "-"),
-                            (if (.type // "") == "" then "-" else .type end), (.length // 0)] | @tsv' <<<"$P")
+  done
   [ "$i" = "$(jq '.ops | length' <<<"$P")" ] || fail "백업이 $i/$(jq '.ops | length' <<<"$P") 항목에서 끝남 (원본 변경 없음)"
   [ "$(wc -l < "$B/index.tsv")" = "$i" ] || fail "백업 목록 줄 수 불일치 (원본 변경 없음)"
   touch "$B/.complete"
