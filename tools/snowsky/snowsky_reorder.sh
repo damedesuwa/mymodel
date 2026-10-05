@@ -366,7 +366,7 @@ def st: {"reorder": "재정렬 필요", "ok": "이미 트랙 순서대로임", "
 # $1 = 검증된 백업 디렉터리 (meta.json, index.tsv, NNNN.bin, .complete)
 # index.tsv: seq kind(f|d) parent(.=작품 루트) name type length sha   (빈 값은 -)
 write_phase() {
-  local B=$1 name nw nm n nf k t0 tw seq kind parent fname ftype flen fsha u L got want uri sha key j bytes=0
+  local B=$1 rw name nw nm n nf k t0 tw seq kind parent fname ftype flen fsha u L got want uri sha key j bytes=0
   local -A DU=() DLS=()
   name=$(jq -r .work "$B/meta.json")
   n=$(wc -l < "$B/index.tsv")
@@ -431,7 +431,14 @@ write_phase() {
     uri=$(jq -r --arg n "$fname" '.[] | select(.name == $n) | .uri' "${DLS[$parent]}")
     [[ $uri == content://* ]] || fail "검증: URI 없음 ($key)"
     sha=$(saf_sha "$uri" "$fsha")
-    [ "$sha" = "$fsha" ] || fail "sha256 불일치 ($key): 원본 $fsha / 새 파일 $sha"
+    # SD 쓰기가 잘못 기록됐을 수 있다 → 같은 파일(같은 엔트리, 순서 그대로)에 백업을 다시 써서 최대 2번 재시도
+    for rw in 1 2; do
+      [ "$sha" = "$fsha" ] && break
+      log "  경고: sha256 불일치 ($key) — 백업에서 다시 쓰기 $rw/2 (SD 쓰기 오류일 수 있음)"
+      termux-saf-write "$uri" < "$B/$(printf %05d "$seq").bin" || fail "다시 쓰기 실패 ($key)"
+      sha=$(saf_sha "$uri" "$fsha")
+    done
+    [ "$sha" = "$fsha" ] || fail "sha256 불일치 ($key): 원본 $fsha / 새 파일 $sha — 다시 써도 틀림. SD 카드 상태를 확인하세요"
     log "  [$k/$nf] 검증 OK $key"
   done 3< "$B/index.tsv"
   [ "$k" = "$nf" ] || fail "검증 단계가 $k/$nf 파일에서 끝남"
