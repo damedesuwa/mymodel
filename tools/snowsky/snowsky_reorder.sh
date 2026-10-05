@@ -103,6 +103,9 @@ done
 mkdir -p "$CACHE_DIR" "$LOG_DIR" "$BACKUP_BASE" || exit 1
 LOG=$LOG_DIR/$(date +%Y%m%d_%H%M%S)_$MODE.log
 exec > >(tee -a "$LOG") 2>&1
+# termux-saf-* (termux-api) 는 stdin 을 읽어 갈 때가 있다. 반복문의 목록을 삼키지 않도록 표준 입력을 막고,
+# 모든 반복문은 목록을 fd 3 으로 읽는다. (y/n 은 /dev/tty 에서 직접 읽는다)
+exec < /dev/null
 
 LOCK=$CACHE_DIR/lock
 mkdir "$LOCK" 2>/dev/null || { echo "다른 실행이 진행 중이거나 비정상 종료됨: $LOCK (확인 후 rmdir)"; exit 1; }
@@ -378,7 +381,7 @@ write_phase() {
   STAGE=write
   local tw0; tw0=$(now)
   k=0
-  while IFS=$'\t' read -r seq kind parent fname ftype flen fsha; do
+  while IFS=$'\t' read -r -u 3 seq kind parent fname ftype flen fsha; do
     k=$((k + 1)); tw=$(now)
     [ -n "${DU[$parent]:-}" ] || fail "부모 폴더 URI 없음: $parent"
     key=$(jp "$parent" "$fname")
@@ -398,7 +401,8 @@ write_phase() {
       log "  [$k/$n] 생성 $key ($(hsize "$flen"), $(ms "$tw") ms)"
       [ "$GAP" != 0 ] && sleep "$GAP"
     fi
-  done < "$B/index.tsv"
+  done 3< "$B/index.tsv"
+  [ "$k" = "$n" ] || fail "쓰기 단계가 $k/$n 항목에서 끝남 (목록을 끝까지 처리하지 못함)"
 
   log "  쓰기 완료: $(hsize "$bytes"), $(ms "$tw0") ms ($(rate "$bytes" "$(ms "$tw0")"))"
   STAGE=verify
@@ -421,7 +425,7 @@ write_phase() {
   done
   log "  엔트리 순서 확인 OK (폴더 ${#DU[@]}개)"
   k=0
-  while IFS=$'\t' read -r seq kind parent fname ftype flen fsha; do
+  while IFS=$'\t' read -r -u 3 seq kind parent fname ftype flen fsha; do
     [ "$kind" = f ] || continue
     k=$((k + 1)); key=$(jp "$parent" "$fname")
     uri=$(jq -r --arg n "$fname" '.[] | select(.name == $n) | .uri' "${DLS[$parent]}")
@@ -429,7 +433,8 @@ write_phase() {
     sha=$(saf_sha "$uri" "$fsha")
     [ "$sha" = "$fsha" ] || fail "sha256 불일치 ($key): 원본 $fsha / 새 파일 $sha"
     log "  [$k/$nf] 검증 OK $key"
-  done < "$B/index.tsv"
+  done 3< "$B/index.tsv"
+  [ "$k" = "$nf" ] || fail "검증 단계가 $k/$nf 파일에서 끝남"
 
   update_manifest "$name" "$nw" "$B/final_nodes.jsonl" || log "경고: manifest 갱신 실패 (다음 실행 시 --rescan 권장)"
   STAGE=done
@@ -493,9 +498,9 @@ make_work_folder() {
 cleanup_pads() {
   local n=0 u
   [ -n "$PADS_FILE" ] && [ -f "$PADS_FILE" ] || return 0
-  while IFS= read -r u; do
+  while IFS= read -r -u 3 u; do
     [ -n "$u" ] && termux-saf-rm "$u" >/dev/null 2>&1 && n=$((n + 1))
-  done < "$PADS_FILE"
+  done 3< "$PADS_FILE"
   rm -f "$PADS_FILE"
   [ "$n" -gt 0 ] && log "패드 $n 개 삭제"
   return 0
@@ -522,13 +527,14 @@ backup_work() {   # $1 = plan 객체(JSON)  $2 = 백업 디렉터리
   t0=$(now)
 
   STAGE=precheck
-  while IFS=$'\t' read -r key u; do   # 작품 안 모든 폴더를 다시 ls 해서 스캔 결과와 비교
+  while IFS=$'\t' read -r -u 3 key u; do   # 작품 안 모든 폴더를 다시 ls 해서 스캔 결과와 비교
     nd=$((nd + 1))
     got=$(saf_ls "$u" | jq -c '[.[] | [.name, .uri, (.length // 0)]] | sort') || fail "폴더 ls 실패 ($name/$key)"
     want=$(jq -c --arg n "$name" --arg k "$key" \
       '($k | if . == "." then "" else . end) as $k | .works[] | select(.name == $n) | .dirs[] | select(.path == $k) | [.entries[] | [.name, .uri, (.length // 0)]] | sort' "$MANIFEST")
     [ "$got" = "$want" ] || fail "스캔 이후 폴더 내용이 바뀜 ($name/$key) — --rescan 후 다시 실행 (원본 변경 없음)"
-  done < <(jq -r '.dirs[] | [(if .path == "" then "." else .path end), .uri] | @tsv' <<<"$P")
+  done 3< <(jq -r '.dirs[] | [(if .path == "" then "." else .path end), .uri] | @tsv' <<<"$P")
+  [ "$nd" = "$(jq '.dirs | length' <<<"$P")" ] || fail "사전 확인이 폴더 $nd 개에서 끝남 (원본 변경 없음)"
   need=$(( $(jq .bytes <<<"$P") / 1024 + 200 * 1024 ))
   avail=$(df -Pk "$TMPDIR" | awk 'NR == 2 { print $4 }')
   [ "$avail" -gt "$need" ] || fail "\$TMPDIR 여유 공간 부족: 필요 ${need} KB, 여유 ${avail} KB"
@@ -540,7 +546,7 @@ backup_work() {   # $1 = plan 객체(JSON)  $2 = 백업 디렉터리
   jq -n --arg w "$name" --arg at "$(date '+%F %T')" '{work: $w, created: $at}' > "$B/meta.json"
   : > "$B/index.tsv"
   i=0
-  while IFS=$'\t' read -r kind parent fname furi ftype flen; do
+  while IFS=$'\t' read -r -u 3 kind parent fname furi ftype flen; do
     i=$((i + 1))
     if [ "$kind" = d ]; then
       printf '%s\td\t%s\t%s\t-\t0\t-\n' "$i" "$parent" "$fname" >> "$B/index.tsv"
@@ -553,8 +559,10 @@ backup_work() {   # $1 = plan 객체(JSON)  $2 = 백업 디렉터리
     lsha=$(sha256sum < "$f" | cut -d' ' -f1)
     [ "$lsha" = "$sha" ] || fail "로컬 백업 sha256 불일치 ($key)"
     printf '%s\tf\t%s\t%s\t%s\t%s\t%s\n' "$i" "$parent" "$fname" "$ftype" "$flen" "$sha" >> "$B/index.tsv"
-  done < <(jq -r '.ops[] | [.op, (if .parent == "" then "." else .parent end), .name, (.uri // "-"),
+  done 3< <(jq -r '.ops[] | [.op, (if .parent == "" then "." else .parent end), .name, (.uri // "-"),
                             (if (.type // "") == "" then "-" else .type end), (.length // 0)] | @tsv' <<<"$P")
+  [ "$i" = "$(jq '.ops | length' <<<"$P")" ] || fail "백업이 $i/$(jq '.ops | length' <<<"$P") 항목에서 끝남 (원본 변경 없음)"
+  [ "$(wc -l < "$B/index.tsv")" = "$i" ] || fail "백업 목록 줄 수 불일치 (원본 변경 없음)"
   touch "$B/.complete"
   log "  백업 완료: 항목 $i 개, $(hsize "$(jq .bytes <<<"$P")"), $(ms "$t0") ms ($(rate "$(jq .bytes <<<"$P")" "$(ms "$t0")")) → $B"
 
@@ -620,9 +628,9 @@ restore_check_tree() {   # $1 URI  $2 상대경로(.=루트)  $3 백업 경로�
         | $t != null and ($t.kind == (if .type == $d then "d" else "f" end))
           and (.type == $d or (.length // 0) <= $t.length))' <<<"$L" >/dev/null \
     || fail "SD 의 '$2' 에 백업에 없는 내용이 있음 — 직접 확인 필요 (아무것도 지우지 않음)"
-  while IFS=$'\t' read -r sub u; do
+  while IFS=$'\t' read -r -u 3 sub u; do
     restore_check_tree "$u" "$(jp "$2" "$sub")" "$3"
-  done < <(jq -r --arg d "$DIR_MIME" '.[] | select(.type == $d) | [.name, .uri] | @tsv' <<<"$L")
+  done 3< <(jq -r --arg d "$DIR_MIME" '.[] | select(.type == $d) | [.name, .uri] | @tsv' <<<"$L")
 }
 
 restore() {
@@ -632,12 +640,12 @@ restore() {
   CUR_WORK=$name CUR_BACKUP=$B
   STAGE=restore-check
   log "=== 복구: [$name] ← $B"
-  while IFS=$'\t' read -r seq kind parent fname ftype flen fsha; do
+  while IFS=$'\t' read -r -u 3 seq kind parent fname ftype flen fsha; do
     [ "$kind" = f ] || continue
     f=$B/$(printf %05d "$seq").bin
     [ "$(stat -c %s "$f")" = "$flen" ] && [ "$(sha256sum < "$f" | cut -d' ' -f1)" = "$fsha" ] \
       || fail "백업 파일 손상: $(jp "$parent" "$fname")"
-  done < "$B/index.tsv"
+  done 3< "$B/index.tsv"
   log "  백업 sha256 확인 OK"
 
   L=$(saf_ls "$ROOT") || fail "루트 ls 실패"
