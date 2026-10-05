@@ -252,17 +252,25 @@ def ismp3: .name | ascii_downcase | endswith(".mp3");
 def jp($p; $n): if $p == "" then $n else $p + "/" + $n end;
 def norm: fw | ascii_downcase | sub("\\.mp3$"; "");
 def hasnum: .name | fw | test("[0-9]");
-# 자연 정렬: 이름을 숫자 덩어리/글자 덩어리로 나눠 숫자는 숫자로 비교 (#2 < #10, 01 < 2, RJ…_3 < RJ…_12).
+# 자연 정렬: 한 글자씩 비교하되 연속된 숫자는 하나의 수로 비교한다 (#2 < #10, 01 < 2, RJ…_3 < RJ…_12).
 # 번호가 이름 앞이 아니어도 된다 ("#1.", "Track 01", "【01】", "第1話", "RJ01062161_01" …).
-def nkey: [.name | norm | scan("[0-9]+|[^0-9]+") | if test("^[0-9]") then [0, tonumber] else [1, .] end];
+# 숫자 덩어리는 글자 "0" 자리에서 비교되므로 공백·"-"·"." 보다는 뒤, 글자·한자·한글보다는 앞에 온다
+# ("QUEST" < "QUEST2", "배구 - …" < "배구 2 …", "track01" < "trackEX1", "02_" < "反転01_").
+def nkeyof: [scan("[0-9]+|[^0-9]") | if test("^[0-9]") then [48, tonumber] else [explode[0], 0] end];
+def nkey: .name | norm | nkeyof;
 def okey: [nkey, .name];
+# 폴더(작품·하위 폴더)는 RJ 코드를 빼고 비교한다. RJ 코드의 숫자가 제목의 일부처럼 비교되면
+# "SEXTHEEND2RJ…" 가 "SEXTHEENDRJ…"(1편) 보다 앞에 온다.
+def fkey: [(.name | norm | gsub("[rv]j[0-9]{6,8}"; "") | nkeyof), (.name | norm | nkeyof), .name];
+# 이름이 "." 으로 시작하는 파일(.__CONVERTING__ 같은 임시/숨김 파일)은 맨 뒤
+def hidden: .name | startswith(".");
 # 같은 폴더 MP3 들의 공통 앞부분(끝의 숫자는 제외)을 뺀 뒤 처음 나오는 숫자 = 화면에 보여 줄 트랙 번호
 def lcp: if length == 0 then "" else
            reduce .[1:][] as $s (.[0];
              . as $p | ([($p | length), ($s | length)] | min) as $m
              | ([range(0; $m) | select($p[.:.+1] != $s[.:.+1])] | first // $m) as $i | $p[:$i])
          end | sub("[0-9]+$"; "");
-def tracklabel($pre): (.name | norm) as $n
+def tracklabel($pre): (.name | norm | gsub("(?<c>[①-⑳])"; (.c | explode[0] - 9311 | tostring) + " ")) as $n
   | (if ($n | startswith($pre)) then $n[($pre | length):] else $n end)
   | ([scan("[0-9]+")] | first) // null;
 '
@@ -272,13 +280,14 @@ def dirplan:
   | (.entries | sort_by(.idx)) as $e
   | [$e[] | select(.type == $dir)] as $dirs
   | [$e[] | select(.type != $dir and ismp3)] as $mp30
-  | ([$mp30[] | .name | norm] | lcp) as $pre
-  | [$mp30[] | . + {tok: tracklabel($pre)}] as $mp3
-  | ([$mp3[] | select(hasnum)] | sort_by(okey)) as $numd
-  | ([$mp3[] | select(hasnum | not)] | sort_by(okey)) as $unnum
+  | ([$mp30[] | select(hidden | not) | .name | norm] | lcp) as $pre
+  | [$mp30[] | . + {tok: (if hidden then null else tracklabel($pre) end)}] as $mp3
+  | ([$mp3[] | select((hidden | not) and hasnum)] | sort_by(okey)) as $numd
+  | ([$mp3[] | select((hidden | not) and (hasnum | not))] | sort_by(okey)) as $unnum
+  | ([$mp3[] | select(hidden)] | sort_by(.name)) as $hid
   | [$e[] | select(.type != $dir and (ismp3 | not))] as $others
-  | ($dirs | sort_by(okey)) as $sdirs
-  | ($numd + $unnum) as $pm
+  | ($dirs | sort_by(fkey)) as $sdirs
+  | ($numd + $unnum + $hid) as $pm
   | { path: $p, uri: .uri,
       mp3ok: ([$mp3[].name] == [$pm[].name]),
       dirok: ([$dirs[].name] == [$sdirs[].name]),
@@ -289,6 +298,7 @@ def dirplan:
       nmp3: ($mp3 | length),
       bad: ([$e[] | select(.name | test("[\\t\\n\\r\\\\]"))] | length > 0),
       warnings: ( [$unnum[] | "숫자 없음 (이름순으로 뒤에 배치): " + jp($p; .name)]
+                + [$hid[] | "\".\" 으로 시작하는 임시/숨김 파일로 보임 (맨 뒤에 배치, 그대로 복사): " + jp($p; .name)]
                 + [$numd | map(select(.tok != null)) | group_by(.tok | tonumber)[] | select(length > 1)
                    | "같은 번호 \(.[0].tok | tonumber) 여러 개 (시점·버전 차이면 정상 — 번갈아 배치, 짧은 이름 먼저): " + (map(jp($p; .name)) | join(", "))] ) };
 .works | sort_by(.name) | map(
@@ -611,7 +621,9 @@ if [ "$MODE" = report ]; then
       | ([$m[] | .name | norm] | lcp) as $pre
       | { work: $w.name, path: .path, pre: $pre,
           files: [$m | sort_by(.idx)[] | {name, pat: pat($pre), tok: tracklabel($pre)}],
-          planned: [$m | sort_by(okey)[] | .name] } ] as $F
+          planned: ( ([$m[] | select((hidden | not) and hasnum)] | sort_by(okey) | map(.name))
+                   + ([$m[] | select((hidden | not) and (hasnum | not))] | sort_by(okey) | map(.name))
+                   + ([$m[] | select(hidden)] | sort_by(.name) | map(.name)) ) } ] as $F
     | ([$F[].files[]] | length) as $nf
     | "==== 요약: MP3 폴더 \($F | length)개, MP3 \($nf)개",
       "",
@@ -648,7 +660,7 @@ if [ "$MODE" = report ]; then
   jq -r --arg dir "$DIR_MIME" "$COMMON_JQ"'
     "", "==== 작품 폴더 순서 (Asmr 바로 아래). 줄 형식: 목표순번. 작품명   (현재 위치가 다르면 ← 현재 N번째)",
     ( [.works[] | {name, pos}] | (sort_by(.pos) | to_entries | map({key: .value.name, value: (.key + 1)}) | from_entries) as $cur
-      | sort_by(okey) | to_entries[]
+      | sort_by(fkey) | to_entries[]
       | "  \(.key + 1). \(.value.name)" + (if $cur[.value.name] != .key + 1 then "   ← 현재 \($cur[.value.name])번째" else "" end) )
   ' "$MANIFEST" >> "$REPORT" || { log "리포트 생성 실패"; exit 1; }
   log "리포트: $REPORT ($(wc -l < "$REPORT") 줄, $(wc -c < "$REPORT") 바이트)"
@@ -658,7 +670,7 @@ fi
 # 작품 순서 계획: 정렬 순서의 앞부분 중 (내부 순서 정상 + 현재 위치도 순서대로)인 최대 구간은 유지,
 # 나머지는 정렬 순서대로 다시 생성(루트 맨 뒤). 건너뜀(skip) 작품은 다시 만들 수 없으므로 고정.
 ROOTPLAN=$(jq -c --argjson tracks "$TRACKS_ONLY" "$COMMON_JQ"'
-  ([.[] | select(.status != "skip")] | sort_by(okey)) as $S
+  ([.[] | select(.status != "skip")] | sort_by(fkey)) as $S
   | (reduce range(0; $S | length) as $i ({m: 0, last: -1, stop: false};
        if .stop then .
        elif $S[$i].status != "reorder" and $S[$i].pos > .last then .m = $i + 1 | .last = $S[$i].pos
