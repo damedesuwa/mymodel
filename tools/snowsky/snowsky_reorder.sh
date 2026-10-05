@@ -528,11 +528,30 @@ make_work_folder() {
     # 맨 뒤가 아님 → 방금 만든 빈 폴더만 지우고, 빈자리를 처음부터 다시 확인하며 재시도
     [ "$(saf_ls "$nw" | jq length)" = 0 ] || fail "방금 만든 폴더가 비어 있지 않음"
     log "  새 폴더가 루트 맨 뒤가 아님 (맨 뒤: $last) → 빈 폴더 삭제 후 재시도 $try"
-    termux-saf-rm "$nw" || fail "재시도용 빈 폴더 삭제 실패"
+    rm_checked "$nw" "$name" "$ROOT" || fail "재시도용 빈 폴더 삭제 실패"
     [ "$try" = 4 ] && fail "새 폴더를 루트 맨 뒤에 만들 수 없음"
   done
   NEW_WORK_URI=$nw
   log "  새 폴더 생성: $name"
+}
+
+# 폴더/파일 삭제. termux-saf-rm 은 결과를 종료 코드로 쓰는 셸 스크립트라서, termux-api 가 숫자가 아닌 값(빈 출력)을
+# 돌려주면 "exit: Illegal number" 와 함께 rc=2 로 끝난다 — 실제로는 지워졌을 수도 있다.
+# 그래서 rc 가 0 이 아니면 부모 폴더 목록으로 실제로 사라졌는지 확인하고, 남아 있으면 다시 지운다.
+rm_checked() {   # $1 URI  $2 이름  $3 부모 URI
+  local try rc L
+  for try in 1 2 3; do
+    termux-saf-rm "$1" > /dev/null 2>&1; rc=$?
+    [ "$rc" = 0 ] && return 0
+    log "  삭제 명령이 rc=$rc 를 돌려줌 → 실제로 지워졌는지 확인합니다 ($try/3)"
+    if L=$(saf_ls "$3"); then
+      if ! jq -e --arg n "$2" 'any(.[]; .name == $n)' <<<"$L" >/dev/null; then
+        log "  폴더가 이미 없음 → 삭제된 것으로 처리"; return 0
+      fi
+    fi
+    sleep $((try * 3))
+  done
+  return 1
 }
 
 # 이전 실행이 남긴 패드(이름 ~P0000 형식, 0 바이트 파일)와 이번 실행의 패드를 지운다.
@@ -696,7 +715,7 @@ rebuild_work() {   # $1 plan  $2 검증된 백업 디렉터리  $3 시작 시각
   name=$(jq -r .name <<<"$P"); wuri=$(jq -r .uri <<<"$P")
   CUR_WORK=$name CUR_BACKUP=$B
   STAGE=delete
-  termux-saf-rm "$wuri" || fail "원본 폴더 삭제 실패 (rc=$?)"
+  rm_checked "$wuri" "$name" "$ROOT" || fail "원본 폴더 삭제 실패 — 아직 SD 에 남아 있음"
   log "  원본 작품 폴더 삭제"
   write_phase "$B"
   log "=== [$name] 성공 (총 $(ms "$t0") ms)"
@@ -744,7 +763,7 @@ restore() {
     restore_check_tree "$ex" . "$B/paths.json"
     STAGE=mkdir   # 이 시점 이후 실패 시 백업 유지
     log "  남아 있는 같은 이름 폴더(백업 내용의 일부/전체만 포함) 삭제"
-    termux-saf-rm "$ex" || fail "기존 폴더 삭제 실패"
+    rm_checked "$ex" "$name" "$ROOT" || fail "기존 폴더 삭제 실패 — 아직 SD 에 남아 있음"
   fi
   write_phase "$B"
   log "=== 복구 성공: [$name]"
