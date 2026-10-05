@@ -560,9 +560,52 @@ prepare_pads() {   # 이전 실행이 남긴 패드: --keep-pads 면 그대로 �
 }
 
 # ---------------------------------------------------------------- 작품 하나 처리 (방식 A)
+# 작품 폴더 하나를 (하위 폴더까지) 다시 읽어 스캔과 같은 모양의 노드 JSONL 로 쓴다.
+scan_work() {   # $1 작품 URI  $2 출력 JSONL
+  local q="$2.q" nx="$2.next" path u L
+  : > "$2"; printf '.\t%s\n' "$1" > "$q"
+  while [ -s "$q" ]; do
+    : > "$nx"
+    while IFS=$'\t' read -r -u 3 path u; do
+      L=$(saf_ls "$u") || return 1
+      jq -c --arg p "$path" --arg u "$u" \
+        '{path: (if $p == "." then "" else $p end), uri: $u, entries: (to_entries | map(.value + {idx: .key}))}' <<<"$L" >> "$2"
+      jq -r --arg p "$path" --arg d "$DIR_MIME" \
+        '.[] | select(.type == $d) | [(if $p == "." then .name else $p + "/" + .name end), .uri] | @tsv' <<<"$L" >> "$nx"
+    done 3< "$q"
+    mv "$nx" "$q"
+  done
+  rm -f "$q"
+}
+
+# 스캔 이후 작품 폴더가 바뀐 경우(예: 이미지 파일을 추가함): 그 작품만 다시 읽어 계획을 갱신한다.
+# 파일이 추가된 것만 받아들인다. 삭제됐거나 크기가 바뀐 파일이 있으면 원본을 건드리기 전에 멈춘다.
+refresh_work() {   # P 를 갱신한다 (backup_work 의 지역 변수), $B.nodes.jsonl 에 새 스캔을 남긴다
+  local nodes="$B.nodes.jsonl" old new gone added
+  log "  폴더 내용이 스캔 이후 바뀜 → 이 작품만 다시 읽습니다"
+  scan_work "$(jq -r .uri <<<"$P")" "$nodes" || fail "작품 다시 읽기 실패 (원본 변경 없음)"
+  old=$(jq -c --arg n "$name" --arg d "$DIR_MIME" '.works[] | select(.name == $n)
+        | [.dirs[] as $x | $x.entries[] | [$x.path, .name, (if .type == $d then "d" else ((.length // 0) | tostring) end)]] | sort' "$MANIFEST")
+  new=$(jq -sc --arg d "$DIR_MIME" '[.[] as $x | $x.entries[] | [$x.path, .name, (if .type == $d then "d" else ((.length // 0) | tostring) end)]] | sort' "$nodes")
+  gone=$(jq -nc --argjson o "$old" --argjson n "$new" '[$o[] | select(. as $e | ($n | index([$e])) == null)]')
+  added=$(jq -nc --argjson o "$old" --argjson n "$new" '[$n[] | select(. as $e | ($o | index([$e])) == null)]')
+  [ "$gone" = "[]" ] || fail "스캔 이후 삭제되었거나 크기가 바뀐 항목이 있음: $(jq -r 'map(if .[0] == "" then .[1] else .[0] + "/" + .[1] end) | join(", ")' <<<"$gone" | cut -c1-300) — 직접 확인 후 --rescan (원본 변경 없음)"
+  log "  새로 생긴 항목 $(jq length <<<"$added")개: $(jq -r 'map((if .[0] == "" then "" else .[0] + "/" end) + .[1]) | join(", ")' <<<"$added" | cut -c1-300)"
+  jq -n --arg n "$name" --arg u "$(jq -r .uri <<<"$P")" --argjson pos "$(jq .pos <<<"$P")" --slurpfile N "$nodes" \
+    '{works: [{name: $n, uri: $u, pos: $pos, dirs: $N}]}' > "$B.mini.json" || fail "계획 갱신 실패"
+  P=$(jq -c --arg dir "$DIR_MIME" "$PLAN_JQ" "$B.mini.json" | jq -c '.[0]') || fail "계획 갱신 실패"
+  [ -n "$P" ] && [ "$P" != null ] || fail "계획 갱신 실패 (원본 변경 없음)"
+  rm -f "$B.mini.json"
+}
+# 갱신된 작품 정보를 매니페스트에 반영한다 (위치 pos 는 유지)
+update_manifest_keep() {   # $1 작품명 $2 노드 JSONL
+  jq --arg n "$1" --slurpfile N "$2" '.works |= map(if .name == $n then (. as $o | {name: $n, uri: $o.uri, pos: $o.pos, dirs: $N}) else . end)' \
+    "$MANIFEST" > "$MANIFEST.tmp$$" && mv "$MANIFEST.tmp$$" "$MANIFEST"
+}
+
 # 사전 확인 + 백업. SD 는 읽기만 하므로 다른 작품을 쓰는 동안 서브셸에서 미리 돌릴 수 있다.
 backup_work() {   # $1 = plan 객체(JSON)  $2 = 백업 디렉터리
-  local P=$1 B=$2 name need avail i kind parent fname furi ftype flen f sha lsha lsz t0 got want u key nd=0
+  local P=$1 B=$2 name need avail i kind parent fname furi ftype flen f sha lsha lsz t0 got want u key nd=0 changed=0
   name=$(jq -r .name <<<"$P")
   CUR_WORK=$name CUR_BACKUP=""
   t0=$(now)
@@ -573,9 +616,10 @@ backup_work() {   # $1 = plan 객체(JSON)  $2 = 백업 디렉터리
     got=$(saf_ls "$u" | jq -c '[.[] | [.name, .uri, (.length // 0)]] | sort') || fail "폴더 ls 실패 ($name/$key)"
     want=$(jq -c --arg n "$name" --arg k "$key" \
       '($k | if . == "." then "" else . end) as $k | .works[] | select(.name == $n) | .dirs[] | select(.path == $k) | [.entries[] | [.name, .uri, (.length // 0)]] | sort' "$MANIFEST")
-    [ "$got" = "$want" ] || fail "스캔 이후 폴더 내용이 바뀜 ($name/$key) — --rescan 후 다시 실행 (원본 변경 없음)"
+    [ "$got" = "$want" ] || { changed=1; break; }
   done 3< <(jq -r '.dirs[] | [(if .path == "" then "." else .path end), .uri] | @tsv' <<<"$P")
-  [ "$nd" = "$(jq '.dirs | length' <<<"$P")" ] || fail "사전 확인이 폴더 $nd 개에서 끝남 (원본 변경 없음)"
+  [ "$changed" = 1 ] || [ "$nd" = "$(jq '.dirs | length' <<<"$P")" ] || fail "사전 확인이 폴더 $nd 개에서 끝남 (원본 변경 없음)"
+  [ "$changed" = 1 ] && refresh_work
   need=$(( $(jq .bytes <<<"$P") / 1024 + 200 * 1024 ))
   avail=$(df -Pk "$TMPDIR" | awk 'NR == 2 { print $4 }')
   [ "$avail" -gt "$need" ] || fail "\$TMPDIR 여유 공간 부족: 필요 ${need} KB, 여유 ${avail} KB"
@@ -585,6 +629,7 @@ backup_work() {   # $1 = plan 객체(JSON)  $2 = 백업 디렉터리
   mkdir -p "$B" || fail "백업 폴더 생성 실패"
   CUR_BACKUP=$B
   jq -n --arg w "$name" --arg at "$(date '+%F %T')" '{work: $w, created: $at}' > "$B/meta.json"
+  if [ "$changed" = 1 ]; then printf '%s\n' "$P" > "$B/plan.json"; mv "$B.nodes.jsonl" "$B/refreshed.jsonl"; fi
   : > "$B/index.tsv"
   i=0
   while IFS=$'\t' read -r -u 3 kind parent fname furi ftype flen; do
@@ -874,7 +919,12 @@ for ((t = 0; t < NT; t++)); do
   else
     B=$(backup_dir "$t"); start_backup "$P" "$B"; PID=$BG_PID
   fi
-  finish_backup "$PID" "$B" || { log "중단: [$NAME] 사전 확인/백업 실패 — 원본은 그대로입니다."; exit 1; }
+  finish_backup "$PID" "$B" || { log "중단: [$NAME] 사전 확인/백업 실패 — 원본은 그대로입니다."; rm -f "$B.nodes.jsonl" "$B.mini.json"; exit 1; }
+  if [ -f "$B/refreshed.jsonl" ]; then   # 스캔 이후 바뀐 작품: 갱신된 정보로 이어간다
+    update_manifest_keep "$NAME" "$B/refreshed.jsonl" || log "경고: 매니페스트 갱신 실패 (다음 실행 시 --rescan 권장)"
+    P=$(cat "$B/plan.json")
+    log "  갱신된 계획: 파일 $(jq .nfiles <<<"$P")개, 하위 폴더 $(jq .ndirs <<<"$P")개"
+  fi
   # 다음 작품은 지금 작품을 쓰는 동안 미리 읽는다 (SD 읽기와 쓰기를 겹쳐 전체 시간을 줄인다)
   if [ $((t + 1)) -lt "$NT" ]; then
     PF_B=$(backup_dir $((t + 1))); start_backup "$(jq -c ".[$((t + 1))]" <<<"$TARGETS")" "$PF_B"; PF_PID=$BG_PID

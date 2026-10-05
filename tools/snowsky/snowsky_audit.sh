@@ -14,6 +14,9 @@ for f in "$@"; do
         name=${line#*=== [}; name=${name%%] 처리 시작 (*}
         ef=$(grep -oE '파일 [0-9]+개, 하위 폴더 [0-9]+개' <<<"$line" | grep -oE '[0-9]+' | sed -n 1p)
         ed=$(grep -oE '파일 [0-9]+개, 하위 폴더 [0-9]+개' <<<"$line" | grep -oE '[0-9]+' | sed -n 2p) ;;
+      *"  갱신된 계획: 파일 "*)   # 스캔 이후 작품이 바뀌어 다시 읽은 경우 계획 수를 갱신
+        ef=$(grep -oE '파일 [0-9]+개' <<<"$line" | grep -oE '[0-9]+')
+        ed=$(grep -oE '하위 폴더 [0-9]+개' <<<"$line" | grep -oE '[0-9]+') ;;
       *"  완료: 파일 "*" 개 + 폴더 "*)
         af=$(grep -oE '파일 [0-9]+ 개' <<<"$line" | grep -oE '[0-9]+')
         ad=$(grep -oE '폴더 [0-9]+ 개' <<<"$line" | grep -oE '[0-9]+')
