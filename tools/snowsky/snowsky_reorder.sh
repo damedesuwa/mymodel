@@ -203,6 +203,7 @@ scan() {
       ( termux-saf-ls "$u" > "$tmp/r$k.json" 2>&1 ) &
       pids[k]=$!
       [ "$k" -ge "$JOBS" ] && wait "${pids[k - JOBS]}"
+      [ $(( (k + 1) % 25 )) -eq 0 ] && log "  깊이 $((level)): $((k + 1)) / ${#lines[@]} 폴더 읽는 중…"
     done
     for u in "${pids[@]}"; do wait "$u"; done
     : > "$tmp/next.tsv"
