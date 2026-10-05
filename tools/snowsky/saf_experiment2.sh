@@ -10,16 +10,27 @@ if termux-saf-ls "$ROOT" | jq -e --arg n "$TESTNAME" '.[]|select(.name==$n)' >/d
   echo "$TESTNAME 이미 존재 — 중단"; exit 1
 fi
 T=""
+# 읽기 전용 호출(ls/stat)은 빈 출력이 올 수 있어 최대 4번 재시도하고, 실패하면 원시 출력을 보여준다.
+try() {
+  local i out rc
+  for i in 1 2 3 4; do
+    out=$("$@" 2>&1); rc=$?
+    if [ -n "$out" ] && jq -e . >/dev/null 2>&1 <<<"$out"; then printf '%s' "$out"; return 0; fi
+    echo "  [시도 $i] $1 rc=$rc 출력=$(printf '%q' "${out:0:200}")" >&2
+    sleep $((i * 2))
+  done
+  return 1
+}
 cleanup() {
   [ -n "$T" ] || return 0
-  if [ "$(termux-saf-stat "$T" | jq -r .name)" = "$TESTNAME" ]; then
+  if [ "$(try termux-saf-stat "$T" | jq -r .name)" = "$TESTNAME" ]; then
     termux-saf-rm "$T" && echo "정리: $TESTNAME 삭제 완료"
     termux-saf-ls "$ROOT" | jq -e --arg n "$TESTNAME" '.[]|select(.name==$n)' >/dev/null \
       && echo "경고: 아직 남아 있음" || echo "확인: 루트에 $TESTNAME 없음"
   else echo "경고: 이름 불일치 — 삭제하지 않음 ($T)"; fi
 }
 trap cleanup EXIT
-names() { termux-saf-ls "$T" | jq -r '[.[].name] | join("  |  ")'; }
+names() { try termux-saf-ls "$T" | jq -r '[.[].name] | join("  |  ")'; }
 declare -A U
 L=(
   "01：長い日本語の作品名テストその一です"
@@ -30,7 +41,7 @@ L=(
 )
 T=$(termux-saf-mkdir "$ROOT" "$TESTNAME")
 echo "== 1. 긴 이름 폴더 5개 생성"
-for n in "${L[@]}"; do U[$n]=$(termux-saf-mkdir "$T" "$n"); done
+for n in "${L[@]}"; do U[$n]=$(termux-saf-mkdir "$T" "$n"); echo "  mkdir -> ${U[$n]:0:60}…"; done
 names
 echo; echo "== 2. 02, 04 삭제 후 패드 없이 긴 이름 폴더 X 생성 (빈자리로 들어가는지)"
 termux-saf-rm "${U[${L[1]}]}"; termux-saf-rm "${U[${L[3]}]}"
@@ -42,7 +53,7 @@ i=0; PADS=()
 while :; do
   i=$((i + 1)); p=$(printf '~P%04d' "$i")
   PADS+=("$(termux-saf-create -t application/octet-stream "$T" "$p")")
-  last=$(termux-saf-ls "$T" | jq -r '.[-1].name')
+  last=$(try termux-saf-ls "$T" | jq -r '.[-1].name')
   echo "  패드 $p → 맨 뒤: $last"
   [ "$last" = "$p" ] && break
   [ "$i" -ge 50 ] && { echo "  패드 50개 초과 — 중단"; break; }
@@ -50,7 +61,7 @@ done
 names
 echo; echo "== 4. 긴 이름 폴더 Y 생성 → 맨 뒤여야 함"
 termux-saf-mkdir "$T" "Y：長い日本語の作品名テスト追加ですよ" >/dev/null
-last=$(termux-saf-ls "$T" | jq -r '.[-1].name'); echo "  맨 뒤: $last"
+last=$(try termux-saf-ls "$T" | jq -r '.[-1].name'); echo "  맨 뒤: $last"
 [[ $last == Y：* ]] && echo "  결과: 성공 (맨 뒤)" || echo "  결과: 실패 (맨 뒤 아님)"
 echo; echo "== 5. 패드 삭제 후 순서 (01 03 05 Y 여야 함)"
 for u in "${PADS[@]}"; do termux-saf-rm "$u"; done

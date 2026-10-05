@@ -135,15 +135,44 @@ fail() {
 }
 
 # ---------------------------------------------------------------- SAF helpers
+# 읽기 전용 호출은 가끔 빈 출력을 돌려주므로(실측) 최대 4번 재시도한다. 쓰기 계열은 재시도하지 않는다.
 saf_ls() {   # stdout: JSON 배열. 실패 시 return 1
-  local out
-  out=$(termux-saf-ls "$1" 2>&1)
-  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$out" || { log "ls 실패: ${out:0:200}" >&2; return 1; }
-  printf '%s' "$out"
+  local out i
+  for i in 1 2 3 4 5 6; do
+    out=$(termux-saf-ls "$1" 2>&1)
+    jq -e 'type == "array"' >/dev/null 2>&1 <<<"$out" && { printf '%s' "$out"; return 0; }
+    log "ls 재시도 $i: $(printf '%q' "${out:0:120}")" >&2
+    sleep $(( i < 3 ? i : 3 ))
+  done
+  return 1
+}
+saf_stat_name() {   # $1 URI  $2 부모 폴더 URI. stdout: 실제 이름 (stat, 안 되면 부모 ls 로 확인). 실패 시 빈 문자열
+  local out i
+  for i in 1 2 3 4 5 6; do
+    out=$(termux-saf-stat "$1" 2>&1)
+    jq -e 'type == "object" and has("name")' >/dev/null 2>&1 <<<"$out" && { jq -r .name <<<"$out"; return 0; }
+    out=$(termux-saf-ls "$2" 2>&1)
+    if jq -e 'type == "array"' >/dev/null 2>&1 <<<"$out"; then
+      out=$(jq -r --arg u "$1" '.[] | select(.uri == $u) | .name' <<<"$out")
+      [ -n "$out" ] && { printf '%s\n' "$out"; return 0; }
+    fi
+    log "이름 확인 재시도 $i" >&2
+    sleep $(( i < 3 ? i : 3 ))
+  done
+}
+saf_sha() {   # 다시 읽어서 sha256. 기대값($2)과 다르면 최대 3번 다시 읽는다 (읽기 전용)
+  local sha i
+  for i in 1 2 3; do
+    sha=$(termux-saf-read "$1" | sha256sum | cut -d' ' -f1)
+    [ "$sha" = "$2" ] && break
+    sleep "$i"
+  done
+  printf '%s' "$sha"
 }
 
-ROOT=$(termux-saf-dirs 2>/dev/null | jq -r --arg n "$ROOT_NAME" \
-        '[.[] | select(.name == $n)] | if length == 1 then .[0].uri else empty end')
+for _i in 1 2 3 4; do DIRS_OUT=$(termux-saf-dirs 2>/dev/null); jq -e 'type == "array"' >/dev/null 2>&1 <<<"$DIRS_OUT" && break; sleep "$_i"; done
+ROOT=$(jq -r --arg n "$ROOT_NAME" \
+        '[.[] | select(.name == $n)] | if length == 1 then .[0].uri else empty end' <<<"$DIRS_OUT" 2>/dev/null)
 [ -n "$ROOT" ] || { log "termux-saf-dirs 에서 '$ROOT_NAME' 를 하나로 찾을 수 없음 (termux-saf-managedir 로 권한 부여)"; exit 1; }
 
 # ---------------------------------------------------------------- 스캔 (1회, 하위 폴더까지)
@@ -299,7 +328,7 @@ write_phase() {
     if [ "$kind" = d ]; then
       u=$(termux-saf-mkdir "${DU[$parent]}" "$fname" 2>&1)
       [[ $u == content://* ]] || fail "mkdir 실패 ($key): ${u:0:200}"
-      nm=$(termux-saf-stat "$u" 2>/dev/null | jq -r '.name // empty')
+      nm=$(saf_stat_name "$u" "${DU[$parent]}")
       [ "$nm" = "$fname" ] || fail "하위 폴더 이름이 '$nm' 로 생성됨 (원래: '$fname')"
       DU[$key]=$u
       log "  [$k/$n] 폴더 $key/"
@@ -338,7 +367,7 @@ write_phase() {
     k=$((k + 1)); key=$(jp "$parent" "$fname")
     uri=$(jq -r --arg n "$fname" '.[] | select(.name == $n) | .uri' "${DLS[$parent]}")
     [[ $uri == content://* ]] || fail "검증: URI 없음 ($key)"
-    sha=$(termux-saf-read "$uri" | sha256sum | cut -d' ' -f1) || fail "재읽기 실패 ($key)"
+    sha=$(saf_sha "$uri" "$fsha")
     [ "$sha" = "$fsha" ] || fail "sha256 불일치 ($key): 원본 $fsha / 새 파일 $sha"
     log "  [$k/$nf] 검증 OK $key"
   done < "$B/index.tsv"
@@ -376,7 +405,7 @@ make_work_folder() {
     [ "$TRACKS_ONLY" = 1 ] || plug_holes
     nw=$(termux-saf-mkdir "$ROOT" "$name" 2>&1)
     [[ $nw == content://* ]] || fail "mkdir 실패: ${nw:0:200}"
-    nm=$(termux-saf-stat "$nw" 2>/dev/null | jq -r '.name // empty')
+    nm=$(saf_stat_name "$nw" "$ROOT")
     [ "$nm" = "$name" ] || fail "새 폴더 이름이 '$nm' 로 생성됨 (원래: '$name') — 같은 이름이 남아 있는지 확인"
     if [ "$TRACKS_ONLY" = 1 ]; then break; fi
     last=$(saf_ls "$ROOT" | jq -r '.[-1].name') || fail "루트 ls 실패"
