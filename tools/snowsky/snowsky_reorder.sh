@@ -51,6 +51,8 @@ usage() {
   --keep-pads         실행이 끝나도 패드(~P0001… 빈 파일)를 지우지 않음. 여러 번 나눠 실행할 때
                       매번 빈자리를 다시 채우는 시간을 아낀다. 다 끝나면 --cleanup-pads 로 삭제
   --cleanup-pads      Asmr 루트의 패드만 모두 지우고 끝냄
+  --report            저장된 스캔 결과로 파일명 번호 패턴 리포트를 만든다 (SD 변경 없음)
+                      → ~/snowsky_report.txt
   --gap <초>          파일 생성 사이 대기 시간 (기본 0)
   --jobs <N>          스캔 시 병렬 ls 개수 (기본 4, 읽기 전용)
   --restore <백업>     실패로 남은 백업 폴더에서 작품을 다시 생성
@@ -75,6 +77,7 @@ while [ $# -gt 0 ]; do
     --tracks-only) TRACKS_ONLY=1 ;;
     --keep-pads)   KEEP_PADS=1 ;;
     --cleanup-pads) MODE=cleanpads ;;
+    --report)  MODE=report ;;
     --gap)     GAP=${2:?}; shift ;;
     --jobs)    JOBS=${2:?}; shift ;;
     --restore) MODE=restore; RESTORE=${2:?--restore 에 백업 경로 필요}; shift ;;
@@ -592,6 +595,49 @@ else
 fi
 
 PLANS=$(jq --arg dir "$DIR_MIME" "$PLAN_JQ" "$MANIFEST") || { log "계획 계산 실패"; exit 1; }
+
+# ---------------------------------------------------------------- 리포트 (읽기 전용, 로컬 계산만)
+# 각 MP3 폴더에서 공통 앞부분을 뺀 이름의 "번호 모양"(번호 앞 글자 + N + 번호 뒤 한 글자)을 모아
+# 라이브러리 전체에서 어떤 패턴이 몇 번 나오는지, 그리고 확인이 필요한 폴더의 전체 파일명과
+# 계획된 순서를 출력한다.
+if [ "$MODE" = report ]; then
+  REPORT=$HOME/snowsky_report.txt
+  jq -r --arg dir "$DIR_MIME" "$COMMON_JQ"'
+    def pat($pre): (.name | norm) as $n
+      | (if ($n | startswith($pre)) then $n[($pre | length):] else $n end)
+      | (capture("^(?<a>[^0-9]*)(?<n>[0-9]+)(?<b>.?)") | (.a | if length > 6 then "…" + .[-6:] else . end) + "N" + .b) // "(숫자 없음)";
+    [ .works[] as $w | $w.dirs[]
+      | [.entries[] | select(.type != $dir and ismp3)] as $m | select(($m | length) > 0)
+      | ([$m[] | .name | norm] | lcp) as $pre
+      | { work: $w.name, path: .path, pre: $pre,
+          files: [$m | sort_by(.idx)[] | {name, pat: pat($pre), tok: tracklabel($pre)}],
+          planned: [$m | sort_by(okey)[] | .name] } ] as $F
+    | ([$F[].files[]] | length) as $nf
+    | "==== 요약: MP3 폴더 \($F | length)개, MP3 \($nf)개",
+      "",
+      "==== 번호 패턴 (공통 앞부분을 뺀 뒤 첫 번호 주변. 많은 순)",
+      ( [$F[] as $f | $f.files[] | {pat, ex: ($f.work + "/" + (if $f.path == "" then "" else $f.path + "/" end) + .name)}]
+        | group_by(.pat) | sort_by(-length)[]
+        | "  \(length)개  \(.[0].pat)    예: \(.[0].ex)" ),
+      "",
+      "==== 확인이 필요한 폴더 (번호 중복 / 숫자 없음 / 한 폴더에 패턴 여러 개)",
+      ( $F[]
+        | ([.files[] | select(.tok != null) | .tok | tonumber] | group_by(.) | map(select(length > 1) | .[0])) as $dup
+        | ([.files[] | select(.pat == "(숫자 없음)")] | length) as $nod
+        | ([.files[].pat] | unique | length) as $np
+        | select(($dup | length) > 0 or $nod > 0 or $np > 1)
+        | "",
+          "[\(.work)\(if .path == "" then "" else "/" + .path end)]",
+          "  이유: " + ([ (if ($dup | length) > 0 then "번호 중복 \($dup | map(tostring) | join(","))" else empty end),
+                         (if $nod > 0 then "숫자 없음 \($nod)개" else empty end),
+                         (if $np > 1 then "패턴 \($np)종" else empty end) ] | join(", ")),
+          "  공통 앞부분: " + (if .pre == "" then "(없음)" else .pre end),
+          "  계획된 순서:",
+          (.planned | to_entries[] | "    \(.key + 1). \(.value)") )
+  ' "$MANIFEST" > "$REPORT" || { log "리포트 생성 실패"; exit 1; }
+  log "리포트: $REPORT ($(wc -l < "$REPORT") 줄, $(wc -c < "$REPORT") 바이트)"
+  exit 0
+fi
 
 # 작품 순서 계획: 정렬 순서의 앞부분 중 (내부 순서 정상 + 현재 위치도 순서대로)인 최대 구간은 유지,
 # 나머지는 정렬 순서대로 다시 생성(루트 맨 뒤). 건너뜀(skip) 작품은 다시 만들 수 없으므로 고정.
