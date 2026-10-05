@@ -33,7 +33,7 @@ LOG_DIR=${SNOWSKY_LOGS:-$HOME/snowsky_logs}
 JOBS=4
 GAP=0
 
-MODE=dry FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0
+MODE=dry FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=0
 PAD_FMT="~P%04d" PAD_RE='^~P[0-9]{4}$' PADN=0 PADS_FILE=""
 
 usage() {
@@ -48,6 +48,9 @@ usage() {
   --force             이미 트랙 순서대로인 작품도 대상에 포함
   --rescan            저장된 스캔 결과를 버리고 SD 카드를 다시 스캔
   --tracks-only       작품 순서는 맞추지 않고 작품 안의 트랙 순서만 맞춤
+  --keep-pads         실행이 끝나도 패드(~P0001… 빈 파일)를 지우지 않음. 여러 번 나눠 실행할 때
+                      매번 빈자리를 다시 채우는 시간을 아낀다. 다 끝나면 --cleanup-pads 로 삭제
+  --cleanup-pads      Asmr 루트의 패드만 모두 지우고 끝냄
   --gap <초>          파일 생성 사이 대기 시간 (기본 0)
   --jobs <N>          스캔 시 병렬 ls 개수 (기본 4, 읽기 전용)
   --restore <백업>     실패로 남은 백업 폴더에서 작품을 다시 생성
@@ -70,6 +73,8 @@ while [ $# -gt 0 ]; do
     --force)   FORCE=1 ;;
     --rescan)  RESCAN=1 ;;
     --tracks-only) TRACKS_ONLY=1 ;;
+    --keep-pads)   KEEP_PADS=1 ;;
+    --cleanup-pads) MODE=cleanpads ;;
     --gap)     GAP=${2:?}; shift ;;
     --jobs)    JOBS=${2:?}; shift ;;
     --restore) MODE=restore; RESTORE=${2:?--restore 에 백업 경로 필요}; shift ;;
@@ -96,7 +101,7 @@ LOCK=$CACHE_DIR/lock
 mkdir "$LOCK" 2>/dev/null || { echo "다른 실행이 진행 중이거나 비정상 종료됨: $LOCK (확인 후 rmdir)"; exit 1; }
 
 STAGE=idle CUR_WORK="" CUR_BACKUP=""
-on_exit() { cleanup_pads; rmdir "$LOCK" 2>/dev/null; sleep 0.2; }
+on_exit() { [ "$KEEP_PADS" = 1 ] || cleanup_pads; rmdir "$LOCK" 2>/dev/null; sleep 0.2; }
 on_int() {
   echo
   log "중단됨 (단계: $STAGE, 작품: ${CUR_WORK:-없음})"
@@ -384,18 +389,23 @@ write_phase() {
 # 짧은 이름은 어떤 빈자리에도 들어가므로, 패드가 맨 뒤에 생겼다면 그보다 앞에는 (더 긴 이름이
 # 들어갈 수 있는) 빈자리가 없다는 뜻이다.
 plug_holes() {
-  local i=0 name u last
+  local total=0 b=1 k name u last
   while :; do
-    PADN=$((PADN + 1)); name=$(printf "$PAD_FMT" "$PADN")
-    u=$(termux-saf-create -t application/octet-stream "$ROOT" "$name" 2>&1)
-    [[ $u == content://* ]] || fail "패드 생성 실패: ${u:0:200}"
-    printf '%s\n' "$u" >> "$PADS_FILE"
-    i=$((i + 1))
+    for ((k = 0; k < b; k++)); do
+      PADN=$((PADN + 1)); name=$(printf "$PAD_FMT" "$PADN")
+      u=$(termux-saf-create -t application/octet-stream "$ROOT" "$name" 2>&1)
+      [[ $u == content://* ]] || fail "패드 생성 실패: ${u:0:200}"
+      printf '%s\n' "$u" >> "$PADS_FILE"
+      total=$((total + 1))
+    done
+    # 맨 뒤가 패드면 그보다 앞에는 빈자리가 없다 (패드는 어떤 빈자리에도 들어가는 가장 짧은 이름)
     last=$(saf_ls "$ROOT" | jq -r '.[-1].name') || fail "루트 ls 실패"
-    [ "$last" = "$name" ] && break
-    [ "$i" -ge 400 ] && fail "빈자리 채우기가 끝나지 않음 (패드 $i 개)"
+    [[ $last =~ $PAD_RE ]] && break
+    [ "$total" -ge 5000 ] && fail "빈자리 채우기가 끝나지 않음 (패드 $total 개)"
+    b=$(( b < 32 ? b * 2 : 32 ))
   done
-  [ "$i" -gt 1 ] && log "  루트 빈자리 채움: 패드 $((i - 1)) 개"
+  [ "$total" -gt 1 ] && log "  루트 빈자리 채움: 패드 $total 개"
+  return 0
 }
 
 # 작품 폴더를 만든다. 작품 순서 모드에서는 루트 맨 뒤에 생겼는지 확인한다. 결과: NEW_WORK_URI
@@ -431,12 +441,17 @@ cleanup_pads() {
   [ "$n" -gt 0 ] && log "패드 $n 개 삭제"
   return 0
 }
-remove_leftover_pads() {
-  local L
-  L=$(saf_ls "$ROOT") || return 0
-  jq -r --arg re "$PAD_RE" '.[] | select((.name | test($re)) and (.length // 0) == 0 and .type != "vnd.android.document/directory") | .uri' <<<"$L" >> "$PADS_FILE"
-  cleanup_pads
+prepare_pads() {   # 이전 실행이 남긴 패드: --keep-pads 면 그대로 두고(이미 빈자리를 막고 있음), 아니면 삭제
+  local L n
   PADS_FILE=$CACHE_DIR/pads.$$; : > "$PADS_FILE"
+  L=$(saf_ls "$ROOT") || return 0
+  L=$(jq -c --arg re "$PAD_RE" '[.[] | select((.name | test($re)) and (.length // 0) == 0 and .type != "vnd.android.document/directory")]' <<<"$L")
+  n=$(jq length <<<"$L")
+  PADN=$(jq '[.[].name[2:] | tonumber] | max // 0' <<<"$L")
+  [ "$n" -gt 0 ] || return 0
+  jq -r '.[].uri' <<<"$L" >> "$PADS_FILE"
+  if [ "$KEEP_PADS" = 1 ]; then log "이전 실행의 패드 $n 개를 그대로 사용"
+  else cleanup_pads; PADS_FILE=$CACHE_DIR/pads.$$; : > "$PADS_FILE"; fi
 }
 
 # ---------------------------------------------------------------- 작품 하나 처리 (방식 A)
@@ -544,9 +559,13 @@ restore() {
 
 # ---------------------------------------------------------------- main
 if [ "$MODE" = restore ]; then
-  PADS_FILE=$CACHE_DIR/pads.$$; : > "$PADS_FILE"
-  [ "$TRACKS_ONLY" = 1 ] || remove_leftover_pads
-  restore; cleanup_pads; exit 0
+  [ "$TRACKS_ONLY" = 1 ] && PADS_FILE=$CACHE_DIR/pads.$$ || prepare_pads
+  restore
+  [ "$KEEP_PADS" = 1 ] || cleanup_pads
+  exit 0
+fi
+if [ "$MODE" = cleanpads ]; then
+  KEEP_PADS=0; prepare_pads; log "패드 정리 완료"; exit 0
 fi
 
 if [ "$RESCAN" = 1 ] || [ ! -s "$MANIFEST" ] || [ "$(jq -r .root "$MANIFEST" 2>/dev/null)" != "$ROOT" ] \
@@ -633,8 +652,7 @@ if [ "$MODE" = test ]; then
   [ "$(jq '.[0].nmp3' <<<"$TARGETS")" -ge 3 ] || log "참고: MP3 가 3개 미만인 작품입니다."
   [ "$TRACKS_ONLY" = 1 ] || log "참고: 이 작품은 루트 맨 뒤로 옮겨집니다. 전체 적용 때 작품 순서는 다시 맞춰집니다."
 fi
-PADS_FILE=$CACHE_DIR/pads.$$; : > "$PADS_FILE"
-[ "$TRACKS_ONLY" = 1 ] || remove_leftover_pads
+if [ "$TRACKS_ONLY" = 1 ]; then PADS_FILE=$CACHE_DIR/pads.$$; : > "$PADS_FILE"; else prepare_pads; fi
 log "실제 적용: $NT 개 작품 (로그: $LOG)"
 for ((t = 0; t < NT; t++)); do
   process_work "$(jq -c ".[$t]" <<<"$TARGETS")"
@@ -643,7 +661,8 @@ for ((t = 0; t < NT; t++)); do
     [[ $ans == [yY] ]] || { log "사용자 중단. 처리 완료 $((t + 1))/$NT (다시 실행하면 남은 작품부터 이어서 진행)"; exit 0; }
   fi
 done
-cleanup_pads
+if [ "$KEEP_PADS" = 1 ]; then log "패드 $(wc -l < "$PADS_FILE") 개 유지 (--keep-pads). 모두 끝나면: bash $0 --cleanup-pads"
+else cleanup_pads; fi
 if [ "$TRACKS_ONLY" = 0 ] && [ "$MODE" = apply ] && [ -z "$FOLDER" ]; then
   want=$(jq -c '.sorted' <<<"$ROOTPLAN")
   got=$(saf_ls "$ROOT" | jq -c --argjson W "$want" '[.[] | select(.name as $n | $W | index($n)) | .name]')
