@@ -33,7 +33,7 @@ LOG_DIR=${SNOWSKY_LOGS:-$HOME/snowsky_logs}
 JOBS=4
 GAP=0
 
-MODE=dry FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=0
+MODE=dry FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=auto
 PAD_FMT="~P%04d" PAD_RE='^~P[0-9]{4}$' PADN=0 PADS_FILE=""
 
 usage() {
@@ -48,8 +48,9 @@ usage() {
   --force             이미 트랙 순서대로인 작품도 대상에 포함
   --rescan            저장된 스캔 결과를 버리고 SD 카드를 다시 스캔
   --tracks-only       작품 순서는 맞추지 않고 작품 안의 트랙 순서만 맞춤
-  --keep-pads         실행이 끝나도 패드(~P0001… 빈 파일)를 지우지 않음. 여러 번 나눠 실행할 때
-                      매번 빈자리를 다시 채우는 시간을 아낀다. 다 끝나면 --cleanup-pads 로 삭제
+  --keep-pads         실행이 끝나도 패드(~P0001… 빈 파일)를 항상 남긴다
+  --no-keep-pads      실행이 끝날 때마다 패드를 지운다 (다음 실행이 빈자리를 처음부터 다시 채운다)
+                      기본값: 다시 생성할 작품이 남아 있으면 패드를 남기고, 마지막 작품까지 끝나면 지운다
   --cleanup-pads      Asmr 루트의 패드만 모두 지우고 끝냄
   --report            저장된 스캔 결과로 파일명 번호 패턴 리포트를 만든다 (SD 변경 없음)
                       → ~/snowsky_report.txt
@@ -76,6 +77,7 @@ while [ $# -gt 0 ]; do
     --rescan)  RESCAN=1 ;;
     --tracks-only) TRACKS_ONLY=1 ;;
     --keep-pads)   KEEP_PADS=1 ;;
+    --no-keep-pads) KEEP_PADS=0 ;;
     --cleanup-pads) MODE=cleanpads ;;
     --report)  MODE=report ;;
     --gap)     GAP=${2:?}; shift ;;
@@ -104,7 +106,7 @@ LOCK=$CACHE_DIR/lock
 mkdir "$LOCK" 2>/dev/null || { echo "다른 실행이 진행 중이거나 비정상 종료됨: $LOCK (확인 후 rmdir)"; exit 1; }
 
 STAGE=idle CUR_WORK="" CUR_BACKUP=""
-on_exit() { [ "$KEEP_PADS" = 1 ] || cleanup_pads; rmdir "$LOCK" 2>/dev/null; sleep 0.2; }
+on_exit() { [ "$KEEP_PADS" = 0 ] && cleanup_pads; rmdir "$LOCK" 2>/dev/null; sleep 0.2; }
 on_int() {
   echo
   log "중단됨 (단계: $STAGE, 작품: ${CUR_WORK:-없음})"
@@ -117,6 +119,7 @@ trap on_int INT TERM
 log()  { printf '%s %s\n' "$(date +%T)" "$*"; }
 now()  { date +%s%N; }
 ms()   { echo $(( ($(now) - $1) / 1000000 )); }
+rate() { awk -v b="$1" -v m="$2" 'BEGIN{ if (m < 1) m = 1; printf "%.1f MB/s", b / 1048576 / (m / 1000) }'; }
 hsize(){ awk -v b="$1" 'BEGIN{ if (b>=1048576) printf "%.1f MB", b/1048576; else printf "%.1f KB", b/1024 }'; }
 jp()   { if [ "$1" = . ]; then printf '%s' "$2"; else printf '%s/%s' "$1" "$2"; fi; }   # 부모(.=작품 루트) + 이름
 
@@ -371,6 +374,7 @@ write_phase() {
   DU[.]=$nw
 
   STAGE=write
+  local tw0; tw0=$(now)
   k=0
   while IFS=$'\t' read -r seq kind parent fname ftype flen fsha; do
     k=$((k + 1)); tw=$(now)
@@ -394,7 +398,9 @@ write_phase() {
     fi
   done < "$B/index.tsv"
 
+  log "  쓰기 완료: $(hsize "$bytes"), $(ms "$tw0") ms ($(rate "$bytes" "$(ms "$tw0")"))"
   STAGE=verify
+  local tv0; tv0=$(now)
   : > "$B/final_nodes.jsonl"
   j=0
   for key in "${!DU[@]}"; do
@@ -426,6 +432,7 @@ write_phase() {
   update_manifest "$name" "$nw" "$B/final_nodes.jsonl" || log "경고: manifest 갱신 실패 (다음 실행 시 --rescan 권장)"
   STAGE=done
   rm -rf -- "$B"; CUR_BACKUP=""
+  log "  검증 완료: $(ms "$tv0") ms ($(rate "$bytes" "$(ms "$tv0")"))"
   log "  완료: 파일 $nf 개 + 폴더 $(( ${#DU[@]} - 1 )) 개, $(hsize "$bytes"), 쓰기+검증 $(ms "$t0") ms — 백업 삭제함"
 }
 
@@ -458,7 +465,7 @@ plug_holes() {
 make_work_folder() {
   local name=$1 try nw nm last
   for try in 1 2 3; do
-    [ "$TRACKS_ONLY" = 1 ] || plug_holes
+    if [ "$TRACKS_ONLY" != 1 ]; then local tp; tp=$(now); plug_holes; log "  빈자리 확인: $(ms "$tp") ms"; fi
     nw=$(termux-saf-mkdir "$ROOT" "$name" 2>&1)
     [[ $nw == content://* ]] || fail "mkdir 실패: ${nw:0:200}"
     nm=$(saf_stat_name "$nw" "$ROOT")
@@ -496,7 +503,7 @@ prepare_pads() {   # 이전 실행이 남긴 패드: --keep-pads 면 그대로 �
   PADN=$(jq '[.[].name[2:] | tonumber] | max // 0' <<<"$L")
   [ "$n" -gt 0 ] || return 0
   jq -r '.[].uri' <<<"$L" >> "$PADS_FILE"
-  if [ "$KEEP_PADS" = 1 ]; then log "이전 실행의 패드 $n 개를 그대로 사용"
+  if [ "$KEEP_PADS" != 0 ]; then log "이전 실행의 패드 $n 개를 그대로 사용 (앞쪽 빈자리가 이미 막혀 있음)"
   else cleanup_pads; PADS_FILE=$CACHE_DIR/pads.$$; : > "$PADS_FILE"; fi
 }
 
@@ -545,7 +552,7 @@ process_work() {   # $1 = plan 객체(JSON)
   done < <(jq -r '.ops[] | [.op, (if .parent == "" then "." else .parent end), .name, (.uri // "-"),
                             (if (.type // "") == "" then "-" else .type end), (.length // 0)] | @tsv' <<<"$P")
   touch "$B/.complete"
-  log "  백업 완료: 항목 $i 개, 파일 sha256 검증 ($(ms "$t0") ms) → $B"
+  log "  백업 완료: 항목 $i 개, $(hsize "$(jq .bytes <<<"$P")"), $(ms "$t0") ms ($(rate "$(jq .bytes <<<"$P")" "$(ms "$t0")")) → $B"
 
   STAGE=delete
   termux-saf-rm "$wuri" || fail "원본 폴더 삭제 실패 (rc=$?)"
@@ -607,7 +614,7 @@ restore() {
 if [ "$MODE" = restore ]; then
   [ "$TRACKS_ONLY" = 1 ] && PADS_FILE=$CACHE_DIR/pads.$$ || prepare_pads
   restore
-  [ "$KEEP_PADS" = 1 ] || cleanup_pads
+  [ "$KEEP_PADS" = 0 ] && cleanup_pads
   exit 0
 fi
 if [ "$MODE" = cleanpads ]; then
@@ -768,8 +775,10 @@ for ((t = 0; t < NT; t++)); do
     [[ $ans == [yY] ]] || { log "사용자 중단. 처리 완료 $((t + 1))/$NT (다시 실행하면 남은 작품부터 이어서 진행)"; exit 0; }
   fi
 done
-if [ "$KEEP_PADS" = 1 ]; then log "패드 $(wc -l < "$PADS_FILE") 개 유지 (--keep-pads). 모두 끝나면: bash $0 --cleanup-pads"
-else cleanup_pads; fi
+REMAIN=$(jq '.rebuild | length' <<<"$ROOTPLAN")
+[ -z "$FOLDER" ] && REMAIN=$((REMAIN - NT))
+if [ "$KEEP_PADS" = 0 ] || { [ "$KEEP_PADS" = auto ] && [ "$REMAIN" -le 0 ]; }; then cleanup_pads
+else log "패드 $(wc -l < "$PADS_FILE") 개 유지 — 다음 실행이 빈자리를 다시 채우지 않아도 됨 (남은 작품 ${REMAIN}개). 모두 끝나면 자동 삭제, 지금 지우려면: bash $0 --cleanup-pads"; fi
 if [ "$TRACKS_ONLY" = 0 ] && [ "$MODE" = apply ] && [ -z "$FOLDER" ]; then
   want=$(jq -c '.sorted' <<<"$ROOTPLAN")
   got=$(saf_ls "$ROOT" | jq -c --argjson W "$want" '[.[] | select(.name as $n | $W | index($n)) | .name]')
