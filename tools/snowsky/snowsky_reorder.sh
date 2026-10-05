@@ -191,6 +191,7 @@ scan() {
   tmp=$(mktemp -d "$TMPDIR/snowsky_scan.XXXXXX")
   jq --arg d "$DIR_MIME" '[.[] | select(.type == $d) | {name, uri}]' <<<"$rl" > "$tmp/works.json"
   nw=$(jq length "$tmp/works.json")
+  log "  루트 읽기 완료: 항목 $(jq length <<<"$rl")개, 작품 폴더 ${nw}개 ($(ms "$t0") ms). 작품 폴더 안을 읽는 중… (병렬 $JOBS)"
   : > "$tmp/nodes.jsonl"
   jq -r 'to_entries[] | [.key, ".", .value.uri] | @tsv' "$tmp/works.json" > "$tmp/wave.tsv"
   while [ -s "$tmp/wave.tsv" ]; do
@@ -203,7 +204,7 @@ scan() {
       ( termux-saf-ls "$u" > "$tmp/r$k.json" 2>&1 ) &
       pids[k]=$!
       [ "$k" -ge "$JOBS" ] && wait "${pids[k - JOBS]}"
-      [ $(( (k + 1) % 25 )) -eq 0 ] && log "  깊이 $((level)): $((k + 1)) / ${#lines[@]} 폴더 읽는 중…"
+      [ $(( (k + 1) % 10 )) -eq 0 ] && log "  깊이 $((level)): $((k + 1)) / ${#lines[@]} 폴더 읽는 중…"
     done
     for u in "${pids[@]}"; do wait "$u"; done
     : > "$tmp/next.tsv"
