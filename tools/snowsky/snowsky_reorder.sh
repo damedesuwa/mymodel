@@ -261,11 +261,18 @@ def nkey: .name | norm | nkeyof;
 def okey: [nkey, .name];
 # 폴더(작품·하위 폴더)는 RJ 코드를 빼고 비교한다. RJ 코드의 숫자가 제목의 일부처럼 비교되면
 # "SEXTHEEND2RJ…" 가 "SEXTHEENDRJ…"(1편) 보다 앞에 온다.
-# 이름 앞의 【태그】·[태그] 도 빼고 비교한다 → 태그가 붙은 제목도 본 제목 기준 가나다순.
-# (비교 기준에서만 빠질 뿐, 실제 폴더 이름은 그대로다.)
-# 글자·숫자가 아닌 앞머리 기호(♥ 「 - 공백 등)도 비교에서 뺀다.
-def untag: sub("^([^\\p{L}\\p{N}【\\[]|【[^】]*】|\\[[^\\]]*\\])+"; "");
-def fkey: [(.name | norm | untag | gsub("[rv]j[0-9]{6,8}"; "") | nkeyof), (.name | norm | nkeyof), .name];
+def nork: gsub("[rv]j[0-9]{6,8}"; "");
+# 하위 폴더: RJ 코드만 빼고 자연 정렬
+def fkey: [(.name | norm | nork | nkeyof), (.name | norm | nkeyof), .name];
+# 작품(Asmr 바로 아래): 【태그】·[태그] 로 시작하는 작품을 먼저, 태그 글자 기준 가나다순.
+# 그다음 태그 없는 작품을 가나다순 (앞머리 기호 ♥ 「 - 등은 비교에서 뺀다).
+# 예: "[Cb]…", "[Ab]…", "가나다" → "[Ab]…", "[Cb]…", "가나다". 태그가 끝나는 자리는 가장 앞 글자로
+# 취급해서 짧은 태그가 먼저 온다: 【저음】 → 【저음 이케보】 → 【저음 이케보 마마 마요정】.
+# (비교 기준일 뿐, 이름은 그대로다.)
+def wkey: (.name | norm) as $n
+  | if ($n | test("^\\s*[【\\[]"))
+    then [0, ($n | sub("^\\s*[【\\[]"; "") | gsub("[】\\]]"; "\u0001") | nork | nkeyof), ($n | nkeyof), .name]
+    else [1, ($n | sub("^[^\\p{L}\\p{N}]+"; "") | nork | nkeyof), ($n | nkeyof), .name] end;
 # 트랙: 공통 앞부분을 뺀 이름이 숫자로 시작하면 그 번호가 먼저 결정하고, 번호가 같으면
 # 프롤로그(プロローグ/프롤로그/prologue)가 먼저 온다. 예: "1）禁断…" 와 "01：프롤로그" → 프롤로그 먼저.
 def tkey($pre): (.name | norm) as $n
@@ -670,7 +677,7 @@ if [ "$MODE" = report ]; then
   jq -r --arg dir "$DIR_MIME" "$COMMON_JQ"'
     "", "==== 작품 폴더 순서 (Asmr 바로 아래). 줄 형식: 목표순번. 작품명   (현재 위치가 다르면 ← 현재 N번째)",
     ( [.works[] | {name, pos}] | (sort_by(.pos) | to_entries | map({key: .value.name, value: (.key + 1)}) | from_entries) as $cur
-      | sort_by(fkey) | to_entries[]
+      | sort_by(wkey) | to_entries[]
       | "  \(.key + 1). \(.value.name)" + (if $cur[.value.name] != .key + 1 then "   ← 현재 \($cur[.value.name])번째" else "" end) )
   ' "$MANIFEST" >> "$REPORT" || { log "리포트 생성 실패"; exit 1; }
   log "리포트: $REPORT ($(wc -l < "$REPORT") 줄, $(wc -c < "$REPORT") 바이트)"
@@ -680,7 +687,7 @@ fi
 # 작품 순서 계획: 정렬 순서의 앞부분 중 (내부 순서 정상 + 현재 위치도 순서대로)인 최대 구간은 유지,
 # 나머지는 정렬 순서대로 다시 생성(루트 맨 뒤). 건너뜀(skip) 작품은 다시 만들 수 없으므로 고정.
 ROOTPLAN=$(jq -c --argjson tracks "$TRACKS_ONLY" "$COMMON_JQ"'
-  ([.[] | select(.status != "skip")] | sort_by(fkey)) as $S
+  ([.[] | select(.status != "skip")] | sort_by(wkey)) as $S
   | (reduce range(0; $S | length) as $i ({m: 0, last: -1, stop: false};
        if .stop then .
        elif $S[$i].status != "reorder" and $S[$i].pos > .last then .m = $i + 1 | .last = $S[$i].pos
