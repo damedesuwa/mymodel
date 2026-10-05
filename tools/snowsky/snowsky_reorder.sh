@@ -30,7 +30,9 @@ CACHE_DIR=${SNOWSKY_CACHE:-$HOME/.cache/snowsky}
 MANIFEST=$CACHE_DIR/manifest.json
 BACKUP_BASE=${TMPDIR:?TMPDIR 가 비어 있음}/snowsky_backup
 LOG_DIR=${SNOWSKY_LOGS:-$HOME/snowsky_logs}
-JOBS=4 IO_JOBS=3
+# 동시에 도는 프로세스 수를 낮게 유지한다. 안드로이드 12+ 는 앱의 하위 프로세스가 약 32개를 넘으면 전부 SIGKILL 로 종료한다
+# ("Process completed (signal 9)"). SAF 호출 하나가 프로세스 5~6개를 만들기 때문에 동시 작업은 보수적으로 둔다.
+JOBS=3 IO_JOBS=1 PAD_JOBS=1 NO_PREP=1
 GAP=0
 
 MODE=dry YES=0 FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=auto
@@ -58,7 +60,12 @@ usage() {
                       → ~/snowsky_report.txt
   --gap <초>          파일 생성 사이 대기 시간 (기본 0)
   --jobs <N>          스캔 시 병렬 ls 개수 (기본 4, 읽기 전용)
-  --io-jobs <N>       백업·검증 때 동시에 읽는 파일 수 (기본 3). 읽기만 동시에 하고 쓰기·생성은 항상 순서대로
+  --io-jobs <N>       백업·검증 때 동시에 읽는 파일 수 (기본 1). 읽기만 동시에 하고 쓰기·생성은 항상 순서대로.
+                      올리면 빨라지지만 안드로이드가 Termux 를 강제 종료(signal 9)할 수 있다
+  --prep              (--yes 일 때) 다음 작품의 원본 삭제·패드 작업을 현재 작품을 쓰는 동안 미리 함 (작품당 약 13초 단축)
+  --fast              빠른 모드 = --prep + --io-jobs 2. 동시에 도는 프로세스가 늘어나므로, 안드로이드 개발자 옵션의
+                      "하위 프로세스 제한 해제"(Disable child process restrictions)를 켠 뒤에 쓰세요. 아니면 Termux 가
+                      "Process completed (signal 9)" 로 강제 종료될 수 있다
   --restore <백업>     실패로 남은 백업 폴더에서 작품을 다시 생성
   --ignore-backups    복구하지 않은 백업이 남아 있어도 --apply/--test 를 진행 (기본: 먼저 --restore 하라고 알리고 멈춤)
   -h, --help          이 도움말
@@ -89,6 +96,9 @@ while [ $# -gt 0 ]; do
     --gap)     GAP=${2:?}; shift ;;
     --jobs)    JOBS=${2:?}; shift ;;
     --io-jobs) IO_JOBS=${2:?}; shift ;;
+    --no-prep) NO_PREP=1 ;;
+    --prep)    NO_PREP=0 ;;
+    --fast)    NO_PREP=0; IO_JOBS=2 ;;
     --restore) MODE=restore; RESTORE=${2:?--restore 에 백업 경로 필요}; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "알 수 없는 옵션: $1" >&2; usage >&2; exit 2 ;;
@@ -114,10 +124,20 @@ exec > >(tee -a "$LOG") 2>&1
 exec < /dev/null
 
 LOCK=$CACHE_DIR/lock
-mkdir "$LOCK" 2>/dev/null || { echo "다른 실행이 진행 중이거나 비정상 종료됨: $LOCK (확인 후 rmdir)"; exit 1; }
+if ! mkdir "$LOCK" 2>/dev/null; then
+  # 강제 종료(signal 9)로 잠금이 남았을 수 있다: 소유 프로세스가 없으면 잠금을 되찾는다
+  OLDPID=$(cat "$LOCK/pid" 2>/dev/null)
+  if [ -n "$OLDPID" ] && ! kill -0 "$OLDPID" 2>/dev/null; then
+    echo "이전 실행이 비정상 종료된 흔적(잠금)을 정리합니다 (pid $OLDPID)"; rm -rf -- "$LOCK"
+  elif [ -z "$OLDPID" ] && [ -z "$(pgrep -f snowsky_reorder.sh 2>/dev/null | grep -v "^$$\$")" ]; then
+    echo "이전 실행이 비정상 종료된 흔적(잠금)을 정리합니다"; rm -rf -- "$LOCK"
+  fi
+  mkdir "$LOCK" 2>/dev/null || { echo "다른 실행이 진행 중입니다: $LOCK"; exit 1; }
+fi
+echo $$ > "$LOCK/pid"
 
 STAGE=idle CUR_WORK="" CUR_BACKUP=""
-on_exit() { kill_prefetch; [ "$KEEP_PADS" = 0 ] && cleanup_pads; rmdir "$LOCK" 2>/dev/null; sleep 0.2; }
+on_exit() { kill_prefetch; [ "$KEEP_PADS" = 0 ] && cleanup_pads; rm -rf -- "$LOCK" 2>/dev/null; sleep 0.2; }
 on_int() {
   echo
   log "중단됨 (단계: $STAGE, 작품: ${CUR_WORK:-없음})"
@@ -448,9 +468,12 @@ write_phase() {
     uri=$(jq -r --arg n "$fname" '.[] | select(.name == $n) | .uri' "${DLS[$parent]}")
     [[ $uri == content://* ]] || fail "검증: URI 없음 ($key)"
     VF+=("$seq"$'\t'"$key"$'\t'"$uri"$'\t'"$fsha")
-    ( printf '%s' "$(saf_sha "$uri" "$fsha")" > "$B/vsha_$seq" ) &
-    vp[nv]=$!
-    [ "$nv" -ge "$IO_JOBS" ] && wait "${vp[nv - IO_JOBS]}"
+    if [ "$IO_JOBS" = 1 ]; then printf '%s' "$(saf_sha "$uri" "$fsha")" > "$B/vsha_$seq"
+    else
+      ( printf '%s' "$(saf_sha "$uri" "$fsha")" > "$B/vsha_$seq" ) &
+      vp[nv]=$!
+      [ "$nv" -ge "$IO_JOBS" ] && wait "${vp[nv - IO_JOBS]}"
+    fi
     nv=$((nv + 1))
   done 3< "$B/index.tsv"
   for vj in "${vp[@]}"; do wait "$vj"; done
@@ -484,15 +507,24 @@ write_phase() {
 # 짧은 이름은 어떤 빈자리에도 들어가므로, 패드가 맨 뒤에 생겼다면 그보다 앞에는 (더 긴 이름이
 # 들어갈 수 있는) 빈자리가 없다는 뜻이다.
 # 패드를 n 개 만든다 (루트 ls 없음). 패드는 이름만 서로 다르면 되고 순서가 상관없어서 JOBS 개씩 동시에 만든다.
-make_pads() {   # $1 = 개수
-  local n=$1 k name u bad=0 tmp
+make_pads() {   # $1 = 개수  $2 = 동시에 만들 수 (기본 PAD_JOBS)
+  local n=$1 pj=${2:-$PAD_JOBS} k name u bad=0 tmp
   local -a pids=()
+  if [ "$pj" -le 1 ]; then   # 하나씩 (추가 프로세스 없음)
+    for ((k = 0; k < n; k++)); do
+      PADN=$((PADN + 1)); name=$(printf "$PAD_FMT" "$PADN")
+      u=$(termux-saf-create -t application/octet-stream "$ROOT" "$name" 2>&1)
+      [[ $u == content://* ]] || fail "패드 생성 실패: ${u:0:200}"
+      printf '%s\n' "$u" >> "$PADS_FILE"
+    done
+    return 0
+  fi
   tmp=$(mktemp -d "$TMPDIR/snowsky_pads.XXXXXX") || fail "임시 폴더 생성 실패"
   for ((k = 0; k < n; k++)); do
     PADN=$((PADN + 1)); name=$(printf "$PAD_FMT" "$PADN")
     ( termux-saf-create -t application/octet-stream "$ROOT" "$name" > "$tmp/$k" 2>&1 < /dev/null ) &
     pids[k]=$!
-    [ "$k" -ge "$JOBS" ] && wait "${pids[k - JOBS]}"
+    [ "$k" -ge "$pj" ] && wait "${pids[k - pj]}"
   done
   for u in "${pids[@]}"; do wait "$u"; done
   for ((k = 0; k < n; k++)); do   # 성공한 패드는 모두 기록해 둔다 (정리할 때 필요)
@@ -516,7 +548,7 @@ plug_holes() {   # $1 = 처음 한 번에 만들 패드 수
   [ "$b" -ge 1 ] && [ "$b" -le 64 ] || b=1
   while :; do
     log "  패드 $b 개 만드는 중… (누적 $((total + b)))"
-    make_pads "$b"; total=$((total + b))
+    make_pads "$b" 2; total=$((total + b))
     # 맨 뒤가 패드면 그보다 앞에는 빈자리가 없다 (패드는 어떤 빈자리에도 들어가는 가장 짧은 이름)
     last=$(saf_ls "$ROOT" | jq -r '.[-1].name') || fail "루트 ls 실패"
     [[ $last =~ $PAD_RE ]] && break
@@ -693,9 +725,13 @@ backup_work() {   # $1 = plan 객체(JSON)  $2 = 백업 디렉터리
     IFS=$'\t' read -r kind parent fname furi ftype flen <<<"$op"
     [ "$kind" = d ] && continue
     f=$B/$(printf %05d "$i").bin
-    ( set -o pipefail; sha=$(termux-saf-read "$furi" 2>/dev/null | tee "$f" | sha256sum | cut -d' ' -f1) && printf '%s' "$sha" > "$f.sha" ) &
-    pids[nfiles]=$!
-    [ "$nfiles" -ge "$IO_JOBS" ] && wait "${pids[nfiles - IO_JOBS]}"
+    if [ "$IO_JOBS" = 1 ]; then   # 동시 읽기 없음: 추가 프로세스 없이 그 자리에서 읽는다
+      sha=$(set -o pipefail; termux-saf-read "$furi" 2>/dev/null | tee "$f" | sha256sum | cut -d' ' -f1) && printf '%s' "$sha" > "$f.sha"
+    else
+      ( set -o pipefail; sha=$(termux-saf-read "$furi" 2>/dev/null | tee "$f" | sha256sum | cut -d' ' -f1) && printf '%s' "$sha" > "$f.sha" ) &
+      pids[nfiles]=$!
+      [ "$nfiles" -ge "$IO_JOBS" ] && wait "${pids[nfiles - IO_JOBS]}"
+    fi
     nfiles=$((nfiles + 1))
   done
   for sf in "${pids[@]}"; do wait "$sf"; done
@@ -760,7 +796,7 @@ kill_prefetch() {
 # 현재 작품의 폴더를 만든 뒤(맨 뒤에 놓인 뒤) 시작한다: 다음 작품의 백업이 끝나면 그 원본을 지우고 빈자리를 패드로 메워 둔다.
 # 현재 작품의 파일을 쓰는 동안 일어나므로, 다음 작품 차례에는 폴더 생성과 위치 확인만 남는다.
 start_prep() {
-  [ "$YES" = 1 ] && [ -n "$PF_PID" ] && [ -n "$NEXT_P" ] || return 0
+  [ "$YES" = 1 ] && [ "$NO_PREP" = 0 ] && [ -n "$PF_PID" ] && [ -n "$NEXT_P" ] || return 0
   PREP_B=$PF_B
   local nm uri hint pfpid=$PF_PID
   nm=$(jq -r .name <<<"$NEXT_P"); uri=$(jq -r .uri <<<"$NEXT_P"); hint=$(( (${#nm} + 12) / 13 + 2 ))
@@ -773,7 +809,7 @@ start_prep() {
     rm_checked "$uri" "$nm" "$ROOT" || fail "원본 폴더 삭제 실패"
     if [ "$TRACKS_ONLY" != 1 ]; then
       log "  [다음 작품 미리 준비] 빈자리 메우는 중: 패드 $hint 개"
-      make_pads "$hint"
+      make_pads "$hint" 1   # 현재 작품 쓰기·다음 작품 읽기와 겹치므로 프로세스 수를 줄이려고 하나씩 만든다
     fi
     printf '%s' "$PADN" > "$PREP_B/.padn"
     : > "$PREP_B/.predeleted"
