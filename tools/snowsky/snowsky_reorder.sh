@@ -721,9 +721,9 @@ if [ "$MODE" = dry ]; then
       echo "  --tracks-only: 작품 순서는 맞추지 않음"
     else
       jq -r '
-        "  현재 순서: " + (.current | join(" → ")),
-        "  목표 순서: " + (.sorted | join(" → ")),
-        "  그대로 둠: \(.keep | length)개" + (if (.keep | length) > 0 then " (" + (.keep | join(", ")) + ")" else "" end),
+        "  현재 순서 (앞 5개): " + (.current[:5] | join(" → ")) + (if (.current | length) > 5 then " → …" else "" end),
+        "  목표 순서 (앞 5개): " + (.sorted[:5] | join(" → ")) + (if (.sorted | length) > 5 then " → … (전체는 --report)" else "" end),
+        "  그대로 둠: \(.keep | length)개" + (if (.keep | length) > 0 and (.keep | length) <= 5 then " (" + (.keep | join(", ")) + ")" else "" end),
         "  다시 생성: \(.rebuild | length)개 (이 순서로 맨 뒤에 생성)",
         (if (.pinned | length) > 0 then "  고정(건너뜀 작품 — 위치를 바꿀 수 없음): " + (.pinned | join(", ")) else empty end)' <<<"$ROOTPLAN"
     fi
