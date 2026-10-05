@@ -455,47 +455,65 @@ write_phase() {
 # 패드: 아주 짧은 이름의 빈 파일. 앞쪽 빈 엔트리를 메우는 용도이며 실행이 끝나면 모두 지운다.
 # 짧은 이름은 어떤 빈자리에도 들어가므로, 패드가 맨 뒤에 생겼다면 그보다 앞에는 (더 긴 이름이
 # 들어갈 수 있는) 빈자리가 없다는 뜻이다.
-plug_holes() {   # $1 = 처음 한 번에 만들 패드 수 (방금 지운 폴더 이름이 차지하던 칸 수 추정)
-  local total=0 b=${1:-1} k name u last
+# 패드를 n 개 만든다 (루트 ls 없음)
+make_pads() {   # $1 = 개수
+  local k name u
+  for ((k = 0; k < $1; k++)); do
+    PADN=$((PADN + 1)); name=$(printf "$PAD_FMT" "$PADN")
+    u=$(termux-saf-create -t application/octet-stream "$ROOT" "$name" 2>&1)
+    [[ $u == content://* ]] || fail "패드 생성 실패: ${u:0:200}"
+    printf '%s\n' "$u" >> "$PADS_FILE"
+  done
+}
+
+# 앞쪽 빈자리를 모두 막는다: 패드를 만들고 루트 ls 로 맨 뒤가 패드인지 확인 (처음이거나 확인에 실패했을 때만 쓴다)
+plug_holes() {   # $1 = 처음 한 번에 만들 패드 수
+  local total=0 b=${1:-1} last
   [ "$b" -ge 1 ] && [ "$b" -le 32 ] || b=1
   while :; do
-    for ((k = 0; k < b; k++)); do
-      PADN=$((PADN + 1)); name=$(printf "$PAD_FMT" "$PADN")
-      u=$(termux-saf-create -t application/octet-stream "$ROOT" "$name" 2>&1)
-      [[ $u == content://* ]] || fail "패드 생성 실패: ${u:0:200}"
-      printf '%s\n' "$u" >> "$PADS_FILE"
-      total=$((total + 1))
-    done
+    log "  패드 $b 개 만드는 중… (누적 $((total + b)))"
+    make_pads "$b"; total=$((total + b))
     # 맨 뒤가 패드면 그보다 앞에는 빈자리가 없다 (패드는 어떤 빈자리에도 들어가는 가장 짧은 이름)
     last=$(saf_ls "$ROOT" | jq -r '.[-1].name') || fail "루트 ls 실패"
     [[ $last =~ $PAD_RE ]] && break
     [ "$total" -ge 5000 ] && fail "빈자리 채우기가 끝나지 않음 (패드 $total 개)"
     b=$(( b < 32 ? b * 2 : 32 ))
   done
-  [ "$total" -gt 1 ] && log "  루트 빈자리 채움: 패드 $total 개"
+  log "  루트 빈자리 채움: 패드 $total 개"
   return 0
 }
 
+# 이미 빈자리가 막혀 있으면(패드가 남아 있는 상태) 지운 폴더 자리만 메우면 되므로 한 번에 만들고 루트 ls 는 폴더를 만든 뒤 한 번만 한다.
+FAST_PLUG=0
 # 작품 폴더를 만든다. 작품 순서 모드에서는 루트 맨 뒤에 생겼는지 확인한다. 결과: NEW_WORK_URI
 make_work_folder() {
-  local name=$1 try nw nm last
-  for try in 1 2 3; do
+  local name=$1 try nw nm last tp tl hint
+  hint=$(( (${#name} + 12) / 13 + 2 ))   # 긴 이름은 13 글자마다 한 칸 + 1 칸을 쓴다(FAT LFN)
+  for try in 1 2 3 4; do
     if [ "$TRACKS_ONLY" != 1 ]; then
-      # 긴 이름은 13 글자마다 한 칸 + 1 칸을 쓴다(FAT LFN). 그만큼 한 번에 만들어 루트 ls 횟수를 줄인다
-      local tp; tp=$(now); plug_holes $(( (${#name} + 12) / 13 + 2 )); log "  빈자리 확인: $(ms "$tp") ms"
+      tp=$(now)
+      if [ "$FAST_PLUG" = 1 ] && [ "$try" = 1 ]; then
+        log "  지운 폴더 자리 메우는 중: 패드 $hint 개"
+        make_pads "$hint"
+      else
+        plug_holes "$hint"
+      fi
+      log "  빈자리 확인: $(ms "$tp") ms"
     fi
     nw=$(termux-saf-mkdir "$ROOT" "$name" 2>&1)
     [[ $nw == content://* ]] || fail "mkdir 실패: ${nw:0:200}"
     nm=$(saf_stat_name "$nw" "$ROOT")
     [ "$nm" = "$name" ] || fail "새 폴더 이름이 '$nm' 로 생성됨 (원래: '$name') — 같은 이름이 남아 있는지 확인"
     if [ "$TRACKS_ONLY" = 1 ]; then break; fi
+    tl=$(now)
     last=$(saf_ls "$ROOT" | jq -r '.[-1].name') || fail "루트 ls 실패"
-    [ "$last" = "$name" ] && break
-    # 맨 뒤가 아님 → 방금 만든 빈 폴더만 지우고 다시 시도
+    log "  루트 위치 확인: $(ms "$tl") ms"
+    [ "$last" = "$name" ] && { FAST_PLUG=1; break; }
+    # 맨 뒤가 아님 → 방금 만든 빈 폴더만 지우고, 빈자리를 처음부터 다시 확인하며 재시도
     [ "$(saf_ls "$nw" | jq length)" = 0 ] || fail "방금 만든 폴더가 비어 있지 않음"
     log "  새 폴더가 루트 맨 뒤가 아님 (맨 뒤: $last) → 빈 폴더 삭제 후 재시도 $try"
     termux-saf-rm "$nw" || fail "재시도용 빈 폴더 삭제 실패"
-    [ "$try" = 3 ] && fail "새 폴더를 루트 맨 뒤에 만들 수 없음"
+    [ "$try" = 4 ] && fail "새 폴더를 루트 맨 뒤에 만들 수 없음"
   done
   NEW_WORK_URI=$nw
   log "  새 폴더 생성: $name"
@@ -521,7 +539,7 @@ prepare_pads() {   # 이전 실행이 남긴 패드: --keep-pads 면 그대로 �
   PADN=$(jq '[.[].name[2:] | tonumber] | max // 0' <<<"$L")
   [ "$n" -gt 0 ] || return 0
   jq -r '.[].uri' <<<"$L" >> "$PADS_FILE"
-  if [ "$KEEP_PADS" != 0 ]; then log "이전 실행의 패드 $n 개를 그대로 사용 (앞쪽 빈자리가 이미 막혀 있음)"
+  if [ "$KEEP_PADS" != 0 ]; then FAST_PLUG=1; log "이전 실행의 패드 $n 개를 그대로 사용 (앞쪽 빈자리가 이미 막혀 있음)"
   else cleanup_pads; PADS_FILE=$CACHE_DIR/pads.$$; : > "$PADS_FILE"; fi
 }
 
