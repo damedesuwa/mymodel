@@ -251,7 +251,7 @@ def fw: explode | map(if . >= 65296 and . <= 65305 then . - 65248 else . end) | 
 def ismp3: .name | ascii_downcase | endswith(".mp3");
 def jp($p; $n): if $p == "" then $n else $p + "/" + $n end;
 def norm: fw | ascii_downcase | sub("\\.mp3$"; "");
-def hasnum: .name | fw | test("[0-9]");
+def hasnum: .name | norm | test("[0-9]");   # 확장자 ".mp3" 의 3 은 세지 않는다
 # 자연 정렬: 한 글자씩 비교하되 연속된 숫자는 하나의 수로 비교한다 (#2 < #10, 01 < 2, RJ…_3 < RJ…_12).
 # 번호가 이름 앞이 아니어도 된다 ("#1.", "Track 01", "【01】", "第1話", "RJ01062161_01" …).
 # 숫자 덩어리는 글자 "0" 자리에서 비교되므로 공백·"-"·"." 보다는 뒤, 글자·한자·한글보다는 앞에 온다
