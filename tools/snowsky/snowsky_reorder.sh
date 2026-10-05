@@ -290,7 +290,7 @@ def dirplan:
       bad: ([$e[] | select(.name | test("[\\t\\n\\r\\\\]"))] | length > 0),
       warnings: ( [$unnum[] | "숫자 없음 (이름순으로 뒤에 배치): " + jp($p; .name)]
                 + [$numd | map(select(.tok != null)) | group_by(.tok | tonumber)[] | select(length > 1)
-                   | "트랙 번호 중복 \(.[0].tok | tonumber): " + (map(jp($p; .name)) | join(", "))] ) };
+                   | "같은 번호 \(.[0].tok | tonumber) 여러 개 (시점·버전 차이면 정상 — 번갈아 배치, 짧은 이름 먼저): " + (map(jp($p; .name)) | join(", "))] ) };
 .works | sort_by(.name) | map(
   . as $w
   | [$w.dirs[] | dirplan] as $dp
@@ -620,7 +620,7 @@ if [ "$MODE" = report ]; then
         | group_by(.pat) | sort_by(-length)[]
         | "  \(length)개  \(.[0].pat)    예: \(.[0].ex)" ),
       "",
-      "==== 확인이 필요한 폴더 (번호 중복 / 숫자 없음 / 한 폴더에 패턴 여러 개)",
+      "==== 확인이 필요한 폴더 (같은 번호 / 숫자 없음 / 한 폴더에 패턴 여러 개)",
       ( $F[]
         | ([.files[] | select(.tok != null) | .tok | tonumber] | group_by(.) | map(select(length > 1) | .[0])) as $dup
         | ([.files[] | select(.pat == "(숫자 없음)")] | length) as $nod
@@ -628,7 +628,7 @@ if [ "$MODE" = report ]; then
         | select(($dup | length) > 0 or $nod > 0 or $np > 1)
         | "",
           "[\(.work)\(if .path == "" then "" else "/" + .path end)]",
-          "  이유: " + ([ (if ($dup | length) > 0 then "번호 중복 \($dup | map(tostring) | join(","))" else empty end),
+          "  이유: " + ([ (if ($dup | length) > 0 then "같은 번호 \($dup | map(tostring) | join(","))" else empty end),
                          (if $nod > 0 then "숫자 없음 \($nod)개" else empty end),
                          (if $np > 1 then "패턴 \($np)종" else empty end) ] | join(", ")),
           "  공통 앞부분: " + (if .pre == "" then "(없음)" else .pre end),
