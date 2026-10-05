@@ -33,7 +33,7 @@ LOG_DIR=${SNOWSKY_LOGS:-$HOME/snowsky_logs}
 JOBS=4
 GAP=0
 
-MODE=dry FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=auto
+MODE=dry YES=0 FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=auto
 PAD_FMT="~P%04d" PAD_RE='^~P[0-9]{4}$' PADN=0 PADS_FILE=""
 
 usage() {
@@ -45,6 +45,7 @@ usage() {
   --limit <N>         다시 생성할 작품 중 앞에서 N개만 대상 (여러 번 나눠 실행해도 결과는 같음)
   --test <작품명>      그 작품 하나만 실제 처리 (이미 순서가 맞아도 다시 생성)
   --apply             실제 적용. 작품 하나 끝날 때마다 다음으로 갈지 y/N 확인
+  --yes               --apply 에서 y/N 을 묻지 않고 끝까지 진행 (오류가 나면 그 자리에서 멈춤)
   --force             이미 트랙 순서대로인 작품도 대상에 포함
   --rescan            저장된 스캔 결과를 버리고 SD 카드를 다시 스캔
   --tracks-only       작품 순서는 맞추지 않고 작품 안의 트랙 순서만 맞춤
@@ -70,6 +71,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --dry-run) MODE=dry ;;
     --apply)   MODE=apply ;;
+    --yes)     YES=1 ;;
     --test)    MODE=test; FOLDER=${2:?--test 에 작품명 필요}; shift ;;
     --folder)  FOLDER=${2:?--folder 에 작품명 필요}; shift ;;
     --limit)   LIMIT=${2:?--limit 에 숫자 필요}; shift ;;
@@ -106,7 +108,7 @@ LOCK=$CACHE_DIR/lock
 mkdir "$LOCK" 2>/dev/null || { echo "다른 실행이 진행 중이거나 비정상 종료됨: $LOCK (확인 후 rmdir)"; exit 1; }
 
 STAGE=idle CUR_WORK="" CUR_BACKUP=""
-on_exit() { [ "$KEEP_PADS" = 0 ] && cleanup_pads; rmdir "$LOCK" 2>/dev/null; sleep 0.2; }
+on_exit() { kill_prefetch; [ "$KEEP_PADS" = 0 ] && cleanup_pads; rmdir "$LOCK" 2>/dev/null; sleep 0.2; }
 on_int() {
   echo
   log "중단됨 (단계: $STAGE, 작품: ${CUR_WORK:-없음})"
@@ -508,13 +510,12 @@ prepare_pads() {   # 이전 실행이 남긴 패드: --keep-pads 면 그대로 �
 }
 
 # ---------------------------------------------------------------- 작품 하나 처리 (방식 A)
-process_work() {   # $1 = plan 객체(JSON)
-  local P=$1 name wuri need avail B i kind parent fname furi ftype flen f sha lsha lsz t0 got want u key nd=0
-  name=$(jq -r .name <<<"$P"); wuri=$(jq -r .uri <<<"$P")
+# 사전 확인 + 백업. SD 는 읽기만 하므로 다른 작품을 쓰는 동안 서브셸에서 미리 돌릴 수 있다.
+backup_work() {   # $1 = plan 객체(JSON)  $2 = 백업 디렉터리
+  local P=$1 B=$2 name need avail i kind parent fname furi ftype flen f sha lsha lsz t0 got want u key nd=0
+  name=$(jq -r .name <<<"$P")
   CUR_WORK=$name CUR_BACKUP=""
   t0=$(now)
-  echo
-  log "=== [$name] 처리 시작 (파일 $(jq .nfiles <<<"$P")개, 하위 폴더 $(jq .ndirs <<<"$P")개, $(hsize "$(jq .bytes <<<"$P")"))"
 
   STAGE=precheck
   while IFS=$'\t' read -r key u; do   # 작품 안 모든 폴더를 다시 ls 해서 스캔 결과와 비교
@@ -530,7 +531,6 @@ process_work() {   # $1 = plan 객체(JSON)
   log "  사전 확인 OK (폴더 $nd 개 재확인)"
 
   STAGE=backup
-  B=$BACKUP_BASE/$(date +%Y%m%d_%H%M%S)_$$
   mkdir -p "$B" || fail "백업 폴더 생성 실패"
   CUR_BACKUP=$B
   jq -n --arg w "$name" --arg at "$(date '+%F %T')" '{work: $w, created: $at}' > "$B/meta.json"
@@ -554,10 +554,38 @@ process_work() {   # $1 = plan 객체(JSON)
   touch "$B/.complete"
   log "  백업 완료: 항목 $i 개, $(hsize "$(jq .bytes <<<"$P")"), $(ms "$t0") ms ($(rate "$(jq .bytes <<<"$P")" "$(ms "$t0")")) → $B"
 
+}
+
+start_backup() {   # $1 plan  $2 백업 디렉터리 → BG_PID. 출력은 "$2.log" 에 모았다가 finish_backup 이 보여 준다
+  ( trap - EXIT INT TERM; backup_work "$1" "$2" ) > "$2.log" 2>&1 &
+  BG_PID=$!
+}
+finish_backup() {  # $1 pid  $2 백업 디렉터리
+  local rc=0
+  wait "$1" || rc=$?
+  [ -f "$2.log" ] && cat "$2.log"
+  rm -f "$2.log"
+  [ "$rc" = 0 ] && [ -f "$2/.complete" ]
+}
+# 미리 읽기(다음 작품 백업)는 SD 를 읽기만 한다. 취소하면 그 백업만 지우고 원본은 그대로다.
+PF_PID="" PF_B=""
+kill_prefetch() {
+  [ -n "$PF_PID" ] || return 0
+  kill "$PF_PID" 2>/dev/null; wait "$PF_PID" 2>/dev/null
+  rm -rf -- "$PF_B" "$PF_B.log"
+  log "미리 읽던 다음 작품의 백업을 취소함 (원본은 그대로)"
+  PF_PID="" PF_B=""
+}
+backup_dir() { printf '%s/%s_%s_%03d' "$BACKUP_BASE" "$(date +%Y%m%d_%H%M%S)" "$$" "$1"; }
+
+# 작품 하나 다시 만들기 (방식 A). 백업은 이미 끝나 있다.
+rebuild_work() {   # $1 plan  $2 검증된 백업 디렉터리  $3 시작 시각
+  local P=$1 B=$2 t0=$3 name wuri
+  name=$(jq -r .name <<<"$P"); wuri=$(jq -r .uri <<<"$P")
+  CUR_WORK=$name CUR_BACKUP=$B
   STAGE=delete
   termux-saf-rm "$wuri" || fail "원본 폴더 삭제 실패 (rc=$?)"
   log "  원본 작품 폴더 삭제"
-
   write_phase "$B"
   log "=== [$name] 성공 (총 $(ms "$t0") ms)"
   CUR_WORK=""
@@ -769,10 +797,25 @@ fi
 if [ "$TRACKS_ONLY" = 1 ]; then PADS_FILE=$CACHE_DIR/pads.$$; : > "$PADS_FILE"; else prepare_pads; fi
 log "실제 적용: $NT 개 작품 (로그: $LOG)"
 for ((t = 0; t < NT; t++)); do
-  process_work "$(jq -c ".[$t]" <<<"$TARGETS")"
-  if [ "$MODE" = apply ] && [ $((t + 1)) -lt "$NT" ]; then
+  P=$(jq -c ".[$t]" <<<"$TARGETS"); NAME=$(jq -r .name <<<"$P")
+  echo
+  log "=== [$NAME] 처리 시작 ($((t + 1))/$NT, 파일 $(jq .nfiles <<<"$P")개, 하위 폴더 $(jq .ndirs <<<"$P")개, $(hsize "$(jq .bytes <<<"$P")"))"
+  T0=$(now)
+  if [ -n "$PF_PID" ]; then
+    PID=$PF_PID B=$PF_B; PF_PID="" PF_B=""
+    log "  (앞 작품을 쓰는 동안 미리 읽어 둔 백업 사용)"
+  else
+    B=$(backup_dir "$t"); start_backup "$P" "$B"; PID=$BG_PID
+  fi
+  finish_backup "$PID" "$B" || { log "중단: [$NAME] 사전 확인/백업 실패 — 원본은 그대로입니다."; exit 1; }
+  # 다음 작품은 지금 작품을 쓰는 동안 미리 읽는다 (SD 읽기와 쓰기를 겹쳐 전체 시간을 줄인다)
+  if [ $((t + 1)) -lt "$NT" ]; then
+    PF_B=$(backup_dir $((t + 1))); start_backup "$(jq -c ".[$((t + 1))]" <<<"$TARGETS")" "$PF_B"; PF_PID=$BG_PID
+  fi
+  rebuild_work "$P" "$B" "$T0"
+  if [ "$MODE" = apply ] && [ "$YES" = 0 ] && [ $((t + 1)) -lt "$NT" ]; then
     read -r -p "다음 작품으로 진행할까요? ($((t + 2))/$NT: $(jq -r ".[$((t + 1))].name" <<<"$TARGETS")) [y/N] " ans < /dev/tty
-    [[ $ans == [yY] ]] || { log "사용자 중단. 처리 완료 $((t + 1))/$NT (다시 실행하면 남은 작품부터 이어서 진행)"; exit 0; }
+    [[ $ans == [yY] ]] || { kill_prefetch; log "사용자 중단. 처리 완료 $((t + 1))/$NT (다시 실행하면 남은 작품부터 이어서 진행)"; exit 0; }
   fi
 done
 REMAIN=$(jq '.rebuild | length' <<<"$ROOTPLAN")
