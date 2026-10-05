@@ -2,12 +2,15 @@
 # snowsky_reorder.sh — FiiO SnowSky ECHO NANO 용 MP3 "생성 순서" 재정렬 (Termux + SAF)
 #
 # SnowSky 는 파일을 SD 카드 디렉터리 엔트리 순서(복사 순서)로 보여준다.
-# 이 스크립트는 Asmr/<작품>/ 의 파일을 트랙 번호 순서대로 새 폴더에 다시 생성한다.
+# 이 스크립트는 Asmr/<작품>/ 과 그 하위 폴더 전부를 트랙 번호 순서대로 다시 생성한다.
 #
-# 방식 A: 작품 하나씩
-#   1) 폴더 재확인(ls) → 2) 모든 파일을 $TMPDIR 로 읽어 sha256/크기 검증(백업)
-#   3) 원본 폴더 삭제 → 4) 같은 이름으로 새 폴더 생성 → 5) 트랙 순서로 create+write
-#   6) ls 로 이름/크기/엔트리 순서 검증 + 전 파일 재읽기 sha256 비교 → 7) 백업 삭제
+# 각 폴더 안의 생성 순서: MP3(트랙 번호 숫자순, 번호 없는 것은 이름순으로 뒤)
+#                       → 나머지 파일(cover.jpg 등, 원래 순서) → 하위 폴더(같은 번호 규칙)
+#
+# 방식 A: 작품(최상위 폴더) 하나씩
+#   1) 작품 안 모든 폴더 재확인(ls) → 2) 모든 파일을 $TMPDIR 로 읽어 sha256/크기 검증(백업)
+#   3) 원본 작품 폴더 삭제 → 4) 같은 이름으로 새 폴더 트리 생성, 순서대로 create+write
+#   5) 모든 폴더를 ls 해서 이름/크기/엔트리 순서 검증 + 전 파일 재읽기 sha256 비교 → 6) 백업 삭제
 # 실패하면 즉시 중단. 원본 삭제 이후의 실패에서는 백업을 절대 지우지 않는다(--restore).
 #
 # 바이트 그대로 복사만 한다. 재인코딩/태그 수정/이름 변경 없음.
@@ -42,6 +45,7 @@ usage() {
   --restore <백업>     실패로 남은 백업 폴더에서 작품을 다시 생성
   -h, --help          이 도움말
 
+하위 폴더도 모두 스캔/처리한다. 작품 = Asmr 바로 아래의 폴더.
 스캔 결과: ~/.cache/snowsky/manifest.json (한 번 스캔 후 재사용, 처리한 작품은 자동 갱신)
 로그:      ~/snowsky_logs/
 백업:      $TMPDIR/snowsky_backup/
@@ -97,6 +101,7 @@ log()  { printf '%s %s\n' "$(date +%T)" "$*"; }
 now()  { date +%s%N; }
 ms()   { echo $(( ($(now) - $1) / 1000000 )); }
 hsize(){ awk -v b="$1" 'BEGIN{ if (b>=1048576) printf "%.1f MB", b/1048576; else printf "%.1f KB", b/1024 }'; }
+jp()   { if [ "$1" = . ]; then printf '%s' "$2"; else printf '%s/%s' "$1" "$2"; fi; }   # 부모(.=작품 루트) + 이름
 
 explain_state() {
   case $STAGE in
@@ -108,8 +113,10 @@ explain_state() {
       log "검증된 백업(유지됨): $CUR_BACKUP"
       log "복구: bash $0 --restore '$CUR_BACKUP'" ;;
     mkdir|write|verify)
-      log "원본 폴더는 이미 삭제됨. 검증된 백업(유지됨): $CUR_BACKUP"
+      log "원본 작품 폴더는 이미 삭제됨. 검증된 백업(유지됨): $CUR_BACKUP"
       log "복구: bash $0 --restore '$CUR_BACKUP'" ;;
+    restore-check)
+      log "SD 는 변경하지 않았습니다. 백업은 그대로: $CUR_BACKUP" ;;
   esac
 }
 fail() {
@@ -122,7 +129,7 @@ fail() {
 saf_ls() {   # stdout: JSON 배열. 실패 시 return 1
   local out
   out=$(termux-saf-ls "$1" 2>&1)
-  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$out" || { log "ls 실패: ${out:0:200}"; return 1; }
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$out" || { log "ls 실패: ${out:0:200}" >&2; return 1; }
   printf '%s' "$out"
 }
 
@@ -130,97 +137,141 @@ ROOT=$(termux-saf-dirs 2>/dev/null | jq -r --arg n "$ROOT_NAME" \
         '[.[] | select(.name == $n)] | if length == 1 then .[0].uri else empty end')
 [ -n "$ROOT" ] || { log "termux-saf-dirs 에서 '$ROOT_NAME' 를 하나로 찾을 수 없음 (termux-saf-managedir 로 권한 부여)"; exit 1; }
 
-# ---------------------------------------------------------------- 스캔 (1회)
+# ---------------------------------------------------------------- 스캔 (1회, 하위 폴더까지)
+# 폴더 깊이별로 한 단계씩(wave) 병렬 ls. 결과는 폴더 노드 {w, path, uri, entries} 목록.
 scan() {
-  local t0 rl tmp n i u
+  local t0 rl tmp nw wave k u w p total=0 level=0
+  local -a pids lines
   t0=$(now)
-  log "스캔 시작: $ROOT_NAME"
+  log "스캔 시작: $ROOT_NAME (하위 폴더 포함)"
   rl=$(saf_ls "$ROOT") || { log "루트 ls 실패"; exit 1; }
   tmp=$(mktemp -d "$TMPDIR/snowsky_scan.XXXXXX")
-  jq --arg d "$DIR_MIME" '[.[] | select(.type == $d) | {name, uri}]' <<<"$rl" > "$tmp/dirs.json"
-  n=$(jq length "$tmp/dirs.json")
-  # 병렬 ls (읽기 전용). 맨 wait 는 tee 프로세스 치환까지 기다리므로 PID 로만 기다린다.
-  local -a pids=()
-  i=0
-  while IFS= read -r u; do
-    ( termux-saf-ls "$u" > "$tmp/$i.json" 2>&1 ) &
-    pids[i]=$!
-    [ "$i" -ge "$JOBS" ] && wait "${pids[i - JOBS]}"
-    i=$((i + 1))
-    [ $((i % 20)) -eq 0 ] && log "  $i / $n"
-  done < <(jq -r '.[].uri' "$tmp/dirs.json")
-  for u in "${pids[@]}"; do wait "$u"; done
-  for ((i = 0; i < n; i++)); do   # 실패한 것은 한 번 순차 재시도
-    jq -e 'type == "array"' "$tmp/$i.json" >/dev/null 2>&1 && continue
-    u=$(jq -r ".[$i].uri" "$tmp/dirs.json")
-    saf_ls "$u" > "$tmp/$i.json" || { rm -rf "$tmp"; log "작품 폴더 ls 실패 — 스캔 중단"; exit 1; }
+  jq --arg d "$DIR_MIME" '[.[] | select(.type == $d) | {name, uri}]' <<<"$rl" > "$tmp/works.json"
+  nw=$(jq length "$tmp/works.json")
+  : > "$tmp/nodes.jsonl"
+  jq -r 'to_entries[] | [.key, ".", .value.uri] | @tsv' "$tmp/works.json" > "$tmp/wave.tsv"
+  while [ -s "$tmp/wave.tsv" ]; do
+    level=$((level + 1))
+    mapfile -t lines < "$tmp/wave.tsv"
+    pids=()
+    # 맨 wait 는 tee 프로세스 치환까지 기다리므로 PID 로만 기다린다.
+    for ((k = 0; k < ${#lines[@]}; k++)); do
+      IFS=$'\t' read -r w p u <<<"${lines[k]}"
+      ( termux-saf-ls "$u" > "$tmp/r$k.json" 2>&1 ) &
+      pids[k]=$!
+      [ "$k" -ge "$JOBS" ] && wait "${pids[k - JOBS]}"
+    done
+    for u in "${pids[@]}"; do wait "$u"; done
+    : > "$tmp/next.tsv"
+    for ((k = 0; k < ${#lines[@]}; k++)); do
+      IFS=$'\t' read -r w p u <<<"${lines[k]}"
+      if ! jq -e 'type == "array"' "$tmp/r$k.json" >/dev/null 2>&1; then   # 한 번 순차 재시도
+        saf_ls "$u" > "$tmp/r$k.json" || { rm -rf "$tmp"; log "폴더 ls 실패 — 스캔 중단"; exit 1; }
+      fi
+      jq -c --argjson w "$w" --arg p "$p" --arg u "$u" \
+        '{w: $w, path: (if $p == "." then "" else $p end), uri: $u, entries: (to_entries | map(.value + {idx: .key}))}' "$tmp/r$k.json" >> "$tmp/nodes.jsonl"
+      jq -r --argjson w "$w" --arg p "$p" --arg d "$DIR_MIME" \
+        '.[] | select(.type == $d) | [$w, (if $p == "." then .name else $p + "/" + .name end), .uri] | @tsv' \
+        "$tmp/r$k.json" >> "$tmp/next.tsv"
+    done
+    total=$((total + ${#lines[@]}))
+    log "  깊이 $level: 폴더 ${#lines[@]}개 (누적 $total)"
+    mv "$tmp/next.tsv" "$tmp/wave.tsv"
   done
-  for ((i = 0; i < n; i++)); do cat "$tmp/$i.json"; echo; done |
-    jq -s --slurpfile D "$tmp/dirs.json" --arg root "$ROOT" --arg at "$(date '+%F %T')" '
-      { root: $root, scanned_at: $at,
-        works: [ to_entries[] | { name: $D[0][.key].name, uri: $D[0][.key].uri,
-                                  entries: (.value | to_entries | map(.value + {idx: .key})) } ] }
-    ' > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST" || { rm -rf "$tmp"; log "manifest 저장 실패"; exit 1; }
+  jq -s --slurpfile W "$tmp/works.json" --arg root "$ROOT" --arg at "$(date '+%F %T')" '
+      . as $n
+      | { root: $root, scanned_at: $at,
+          works: [ $W[0] | to_entries[] | .key as $i
+                   | { name: .value.name, uri: .value.uri,
+                       dirs: [ $n[] | select(.w == $i) | del(.w) ] } ] }
+    ' "$tmp/nodes.jsonl" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST" \
+    || { rm -rf "$tmp"; log "manifest 저장 실패"; exit 1; }
   rm -rf "$tmp"
-  log "스캔 완료: 작품 $n 개, $(ms "$t0") ms → $MANIFEST"
+  log "스캔 완료: 작품 $nw 개, 폴더 $total 개, SAF ls $((total + 1))회, $(ms "$t0") ms → $MANIFEST"
 }
 
-update_manifest() {   # $1 작품명 $2 새 URI $3 ls JSON 파일
-  jq --arg n "$1" --arg u "$2" --slurpfile L "$3" '
-    { name: $n, uri: $u, entries: ($L[0] | to_entries | map(.value + {idx: .key})) } as $w
+update_manifest() {   # $1 작품명 $2 새 URI $3 폴더 노드 JSONL 파일
+  jq --arg n "$1" --arg u "$2" --slurpfile N "$3" '
+    { name: $n, uri: $u, dirs: $N } as $w
     | .works |= (if any(.[]; .name == $n) then map(if .name == $n then $w else . end) else . + [$w] end)
   ' "$MANIFEST" > "$MANIFEST.tmp" && mv "$MANIFEST.tmp" "$MANIFEST"
 }
 
 # ---------------------------------------------------------------- 계획 (로컬 계산만)
-PLAN_JQ='
+COMMON_JQ='
 def fw: explode | map(if . >= 65296 and . <= 65305 then . - 65248 else . end) | implode;
 def ismp3: .name | ascii_downcase | endswith(".mp3");
 def tok: [.name | fw | capture("^\\s*(?<n>[0-9]+)") | .n] | first;
-.works | sort_by(.name) | map(
-  . as $w
-  | ($w.entries | sort_by(.idx)) as $e
-  | [$e[] | select(.type == $dir)] as $dirs
+def jp($p; $n): if $p == "" then $n else $p + "/" + $n end;
+'
+PLAN_JQ=$COMMON_JQ'
+def dirplan:
+  .path as $p
+  | (.entries | sort_by(.idx)) as $e
+  | [$e[] | select(.type == $dir) | . + {tok: tok}] as $dirs
   | [$e[] | select(.type != $dir and ismp3) | . + {tok: tok}] as $mp3
   | ([$mp3[] | select(.tok != null) | . + {num: (.tok | tonumber)}] | sort_by([.num, .name])) as $numd
   | ([$mp3[] | select(.tok == null)] | sort_by(.name)) as $unnum
   | [$e[] | select(.type != $dir and (ismp3 | not))] as $others
-  | ($numd + $unnum) as $planmp3
-  | ([$e[] | select(.name | test("[\\t\\n\\r\\\\]"))] | length > 0) as $bad
-  | ( (if ($dirs | length) > 0 then ["하위 폴더 있음 → 건너뜀: " + ($dirs | map(.name) | join(", "))] else [] end)
-    + (if $bad then ["파일명에 탭/줄바꿈/역슬래시 → 건너뜀"] else [] end)
-    + [$unnum[] | "번호 없음 (이름순으로 뒤에 배치): " + .name]
-    + [$numd | group_by(.num)[] | select(length > 1) | "트랙 번호 중복 \(.[0].num): " + (map(.name) | join(", "))]
-    ) as $warn
-  | { name: $w.name, uri: $w.uri, warnings: $warn,
-      status: ( if ($dirs | length) > 0 or $bad then "skip"
-                elif ($mp3 | length) == 0 then "nomp3"
-                elif [$mp3[].name] == [$planmp3[].name] then "ok"
-                else "reorder" end ),
+  | ($dirs | sort_by(if .tok then [0, (.tok | tonumber), .name] else [1, 0, .name] end)) as $sdirs
+  | ($numd + $unnum) as $pm
+  | { path: $p, uri: .uri,
+      mp3ok: ([$mp3[].name] == [$pm[].name]),
+      dirok: ([$dirs[].name] == [$sdirs[].name]),
       current: [$mp3[] | .tok // .name],
-      mp3: [$planmp3[].name],
-      others: [$others[].name],
-      order: [($planmp3 + $others)[] | {name, uri, type: (.type // ""), length: (.length // 0), label: (.tok // .name)}],
-      bytes: ([($planmp3 + $others)[].length // 0] | add // 0) }
+      curdirs: [$dirs[].name],
+      mp3: [$pm[].name], others: [$others[].name], subdirs: [$sdirs[].name],
+      files: [($pm + $others)[] | {name, uri, type: (.type // ""), length: (.length // 0), label: jp($p; .tok // .name)}],
+      nmp3: ($mp3 | length),
+      bad: ([$e[] | select(.name | test("[\\t\\n\\r\\\\]"))] | length > 0),
+      warnings: ( [$unnum[] | "번호 없음 (이름순으로 뒤에 배치): " + jp($p; .name)]
+                + [$numd | group_by(.num)[] | select(length > 1)
+                   | "트랙 번호 중복 \(.[0].num): " + (map(jp($p; .name)) | join(", "))] ) };
+.works | sort_by(.name) | map(
+  . as $w
+  | [$w.dirs[] | dirplan] as $dp
+  | ($dp | map({key: .path, value: .}) | from_entries) as $by
+  | def ops($p): $by[$p] as $d
+      | ($d.files[] | {op: "f", parent: $p} + .),
+        ($d.subdirs[] as $s | {op: "d", parent: $p, name: $s, label: (jp($p; $s) + "/")}, ops(jp($p; $s)));
+    [ops("")] as $ops
+  | ([$dp[] | select(.bad)] | length > 0) as $bad
+  | ([$dp[].nmp3] | add // 0) as $nm
+  | { name: $w.name, uri: $w.uri,
+      dirs: ([ "", ($ops[] | select(.op == "d") | jp(.parent; .name)) ] | map(. as $q | $by[$q])),
+      ops: $ops, nmp3: $nm,
+      warnings: ((if $bad then ["파일명에 탭/줄바꿈/역슬래시 → 건너뜀"] else [] end) + [$dp[].warnings[]]),
+      status: (if $bad then "skip" elif $nm == 0 then "nomp3" elif all($dp[]; .mp3ok and .dirok) then "ok" else "reorder" end),
+      nfiles: ([$ops[] | select(.op == "f")] | length),
+      ndirs: ([$ops[] | select(.op == "d")] | length),
+      bytes: ([$ops[] | select(.op == "f") | .length] | add // 0) }
 )'
 
-DETAIL_JQ='
+DETAIL_JQ=$COMMON_JQ'
 def st: {"reorder": "재정렬 필요", "ok": "이미 트랙 순서대로임", "skip": "건너뜀", "nomp3": "MP3 없음"}[.status];
-.[] |
+.[] | . as $w |
   "[\(.name)]",
-  "상태: \(st)" + (if .status == "reorder" then "  (현재 순서: " + (.current | join(" → ")) + ")" else "" end),
-  (.mp3 | to_entries[] | "\(.key + 1). \(.value)"),
-  "기타 파일: " + (if (.others | length) == 0 then "없음" else (.others | join(", ")) end),
-  "생성 순서: " + ([.order[].label] | join(" → ")),
+  "상태: \(st)  (파일 \(.nfiles)개, 하위 폴더 \(.ndirs)개)",
+  ( .dirs[] |
+      (if .path == "" then empty else "  [\($w.name)/\(.path)]" end),
+      (if .mp3ok then empty else "  현재 MP3 순서: " + (.current | join(" → ")) end),
+      (if .dirok then empty else "  현재 하위 폴더 순서: " + (.curdirs | join(" → ")) end),
+      (.mp3 | to_entries[] | "  \(.key + 1). \(.value)"),
+      "  기타 파일: " + (if (.others | length) == 0 then "없음" else (.others | join(", ")) end),
+      (if (.subdirs | length) == 0 then empty else "  하위 폴더: " + (.subdirs | join(", ")) end) ),
+  "생성 순서: " + ([.ops[].label] | join(" → ")),
   "경고: " + (if (.warnings | length) == 0 then "없음" else (.warnings | join("\n      ")) end),
   ""'
 
 # ---------------------------------------------------------------- 쓰기 단계 (백업 → SD)
 # $1 = 검증된 백업 디렉터리 (meta.json, index.tsv, NNNN.bin, .complete)
+# index.tsv: seq kind(f|d) parent(.=작품 루트) name type length sha   (빈 값은 -)
 write_phase() {
-  local B=$1 name nw nm n k t0 tw idx fname ftype flen fsha u L got want uri sha bytes=0
+  local B=$1 name nw nm n nf k t0 tw seq kind parent fname ftype flen fsha u L got want uri sha key j bytes=0
+  local -A DU=() DLS=()
   name=$(jq -r .work "$B/meta.json")
   n=$(wc -l < "$B/index.tsv")
+  nf=$(awk -F'\t' '$2 == "f"' "$B/index.tsv" | wc -l)
   t0=$(now)
 
   STAGE=mkdir
@@ -228,62 +279,89 @@ write_phase() {
   [[ $nw == content://* ]] || fail "mkdir 실패: ${nw:0:200}"
   nm=$(termux-saf-stat "$nw" 2>/dev/null | jq -r '.name // empty')
   [ "$nm" = "$name" ] || fail "새 폴더 이름이 '$nm' 로 생성됨 (원래: '$name') — 같은 이름이 남아 있는지 확인"
+  DU[.]=$nw
   log "  새 폴더 생성: $name"
 
   STAGE=write
   k=0
-  while IFS=$'\t' read -r idx fname ftype flen fsha; do
+  while IFS=$'\t' read -r seq kind parent fname ftype flen fsha; do
     k=$((k + 1)); tw=$(now)
-    u=$(termux-saf-create -t "${ftype:-application/octet-stream}" "$nw" "$fname" 2>&1)
-    [[ $u == content://* ]] || fail "create 실패 ($fname): ${u:0:200}"
-    termux-saf-write "$u" < "$B/$(printf %04d "$idx").bin" || fail "write 실패 ($fname)"
-    bytes=$((bytes + flen))
-    log "  [$k/$n] 생성 $fname ($(hsize "$flen"), $(ms "$tw") ms)"
-    [ "$GAP" != 0 ] && sleep "$GAP"
+    [ -n "${DU[$parent]:-}" ] || fail "부모 폴더 URI 없음: $parent"
+    key=$(jp "$parent" "$fname")
+    if [ "$kind" = d ]; then
+      u=$(termux-saf-mkdir "${DU[$parent]}" "$fname" 2>&1)
+      [[ $u == content://* ]] || fail "mkdir 실패 ($key): ${u:0:200}"
+      nm=$(termux-saf-stat "$u" 2>/dev/null | jq -r '.name // empty')
+      [ "$nm" = "$fname" ] || fail "하위 폴더 이름이 '$nm' 로 생성됨 (원래: '$fname')"
+      DU[$key]=$u
+      log "  [$k/$n] 폴더 $key/"
+    else
+      [ "$ftype" = - ] && ftype=application/octet-stream
+      u=$(termux-saf-create -t "$ftype" "${DU[$parent]}" "$fname" 2>&1)
+      [[ $u == content://* ]] || fail "create 실패 ($key): ${u:0:200}"
+      termux-saf-write "$u" < "$B/$(printf %05d "$seq").bin" || fail "write 실패 ($key)"
+      bytes=$((bytes + flen))
+      log "  [$k/$n] 생성 $key ($(hsize "$flen"), $(ms "$tw") ms)"
+      [ "$GAP" != 0 ] && sleep "$GAP"
+    fi
   done < "$B/index.tsv"
 
   STAGE=verify
-  L=$(saf_ls "$nw") || fail "검증용 ls 실패"
-  printf '%s' "$L" > "$B/final_ls.json"
-  got=$(jq -c '[.[] | [.name, (.length // 0)]]' <<<"$L")
-  want=$(jq -Rsc 'split("\n") | map(select(length > 0) | split("\t") | [.[1], (.[3] | tonumber)])' < "$B/index.tsv")
-  [ "$got" = "$want" ] || fail "엔트리 순서/이름/크기 불일치
+  : > "$B/final_nodes.jsonl"
+  j=0
+  for key in "${!DU[@]}"; do
+    j=$((j + 1))
+    L=$(saf_ls "${DU[$key]}") || fail "검증용 ls 실패 ($key)"
+    printf '%s' "$L" > "$B/final_ls_$j.json"
+    DLS[$key]=$B/final_ls_$j.json
+    got=$(jq -c --arg d "$DIR_MIME" '[.[] | [(if .type == $d then "d" else "f" end), .name, (if .type == $d then 0 else (.length // 0) end)]]' <<<"$L")
+    want=$(jq -Rsc --arg k "$key" 'split("\n") | map(select(length > 0) | split("\t") | select(.[2] == $k)
+              | [.[1], .[3], (if .[1] == "d" then 0 else (.[5] | tonumber) end)])' < "$B/index.tsv")
+    [ "$got" = "$want" ] || fail "엔트리 순서/이름/크기 불일치 ($key)
       기대: $want
       실제: $got"
+    jq -c --arg p "$([ "$key" = . ] && echo "" || echo "$key")" --arg u "${DU[$key]}" \
+      '{path: $p, uri: $u, entries: (to_entries | map(.value + {idx: .key}))}' <<<"$L" >> "$B/final_nodes.jsonl"
+  done
+  log "  엔트리 순서 확인 OK (폴더 ${#DU[@]}개)"
   k=0
-  while IFS=$'\t' read -r idx fname ftype flen fsha; do
-    k=$((k + 1))
-    uri=$(jq -r --arg n "$fname" '.[] | select(.name == $n) | .uri' <<<"$L")
-    [[ $uri == content://* ]] || fail "검증: URI 없음 ($fname)"
-    sha=$(termux-saf-read "$uri" | sha256sum | cut -d' ' -f1) || fail "재읽기 실패 ($fname)"
-    [ "$sha" = "$fsha" ] || fail "sha256 불일치 ($fname): 원본 $fsha / 새 파일 $sha"
-    log "  [$k/$n] 검증 OK $fname"
+  while IFS=$'\t' read -r seq kind parent fname ftype flen fsha; do
+    [ "$kind" = f ] || continue
+    k=$((k + 1)); key=$(jp "$parent" "$fname")
+    uri=$(jq -r --arg n "$fname" '.[] | select(.name == $n) | .uri' "${DLS[$parent]}")
+    [[ $uri == content://* ]] || fail "검증: URI 없음 ($key)"
+    sha=$(termux-saf-read "$uri" | sha256sum | cut -d' ' -f1) || fail "재읽기 실패 ($key)"
+    [ "$sha" = "$fsha" ] || fail "sha256 불일치 ($key): 원본 $fsha / 새 파일 $sha"
+    log "  [$k/$nf] 검증 OK $key"
   done < "$B/index.tsv"
 
-  update_manifest "$name" "$nw" "$B/final_ls.json" || log "경고: manifest 갱신 실패 (다음 실행 시 --rescan 권장)"
+  update_manifest "$name" "$nw" "$B/final_nodes.jsonl" || log "경고: manifest 갱신 실패 (다음 실행 시 --rescan 권장)"
   STAGE=done
   rm -rf -- "$B"; CUR_BACKUP=""
-  local el=$(( ($(now) - t0) / 1000000 ))
-  log "  완료: $n 개 파일, $(hsize "$bytes"), 쓰기+검증 ${el} ms — 백업 삭제함"
+  log "  완료: 파일 $nf 개 + 폴더 $(( ${#DU[@]} - 1 )) 개, $(hsize "$bytes"), 쓰기+검증 $(ms "$t0") ms — 백업 삭제함"
 }
 
 # ---------------------------------------------------------------- 작품 하나 처리 (방식 A)
 process_work() {   # $1 = plan 객체(JSON)
-  local P=$1 name wuri cur want got need avail B i fname furi ftype flen f sha lsha lsz t0
+  local P=$1 name wuri need avail B i kind parent fname furi ftype flen f sha lsha lsz t0 got want u key nd=0
   name=$(jq -r .name <<<"$P"); wuri=$(jq -r .uri <<<"$P")
   CUR_WORK=$name CUR_BACKUP=""
   t0=$(now)
   echo
-  log "=== [$name] 처리 시작 ($(jq '.order | length' <<<"$P") 개 파일, $(hsize "$(jq .bytes <<<"$P")"))"
+  log "=== [$name] 처리 시작 (파일 $(jq .nfiles <<<"$P")개, 하위 폴더 $(jq .ndirs <<<"$P")개, $(hsize "$(jq .bytes <<<"$P")"))"
 
   STAGE=precheck
-  cur=$(saf_ls "$wuri") || fail "작품 폴더 ls 실패"
-  want=$(jq -c --arg n "$name" '.works[] | select(.name == $n) | [.entries[] | [.name, .uri, (.length // 0)]] | sort' "$MANIFEST")
-  got=$(jq -c '[.[] | [.name, .uri, (.length // 0)]] | sort' <<<"$cur")
-  [ "$got" = "$want" ] || fail "스캔 이후 폴더 내용이 바뀜 — --rescan 후 다시 실행 (원본 변경 없음)"
+  while IFS=$'\t' read -r key u; do   # 작품 안 모든 폴더를 다시 ls 해서 스캔 결과와 비교
+    nd=$((nd + 1))
+    got=$(saf_ls "$u" | jq -c '[.[] | [.name, .uri, (.length // 0)]] | sort') || fail "폴더 ls 실패 ($name/$key)"
+    want=$(jq -c --arg n "$name" --arg k "$key" \
+      '($k | if . == "." then "" else . end) as $k | .works[] | select(.name == $n) | .dirs[] | select(.path == $k) | [.entries[] | [.name, .uri, (.length // 0)]] | sort' "$MANIFEST")
+    [ "$got" = "$want" ] || fail "스캔 이후 폴더 내용이 바뀜 ($name/$key) — --rescan 후 다시 실행 (원본 변경 없음)"
+  done < <(jq -r '.dirs[] | [(if .path == "" then "." else .path end), .uri] | @tsv' <<<"$P")
   need=$(( $(jq .bytes <<<"$P") / 1024 + 200 * 1024 ))
   avail=$(df -Pk "$TMPDIR" | awk 'NR == 2 { print $4 }')
   [ "$avail" -gt "$need" ] || fail "\$TMPDIR 여유 공간 부족: 필요 ${need} KB, 여유 ${avail} KB"
+  log "  사전 확인 OK (폴더 $nd 개 재확인)"
 
   STAGE=backup
   B=$BACKUP_BASE/$(date +%Y%m%d_%H%M%S)_$$
@@ -292,21 +370,27 @@ process_work() {   # $1 = plan 객체(JSON)
   jq -n --arg w "$name" --arg at "$(date '+%F %T')" '{work: $w, created: $at}' > "$B/meta.json"
   : > "$B/index.tsv"
   i=0
-  while IFS=$'\t' read -r fname furi ftype flen; do
-    i=$((i + 1)); f=$B/$(printf %04d "$i").bin
-    sha=$(termux-saf-read "$furi" | tee "$f" | sha256sum | cut -d' ' -f1) || fail "읽기 실패 ($fname)"
+  while IFS=$'\t' read -r kind parent fname furi ftype flen; do
+    i=$((i + 1))
+    if [ "$kind" = d ]; then
+      printf '%s\td\t%s\t%s\t-\t0\t-\n' "$i" "$parent" "$fname" >> "$B/index.tsv"
+      continue
+    fi
+    key=$(jp "$parent" "$fname"); f=$B/$(printf %05d "$i").bin
+    sha=$(termux-saf-read "$furi" | tee "$f" | sha256sum | cut -d' ' -f1) || fail "읽기 실패 ($key)"
     lsz=$(stat -c %s "$f")
-    [ "$lsz" = "$flen" ] || fail "읽은 크기 불일치 ($fname): SD $flen / 로컬 $lsz"
+    [ "$lsz" = "$flen" ] || fail "읽은 크기 불일치 ($key): SD $flen / 로컬 $lsz"
     lsha=$(sha256sum < "$f" | cut -d' ' -f1)
-    [ "$lsha" = "$sha" ] || fail "로컬 백업 sha256 불일치 ($fname)"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$fname" "$ftype" "$flen" "$sha" >> "$B/index.tsv"
-  done < <(jq -r '.order[] | [.name, .uri, .type, .length] | @tsv' <<<"$P")
+    [ "$lsha" = "$sha" ] || fail "로컬 백업 sha256 불일치 ($key)"
+    printf '%s\tf\t%s\t%s\t%s\t%s\t%s\n' "$i" "$parent" "$fname" "$ftype" "$flen" "$sha" >> "$B/index.tsv"
+  done < <(jq -r '.ops[] | [.op, (if .parent == "" then "." else .parent end), .name, (.uri // "-"),
+                            (if (.type // "") == "" then "-" else .type end), (.length // 0)] | @tsv' <<<"$P")
   touch "$B/.complete"
-  log "  백업 완료: $i 개 파일 sha256 검증 ($(ms "$t0") ms) → $B"
+  log "  백업 완료: 항목 $i 개, 파일 sha256 검증 ($(ms "$t0") ms) → $B"
 
   STAGE=delete
   termux-saf-rm "$wuri" || fail "원본 폴더 삭제 실패 (rc=$?)"
-  log "  원본 폴더 삭제"
+  log "  원본 작품 폴더 삭제"
 
   write_phase "$B"
   log "=== [$name] 성공 (총 $(ms "$t0") ms)"
@@ -314,31 +398,46 @@ process_work() {   # $1 = plan 객체(JSON)
 }
 
 # ---------------------------------------------------------------- 복구
+# 같은 이름 폴더가 SD 에 남아 있으면, 그 안의 모든 항목이 백업에 있는 것(같은 경로, 크기 ≤ 백업)일 때만 지운다.
+restore_check_tree() {   # $1 URI  $2 상대경로(.=루트)  $3 백업 경로표 JSON 파일
+  local L sub u
+  L=$(saf_ls "$1") || fail "기존 폴더 ls 실패 ($2)"
+  jq -e --slurpfile T "$3" --arg p "$2" --arg d "$DIR_MIME" '
+    def jp($p; $n): if $p == "." then $n else $p + "/" + $n end;
+    all(.[]; jp($p; .name) as $k | $T[0][$k] as $t
+        | $t != null and ($t.kind == (if .type == $d then "d" else "f" end))
+          and (.type == $d or (.length // 0) <= $t.length))' <<<"$L" >/dev/null \
+    || fail "SD 의 '$2' 에 백업에 없는 내용이 있음 — 직접 확인 필요 (아무것도 지우지 않음)"
+  while IFS=$'\t' read -r sub u; do
+    restore_check_tree "$u" "$(jp "$2" "$sub")" "$3"
+  done < <(jq -r --arg d "$DIR_MIME" '.[] | select(.type == $d) | [.name, .uri] | @tsv' <<<"$L")
+}
+
 restore() {
-  local B=${RESTORE%/} name idx fname ftype flen fsha f L names
+  local B=${RESTORE%/} name seq kind parent fname ftype flen fsha f L cnt ex
   [ -f "$B/.complete" ] && [ -f "$B/meta.json" ] && [ -f "$B/index.tsv" ] || { log "완전한 백업이 아님: $B"; exit 1; }
   name=$(jq -r .work "$B/meta.json")
   CUR_WORK=$name CUR_BACKUP=$B
+  STAGE=restore-check
   log "=== 복구: [$name] ← $B"
-  while IFS=$'\t' read -r idx fname ftype flen fsha; do
-    f=$B/$(printf %04d "$idx").bin
+  while IFS=$'\t' read -r seq kind parent fname ftype flen fsha; do
+    [ "$kind" = f ] || continue
+    f=$B/$(printf %05d "$seq").bin
     [ "$(stat -c %s "$f")" = "$flen" ] && [ "$(sha256sum < "$f" | cut -d' ' -f1)" = "$fsha" ] \
-      || { log "백업 파일 손상: $fname — 중단 (백업은 그대로)"; exit 1; }
+      || fail "백업 파일 손상: $(jp "$parent" "$fname")"
   done < "$B/index.tsv"
   log "  백업 sha256 확인 OK"
 
-  STAGE=mkdir   # 이 시점 이후 실패 시 백업 유지
   L=$(saf_ls "$ROOT") || fail "루트 ls 실패"
-  local cnt; cnt=$(jq --arg n "$name" '[.[] | select(.name == $n)] | length' <<<"$L")
+  cnt=$(jq --arg n "$name" '[.[] | select(.name == $n)] | length' <<<"$L")
   if [ "$cnt" -gt 0 ]; then
-    local ex exl
     ex=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .uri' <<<"$L")
-    exl=$(saf_ls "$ex") || fail "기존 폴더 ls 실패"
-    names=$(jq -Rsc 'split("\n") | map(select(length > 0) | split("\t") | {key: .[1], value: (.[3] | tonumber)}) | from_entries' < "$B/index.tsv")
-    jq -e --argjson B "$names" --arg d "$DIR_MIME" \
-      'all(.[]; .type != $d and ($B[.name] != null) and ((.length // 0) <= $B[.name]))' <<<"$exl" >/dev/null \
-      || fail "SD 에 같은 이름 폴더가 있고 백업에 없는 내용이 들어 있음 — 직접 확인 필요 (아무것도 지우지 않음)"
-    log "  남아 있는 같은 이름 폴더(백업의 일부/전체만 포함) 삭제"
+    jq -Rs 'split("\n") | map(select(length > 0) | split("\t")
+              | {key: (if .[2] == "." then .[3] else .[2] + "/" + .[3] end),
+                 value: {kind: .[1], length: (.[5] | tonumber)}}) | from_entries' < "$B/index.tsv" > "$B/paths.json"
+    restore_check_tree "$ex" . "$B/paths.json"
+    STAGE=mkdir   # 이 시점 이후 실패 시 백업 유지
+    log "  남아 있는 같은 이름 폴더(백업 내용의 일부/전체만 포함) 삭제"
     termux-saf-rm "$ex" || fail "기존 폴더 삭제 실패"
   fi
   write_phase "$B"
@@ -348,7 +447,8 @@ restore() {
 # ---------------------------------------------------------------- main
 if [ "$MODE" = restore ]; then restore; exit 0; fi
 
-if [ "$RESCAN" = 1 ] || [ ! -s "$MANIFEST" ] || [ "$(jq -r .root "$MANIFEST" 2>/dev/null)" != "$ROOT" ]; then
+if [ "$RESCAN" = 1 ] || [ ! -s "$MANIFEST" ] || [ "$(jq -r .root "$MANIFEST" 2>/dev/null)" != "$ROOT" ] \
+   || ! jq -e '.works | all(has("dirs"))' "$MANIFEST" >/dev/null 2>&1; then
   scan
 else
   log "저장된 스캔 사용: $(jq -r .scanned_at "$MANIFEST") (다시 스캔하려면 --rescan)"
@@ -375,7 +475,7 @@ if [ "$MODE" = dry ]; then
   else
     jq -c '[.[] | select(.status == "reorder")]' <<<"$PLANS" | jq -r "$DETAIL_JQ"
     echo "---- 이미 트랙 순서대로인 작품 (건너뜀)"
-    jq -r '.[] | select(.status == "ok") | "  \(.name)  (MP3 \(.mp3 | length)개)"' <<<"$PLANS"
+    jq -r '.[] | select(.status == "ok") | "  \(.name)  (MP3 \(.nmp3)개, 하위 폴더 \(.ndirs)개)"' <<<"$PLANS"
     echo "---- MP3 없는 폴더"
     jq -r '.[] | select(.status == "nomp3") | "  \(.name)"' <<<"$PLANS"
   fi
@@ -385,6 +485,7 @@ if [ "$MODE" = dry ]; then
   jq -r --argjson nt "$NT" '
     "  작품 \(length)개: 재정렬 필요 \([.[] | select(.status == "reorder")] | length), 정상 \([.[] | select(.status == "ok")] | length), 건너뜀 \([.[] | select(.status == "skip")] | length), MP3 없음 \([.[] | select(.status == "nomp3")] | length)",
     "  이번 실행 대상: \($nt)개"' <<<"$SEL"
+  jq -r '"  대상 합계: 파일 \([.[].nfiles] | add // 0)개, \(([.[].bytes] | add // 0) / 1048576 | floor) MB"' <<<"$TARGETS"
   log "dry-run: 아무것도 변경하지 않았습니다. 로그: $LOG"
   exit 0
 fi
@@ -395,7 +496,7 @@ if [ "$NT" = 0 ]; then
   exit 0
 fi
 if [ "$MODE" = test ]; then
-  [ "$(jq '.[0].mp3 | length' <<<"$TARGETS")" -ge 3 ] || log "참고: MP3 가 3개 미만인 작품입니다."
+  [ "$(jq '.[0].nmp3' <<<"$TARGETS")" -ge 3 ] || log "참고: MP3 가 3개 미만인 작품입니다."
 fi
 log "실제 적용: $NT 개 작품 (로그: $LOG)"
 for ((t = 0; t < NT; t++)); do
