@@ -32,7 +32,7 @@ BACKUP_BASE=${TMPDIR:?TMPDIR 가 비어 있음}/snowsky_backup
 LOG_DIR=${SNOWSKY_LOGS:-$HOME/snowsky_logs}
 # 동시에 도는 프로세스 수를 낮게 유지한다. 안드로이드 12+ 는 앱의 하위 프로세스가 약 32개를 넘으면 전부 SIGKILL 로 종료한다
 # ("Process completed (signal 9)"). SAF 호출 하나가 프로세스 5~6개를 만들기 때문에 동시 작업은 보수적으로 둔다.
-JOBS=3 IO_JOBS=1 PAD_JOBS=1 NO_PREP=1
+JOBS=3 IO_JOBS=1 PAD_JOBS=1 NO_PREP=1 FORCE_UNLOCK=0
 GAP=0
 
 MODE=dry YES=0 FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=auto
@@ -62,6 +62,7 @@ usage() {
   --jobs <N>          스캔 시 병렬 ls 개수 (기본 4, 읽기 전용)
   --io-jobs <N>       백업·검증 때 동시에 읽는 파일 수 (기본 1). 읽기만 동시에 하고 쓰기·생성은 항상 순서대로.
                       올리면 빨라지지만 안드로이드가 Termux 를 강제 종료(signal 9)할 수 있다
+  --force-unlock      남은 잠금(~/.cache/snowsky/lock)을 무조건 지우고 시작. 다른 실행이 정말 없을 때만 쓴다
   --prep              (--yes 일 때) 다음 작품의 원본 삭제·패드 작업을 현재 작품을 쓰는 동안 미리 함 (작품당 약 13초 단축)
   --fast              빠른 모드 = --prep + --io-jobs 2. 동시에 도는 프로세스가 늘어나므로, 안드로이드 개발자 옵션의
                       "하위 프로세스 제한 해제"(Disable child process restrictions)를 켠 뒤에 쓰세요. 아니면 Termux 가
@@ -98,6 +99,7 @@ while [ $# -gt 0 ]; do
     --io-jobs) IO_JOBS=${2:?}; shift ;;
     --no-prep) NO_PREP=1 ;;
     --prep)    NO_PREP=0 ;;
+    --force-unlock) FORCE_UNLOCK=1 ;;
     --fast)    NO_PREP=0; IO_JOBS=2 ;;
     --restore) MODE=restore; RESTORE=${2:?--restore 에 백업 경로 필요}; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -126,13 +128,27 @@ exec < /dev/null
 LOCK=$CACHE_DIR/lock
 if ! mkdir "$LOCK" 2>/dev/null; then
   # 강제 종료(signal 9)로 잠금이 남았을 수 있다: 소유 프로세스가 없으면 잠금을 되찾는다
-  OLDPID=$(cat "$LOCK/pid" 2>/dev/null)
-  if [ -n "$OLDPID" ] && ! kill -0 "$OLDPID" 2>/dev/null; then
-    echo "이전 실행이 비정상 종료된 흔적(잠금)을 정리합니다 (pid $OLDPID)"; rm -rf -- "$LOCK"
-  elif [ -z "$OLDPID" ] && [ -z "$(pgrep -f snowsky_reorder.sh 2>/dev/null | grep -v "^$$\$")" ]; then
-    echo "이전 실행이 비정상 종료된 흔적(잠금)을 정리합니다"; rm -rf -- "$LOCK"
+  OLDPID=$(cat "$LOCK/pid" 2>/dev/null) STALE=0
+  if [ -n "$OLDPID" ]; then
+    kill -0 "$OLDPID" 2>/dev/null || STALE=1
+  elif ps -A -o pid >/dev/null 2>&1; then
+    # pid 기록이 없는(이전 버전이 남긴) 잠금: 이 스크립트를 실행 중인 다른 프로세스가 있는지 본다.
+    # 자기 자신($$), 그 하위 프로세스(명령 치환 등)와 상위 프로세스(timeout, script 로 감싼 경우)는 제외한다.
+    OTHERS=$(ps -A -o pid,ppid,args 2>/dev/null | awk -v me="$$" '
+      { pid[NR] = $1; pp[$1] = $2; line[NR] = $0 }
+      END {
+        for (a = me; a in pp && a > 1; a = pp[a]) anc[a] = 1            # 위쪽(부모들)
+        for (i = 1; i <= NR; i++) {
+          p = pid[i]; q = p; mine = 0
+          while (q in pp && q > 1) { if (q == me) { mine = 1; break } q = pp[q] }   # 아래쪽(내 자식들)
+          if (!mine && !(p in anc) && line[i] ~ /snowsky_reorder[.]sh/ && line[i] !~ /awk/) print p
+        }
+      }')
+    [ -z "$OTHERS" ] && STALE=1
   fi
-  mkdir "$LOCK" 2>/dev/null || { echo "다른 실행이 진행 중입니다: $LOCK"; exit 1; }
+  [ "$FORCE_UNLOCK" = 1 ] && STALE=1
+  if [ "$STALE" = 1 ]; then echo "이전 실행이 비정상 종료된 흔적(잠금)을 정리합니다${OLDPID:+ (pid $OLDPID)}"; rm -rf -- "$LOCK"; fi
+  mkdir "$LOCK" 2>/dev/null || { echo "다른 실행이 진행 중입니다: $LOCK  (정말 없다면 --force-unlock)"; exit 1; }
 fi
 echo $$ > "$LOCK/pid"
 
@@ -773,7 +789,7 @@ finish_backup() {  # $1 pid  $2 백업 디렉터리
 # 프로세스와 그 자식들을 모두 종료한다 (백업 작업은 여러 읽기 프로세스를 거느린다)
 kill_tree() {
   local c
-  for c in $(ps -A -o PID,PPID 2>/dev/null | awk -v p="$1" '$2 == p { print $1 }'); do kill_tree "$c"; done
+  for c in $(ps -A -o pid,ppid 2>/dev/null | awk -v p="$1" '$2 == p { print $1 }'); do kill_tree "$c"; done
   kill "$1" 2>/dev/null
   return 0
 }
