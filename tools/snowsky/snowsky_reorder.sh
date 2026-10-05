@@ -246,19 +246,33 @@ update_manifest() {   # $1 작품명 $2 새 URI $3 폴더 노드 JSONL 파일
 COMMON_JQ='
 def fw: explode | map(if . >= 65296 and . <= 65305 then . - 65248 else . end) | implode;
 def ismp3: .name | ascii_downcase | endswith(".mp3");
-def tok: [.name | fw | capture("^\\s*(?<n>[0-9]+)") | .n] | first;
 def jp($p; $n): if $p == "" then $n else $p + "/" + $n end;
-def okey: tok as $t | if $t then [0, ($t | tonumber), (.name | fw | ascii_downcase), .name]
-                      else [1, 0, (.name | fw | ascii_downcase), .name] end;
+def norm: fw | ascii_downcase | sub("\\.mp3$"; "");
+def hasnum: .name | fw | test("[0-9]");
+# 자연 정렬: 이름을 숫자 덩어리/글자 덩어리로 나눠 숫자는 숫자로 비교 (#2 < #10, 01 < 2, RJ…_3 < RJ…_12).
+# 번호가 이름 앞이 아니어도 된다 ("#1.", "Track 01", "【01】", "第1話", "RJ01062161_01" …).
+def nkey: [.name | norm | scan("[0-9]+|[^0-9]+") | if test("^[0-9]") then [0, tonumber] else [1, .] end];
+def okey: [nkey, .name];
+# 같은 폴더 MP3 들의 공통 앞부분(끝의 숫자는 제외)을 뺀 뒤 처음 나오는 숫자 = 화면에 보여 줄 트랙 번호
+def lcp: if length == 0 then "" else
+           reduce .[1:][] as $s (.[0];
+             . as $p | ([($p | length), ($s | length)] | min) as $m
+             | ([range(0; $m) | select($p[.:.+1] != $s[.:.+1])] | first // $m) as $i | $p[:$i])
+         end | sub("[0-9]+$"; "");
+def tracklabel($pre): (.name | norm) as $n
+  | (if ($n | startswith($pre)) then $n[($pre | length):] else $n end)
+  | ([scan("[0-9]+")] | first) // null;
 '
 PLAN_JQ=$COMMON_JQ'
 def dirplan:
   .path as $p
   | (.entries | sort_by(.idx)) as $e
-  | [$e[] | select(.type == $dir) | . + {tok: tok}] as $dirs
-  | [$e[] | select(.type != $dir and ismp3) | . + {tok: tok}] as $mp3
-  | ([$mp3[] | select(.tok != null) | . + {num: (.tok | tonumber)}] | sort_by([.num, .name])) as $numd
-  | ([$mp3[] | select(.tok == null)] | sort_by(.name)) as $unnum
+  | [$e[] | select(.type == $dir)] as $dirs
+  | [$e[] | select(.type != $dir and ismp3)] as $mp30
+  | ([$mp30[] | .name | norm] | lcp) as $pre
+  | [$mp30[] | . + {tok: tracklabel($pre)}] as $mp3
+  | ([$mp3[] | select(hasnum)] | sort_by(okey)) as $numd
+  | ([$mp3[] | select(hasnum | not)] | sort_by(okey)) as $unnum
   | [$e[] | select(.type != $dir and (ismp3 | not))] as $others
   | ($dirs | sort_by(okey)) as $sdirs
   | ($numd + $unnum) as $pm
@@ -271,9 +285,9 @@ def dirplan:
       files: [($pm + $others)[] | {name, uri, type: (.type // ""), length: (.length // 0), label: jp($p; .tok // .name)}],
       nmp3: ($mp3 | length),
       bad: ([$e[] | select(.name | test("[\\t\\n\\r\\\\]"))] | length > 0),
-      warnings: ( [$unnum[] | "번호 없음 (이름순으로 뒤에 배치): " + jp($p; .name)]
-                + [$numd | group_by(.num)[] | select(length > 1)
-                   | "트랙 번호 중복 \(.[0].num): " + (map(jp($p; .name)) | join(", "))] ) };
+      warnings: ( [$unnum[] | "숫자 없음 (이름순으로 뒤에 배치): " + jp($p; .name)]
+                + [$numd | map(select(.tok != null)) | group_by(.tok | tonumber)[] | select(length > 1)
+                   | "트랙 번호 중복 \(.[0].tok | tonumber): " + (map(jp($p; .name)) | join(", "))] ) };
 .works | sort_by(.name) | map(
   . as $w
   | [$w.dirs[] | dirplan] as $dp
