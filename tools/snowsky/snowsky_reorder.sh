@@ -443,8 +443,9 @@ write_phase() {
 # 패드: 아주 짧은 이름의 빈 파일. 앞쪽 빈 엔트리를 메우는 용도이며 실행이 끝나면 모두 지운다.
 # 짧은 이름은 어떤 빈자리에도 들어가므로, 패드가 맨 뒤에 생겼다면 그보다 앞에는 (더 긴 이름이
 # 들어갈 수 있는) 빈자리가 없다는 뜻이다.
-plug_holes() {
-  local total=0 b=1 k name u last
+plug_holes() {   # $1 = 처음 한 번에 만들 패드 수 (방금 지운 폴더 이름이 차지하던 칸 수 추정)
+  local total=0 b=${1:-1} k name u last
+  [ "$b" -ge 1 ] && [ "$b" -le 32 ] || b=1
   while :; do
     for ((k = 0; k < b; k++)); do
       PADN=$((PADN + 1)); name=$(printf "$PAD_FMT" "$PADN")
@@ -467,7 +468,10 @@ plug_holes() {
 make_work_folder() {
   local name=$1 try nw nm last
   for try in 1 2 3; do
-    if [ "$TRACKS_ONLY" != 1 ]; then local tp; tp=$(now); plug_holes; log "  빈자리 확인: $(ms "$tp") ms"; fi
+    if [ "$TRACKS_ONLY" != 1 ]; then
+      # 긴 이름은 13 글자마다 한 칸 + 1 칸을 쓴다(FAT LFN). 그만큼 한 번에 만들어 루트 ls 횟수를 줄인다
+      local tp; tp=$(now); plug_holes $(( (${#name} + 12) / 13 + 2 )); log "  빈자리 확인: $(ms "$tp") ms"
+    fi
     nw=$(termux-saf-mkdir "$ROOT" "$name" 2>&1)
     [[ $nw == content://* ]] || fail "mkdir 실패: ${nw:0:200}"
     nm=$(saf_stat_name "$nw" "$ROOT")
@@ -575,6 +579,20 @@ kill_prefetch() {
   rm -rf -- "$PF_B" "$PF_B.log"
   log "미리 읽던 다음 작품의 백업을 취소함 (원본은 그대로)"
   PF_PID="" PF_B=""
+}
+# y 로 진행, n 으로 중단. 입력에 섞여 오는 \r·공백·전각은 무시하고, 한글 자판(ㅛ/ㅜ)도 받는다.
+# 빈 입력이나 알 수 없는 입력은 중단으로 치지 않고 다시 묻는다 (실수로 멈추지 않도록).
+ask_continue() {
+  local ans
+  while :; do
+    read -r -p "$1" ans < /dev/tty || return 1
+    ans=${ans//$'\r'/}; ans=${ans//[[:space:]]/}
+    case $ans in
+      y|Y|yes|YES|ｙ|Ｙ|ㅛ) return 0 ;;
+      n|N|no|NO|ｎ|Ｎ|ㅜ)   return 1 ;;
+      *) echo "  y 또는 n 을 입력하세요 (받은 입력: $(printf '%q' "$ans"))" ;;
+    esac
+  done
 }
 backup_dir() { printf '%s/%s_%s_%03d' "$BACKUP_BASE" "$(date +%Y%m%d_%H%M%S)" "$$" "$1"; }
 
@@ -814,8 +832,8 @@ for ((t = 0; t < NT; t++)); do
   fi
   rebuild_work "$P" "$B" "$T0"
   if [ "$MODE" = apply ] && [ "$YES" = 0 ] && [ $((t + 1)) -lt "$NT" ]; then
-    read -r -p "다음 작품으로 진행할까요? ($((t + 2))/$NT: $(jq -r ".[$((t + 1))].name" <<<"$TARGETS")) [y/N] " ans < /dev/tty
-    [[ $ans == [yY] ]] || { kill_prefetch; log "사용자 중단. 처리 완료 $((t + 1))/$NT (다시 실행하면 남은 작품부터 이어서 진행)"; exit 0; }
+    ask_continue "다음 작품으로 진행할까요? ($((t + 2))/$NT: $(jq -r ".[$((t + 1))].name" <<<"$TARGETS")) [y/n] " \
+      || { kill_prefetch; log "사용자 중단. 처리 완료 $((t + 1))/$NT (다시 실행하면 남은 작품부터 이어서 진행)"; exit 0; }
   fi
 done
 REMAIN=$(jq '.rebuild | length' <<<"$ROOTPLAN")
