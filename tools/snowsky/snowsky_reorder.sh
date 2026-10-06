@@ -37,7 +37,7 @@ GAP=0
 
 MODE=dry YES=0 FOLDER="" LIMIT=0 FORCE=0 RESCAN=0 RESTORE="" TRACKS_ONLY=0 KEEP_PADS=auto
 PAD_FMT="~P%05d" PAD_RE='^~P[0-9]{4,6}$' PADN=0 PADS_FILE=""
-PRE_DONE=0 PREP_PID="" PREP_B="" NEXT_P="" IGNORE_BACKUPS=0
+PRE_DONE=0 PREP_PID="" PREP_B="" NEXT_P="" IGNORE_BACKUPS=0 ACCEPT_CHANGED=0
 
 usage() {
   cat <<'U'
@@ -68,6 +68,7 @@ usage() {
                       "하위 프로세스 제한 해제"(Disable child process restrictions)를 켠 뒤에 쓰세요. 아니면 Termux 가
                       "Process completed (signal 9)" 로 강제 종료될 수 있다
   --restore <백업>     실패로 남은 백업 폴더에서 작품을 다시 생성
+  --accept-changed    스캔 이후 직접 바꾼(교체·삭제한) 파일도 현재 상태 기준으로 받아들임 (백업은 현재 상태에서 만들고 검증함)
   --ignore-backups    복구하지 않은 백업이 남아 있어도 --apply/--test 를 진행 (기본: 먼저 --restore 하라고 알리고 멈춤)
   -h, --help          이 도움말
 
@@ -83,6 +84,7 @@ while [ $# -gt 0 ]; do
     --dry-run) MODE=dry ;;
     --apply)   MODE=apply ;;
     --yes)     YES=1 ;;
+    --accept-changed) ACCEPT_CHANGED=1 ;;
     --ignore-backups) IGNORE_BACKUPS=1 ;;
     --test)    MODE=test; FOLDER=${2:?--test 에 작품명 필요}; shift ;;
     --folder)  FOLDER=${2:?--folder 에 작품명 필요}; shift ;;
@@ -153,7 +155,7 @@ fi
 echo $$ > "$LOCK/pid"
 
 STAGE=idle CUR_WORK="" CUR_BACKUP=""
-on_exit() { kill_prefetch; [ "$KEEP_PADS" = 0 ] && cleanup_pads; rm -rf -- "$LOCK" 2>/dev/null; sleep 0.2; }
+on_exit() { declare -F kill_prefetch >/dev/null && kill_prefetch; [ "$KEEP_PADS" = 0 ] && declare -F cleanup_pads >/dev/null && cleanup_pads; rm -rf -- "$LOCK" 2>/dev/null; sleep 0.2; }
 on_int() {
   echo
   log "중단됨 (단계: $STAGE, 작품: ${CUR_WORK:-없음})"
@@ -686,7 +688,11 @@ refresh_work() {   # P 를 갱신한다 (backup_work 의 지역 변수), $B.node
   new=$(jq -sc --arg d "$DIR_MIME" '[.[] as $x | $x.entries[] | [$x.path, .name, (if .type == $d then "d" else ((.length // 0) | tostring) end)]] | sort' "$nodes")
   gone=$(jq -nc --argjson o "$old" --argjson n "$new" '[$o[] | select(. as $e | ($n | index([$e])) == null)]')
   added=$(jq -nc --argjson o "$old" --argjson n "$new" '[$n[] | select(. as $e | ($o | index([$e])) == null)]')
-  [ "$gone" = "[]" ] || fail "스캔 이후 삭제되었거나 크기가 바뀐 항목이 있음: $(jq -r 'map(if .[0] == "" then .[1] else .[0] + "/" + .[1] end) | join(", ")' <<<"$gone" | cut -c1-300) — 직접 확인 후 --rescan (원본 변경 없음)"
+  if [ "$gone" != "[]" ] && [ "$ACCEPT_CHANGED" = 1 ]; then
+    log "  스캔 이후 사라지거나 크기가 바뀐 항목을 현재 상태 기준으로 받아들임: $(jq -r 'map(if .[0] == "" then .[1] else .[0] + "/" + .[1] end) | join(", ")' <<<"$gone" | cut -c1-300)"
+  else
+  [ "$gone" = "[]" ] || fail "스캔 이후 삭제되었거나 크기가 바뀐 항목이 있음: $(jq -r 'map(if .[0] == "" then .[1] else .[0] + "/" + .[1] end) | join(", ")' <<<"$gone" | cut -c1-300) — 직접 확인 후 --rescan 또는 --accept-changed (원본 변경 없음)"
+  fi
   log "  새로 생긴 항목 $(jq length <<<"$added")개: $(jq -r 'map((if .[0] == "" then "" else .[0] + "/" end) + .[1]) | join(", ")' <<<"$added" | cut -c1-300)"
   jq -n --arg n "$name" --arg u "$(jq -r .uri <<<"$P")" --argjson pos "$(jq .pos <<<"$P")" --slurpfile N "$nodes" \
     '{works: [{name: $n, uri: $u, pos: $pos, dirs: $N}]}' > "$B.mini.json" || fail "계획 갱신 실패"
