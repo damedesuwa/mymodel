@@ -3,6 +3,22 @@
 외장 SD 카드(SAF)의 작품 폴더마다 JPG를 240×240 **Front Cover**로 만들어
 같은 작품의 MP3에 넣는다. 기본 실행은 **DRY RUN**이며 `--apply`를 줘야만 파일이 바뀐다.
 
+## 새 작품을 추가했을 때 (권장)
+
+```bash
+curl -fL -o ~/bin/asmr_cover_update.sh \
+  "https://raw.githubusercontent.com/damedesuwa/mymodel/ccr-248d2e90-8vttzu/tools/termux-cover-embed/asmr_cover_update.sh"
+bash ~/bin/asmr_cover_update.sh
+```
+
+`asmr_cover_update.sh`는 아래를 차례로 한다.
+
+1. SD 카드를 새로 스캔한다.
+2. 커버가 없는 MP3만 작품 단위로 요약한다.
+3. `y`라고 답하면 그 곡들에만 적용한다.
+
+규칙은 `--work-cover --other-images`와 같다. 작품 안 이미지가 1장이면 그 작품의 커버 없는 곡 전부에 넣는다. 여러 장이면 후보만 보여 주고 넣지 않는다.
+
 ## 설치
 
 ```bash
