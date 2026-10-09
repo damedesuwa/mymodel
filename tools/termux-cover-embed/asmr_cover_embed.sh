@@ -1129,6 +1129,12 @@ def main():
                 out("  !!! 치명적 오류 — 즉시 중단합니다.\n  %s" % fatal)
                 break
             r["status"], r["note"] = st, info
+            if st in ("APPLIED", "SKIP_EXISTING"):
+                # 다음 --reuse-scan 실행이 옛 크기 기준의 '썸네일 없음' 캐시를 믿지 않도록
+                m = r["mp3"]
+                probe_cache["%s|%s|%s" % (m["uri"], m.get("length"), m.get("mtime"))] = "yes"
+                with open(probe_cache_path, "w", encoding="utf-8") as f:
+                    json.dump(probe_cache, f, ensure_ascii=False)
             if st == "APPLIED":
                 applied += 1
             elif st == "APPLY_FAIL":
