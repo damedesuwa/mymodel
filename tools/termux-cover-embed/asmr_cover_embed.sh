@@ -57,6 +57,8 @@ TARGET = 240
 DIR_TYPES = {"dir", "directory", "vnd.android.document/directory"}
 MP3_EXTS = {".mp3"}
 JPG_EXTS = {".jpg", ".jpeg"}
+# --other-images: JPG가 아닌 원본도 커버 소스로 인정 (결과는 항상 240x240 JPEG)
+OTHER_IMAGE_EXTS = {".png", ".webp", ".gif", ".bmp", ".jfif", ".avif", ".tif", ".tiff", ".heic"}
 COVER_NAMES = ["cover", "front", "folder", "jacket", "album", "albumart",
                "artwork", "ジャケット", "ジャケ", "表紙", "カバー",
                "커버", "자켓", "재킷", "표지"]
@@ -378,7 +380,7 @@ def scan(root_uri, cache_path, reuse):
 # --------------------------------------------------------------------------
 # 2,3) 디렉터리별 파일 -> 작품 단위 그룹
 # --------------------------------------------------------------------------
-def group(scan_data, depth, root_label):
+def group(scan_data, depth, root_label, image_exts=JPG_EXTS):
     works = OrderedDict()
     stats = defaultdict(int)
     outside = []
@@ -397,7 +399,7 @@ def group(scan_data, depth, root_label):
             _, ext = split_ext(name)
             if ext in MP3_EXTS:
                 kind = "mp3"
-            elif ext in JPG_EXTS:
+            elif ext in image_exts:
                 kind = "jpg"
             else:
                 continue
@@ -566,7 +568,7 @@ class ImageCache:
         return short_hash("%s|%s|%s" % (j["uri"], j.get("length"), j.get("mtime")))
 
     def source(self, j):
-        p = os.path.join(self.src_dir, self._id(j) + ".jpg")
+        p = os.path.join(self.src_dir, self._id(j) + ".img")
         if not os.path.exists(p):
             tmp = p + ".part"
             saf_read_to_file(j["uri"], tmp, j.get("length"))
@@ -931,6 +933,8 @@ def main():
     ap.add_argument("--work", action="append", help="이름에 이 문자열이 들어간 작품만 처리 (여러 번 가능)")
     ap.add_argument("--work-cover", action="store_true", help="이름 일치 JPG가 없는 트랙에 작품 대표 커버 적용")
     ap.add_argument("--cover-name", action="append", help="대표 커버로 인정할 파일 이름(확장자 제외) 추가")
+    ap.add_argument("--other-images", action="store_true",
+                    help="PNG/WEBP/GIF/BMP 등 JPG가 아닌 이미지도 커버 소스로 사용 (240x240 JPEG로 변환해 삽입, 원본은 그대로)")
     ap.add_argument("--prefer-same-dir", action="store_true", help="같은 이름 후보 중 MP3와 같은 폴더의 것이 1개면 그것을 사용")
     ap.add_argument("--map", help="수동 매핑 TSV: 'MP3경로<TAB>JPG경로' / 'MP3경로<TAB>SKIP' / '작품/*<TAB>JPG경로'")
     ap.add_argument("--reuse-scan", action="store_true", help="이전 스캔 결과(scan.json) 재사용")
@@ -986,7 +990,8 @@ def main():
     data, reused = scan(opts.root_uri, os.path.join(dirs["cache"], "scan.json"), opts.reuse_scan)
     out("스캔: %s (%s)" % ("이전 결과 재사용" if reused else "새로 순회", data.get("scanned_at")))
     # 2,3) 그룹
-    works, outside, stats = group(data, opts.work_depth, root_label)
+    image_exts = JPG_EXTS | OTHER_IMAGE_EXTS if opts.other_images else JPG_EXTS
+    works, outside, stats = group(data, opts.work_depth, root_label, image_exts)
     for d in data["dirs"]:
         if d.get("error"):
             out("디렉터리 읽기 실패: %s (%s)" % ("/".join([root_label] + d["rel"]), d["error"]))
