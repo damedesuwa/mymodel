@@ -52,7 +52,7 @@ bash ~/bin/asmr_cover_embed.sh --reuse-scan --apply
 | 2 | 같은 이름의 JPG가 여러 개, 또는 같은 이름의 MP3가 여러 폴더에 있음 | **AMBIGUOUS**: 후보 전체 경로를 출력하고 적용하지 않음 |
 | 2' | `--prefer-same-dir`이고, 후보 중 MP3와 **같은 폴더**의 JPG가 딱 1개 | EMBED |
 | 3 | 이름이 맞는 JPG 없음 | **NO IMAGE** |
-| 3' | `--work-cover`: 트랙 전용이 아닌 JPG가 1개뿐이거나 `cover`/`folder`/`jacket`/`ジャケット`… 이름의 JPG가 1개 | EMBED (작품 대표 커버) |
+| 3' | `--work-cover`: 작품 안 JPG가 1개뿐(이름 무관)이거나, 트랙 전용이 아닌 JPG가 1개뿐이거나 `cover`/`folder`/`jacket`/`ジャケット`… 이름의 JPG가 1개 | EMBED (작품 대표 커버) |
 | 3'' | `--work-cover`인데 대표 커버 후보가 여럿 | AMBIGUOUS |
 
 - 이름 키는 확장자를 뺀 파일명을 유니코드 NFC로 정규화하고 대소문자를 무시한 것이다. `01.mp3.jpg`처럼 생긴 이미지는 `01`로 본다.

@@ -473,7 +473,10 @@ def match_work(work, opts, mapping):
             work_cover_cands = [ww]
     elif opts.work_cover:
         names = {norm(n) for n in COVER_NAMES + (opts.cover_name or [])}
-        if len(cover_pool) == 1:
+        if len(jpgs) == 1:
+            # 작품 안 JPG가 1장뿐이면 이름이 트랙과 같아도 그것이 작품 커버
+            work_cover, work_cover_rule = jpgs[0], "작품 대표 커버(작품 안 JPG가 1개뿐)"
+        elif len(cover_pool) == 1:
             work_cover, work_cover_rule = cover_pool[0], "작품 대표 커버(트랙 전용이 아닌 JPG가 1개뿐)"
         else:
             named = [j for j in cover_pool if norm(split_ext(j["name"])[0]) in names]
