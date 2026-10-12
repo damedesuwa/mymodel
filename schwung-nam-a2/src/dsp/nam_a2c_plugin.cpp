@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "namcat"
+#define NAM_A2C_BUILD_ID "irverb"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -73,7 +73,13 @@
  * weight counts) and therefore the same cost. Naming the type "Amp" would
  * put a fuzz pedal under a label that says otherwise and hide that two of
  * them do not fit in a frame. */
-enum { BLK_OFF = 0, BLK_NAM = 1, BLK_CAB = 2, BLK_FX = 3, BLK_TYPES = 4 };
+/* BLK_IR is a reverb capture: the same convolution as BLK_CAB with the
+ * dry kept and a tap count you choose, because a room is seconds where a
+ * speaker is milliseconds. It shares `cab[]` - a block is one type at a
+ * time, and two stores would be two ways for one block to be two
+ * things. */
+enum { BLK_OFF = 0, BLK_NAM = 1, BLK_CAB = 2, BLK_FX = 3, BLK_IR = 4,
+       BLK_TYPES = 5 };
 
 /* THE NAME COLUMN OF FX_PEDALS, not a second list.
  *
@@ -90,6 +96,7 @@ static const char *block_type_name(int t) {
         case BLK_NAM:   return "NAM";
         case BLK_CAB:   return "Cab";
         case BLK_FX:    return "FX";
+        case BLK_IR:    return "IR";
         default:        return "Off";
     }
 }
@@ -191,6 +198,9 @@ typedef struct {
     int  cab_count;
     char cab_names[MAX_CABS][MAX_NAME_LEN];
     char cab_paths[MAX_CABS][MAX_PATH_LEN];
+    int  ir_count;
+    char ir_names[MAX_CABS][MAX_NAME_LEN];
+    char ir_paths[MAX_CABS][MAX_PATH_LEN];
 
     /* Scratch. Allocated once in create_instance - never per block. */
     float mono[FRAMES_PER_BLOCK];
@@ -350,7 +360,8 @@ static void *worker_thread(void *arg) {
          * is no longer the block's current one has already been overtaken.
          * A plain int read; the ring stays single-producer. */
         if (r.kind == BLK_NAM && s->amp[r.block].index != r.index) continue;
-        if (r.kind == BLK_CAB && s->cab[r.block].index != r.index) continue;
+        if ((r.kind == BLK_CAB || r.kind == BLK_IR) &&
+            s->cab[r.block].index != r.index) continue;
 
         if (r.kind == BLK_NAM) {
             nam_block_t *b = &s->amp[r.block];
@@ -378,9 +389,12 @@ static void *worker_thread(void *arg) {
             }
             b->loading.store(false, std::memory_order_release);
             plugin_log(msg);
-        } else if (r.kind == BLK_CAB) {
+        } else if (r.kind == BLK_CAB || r.kind == BLK_IR) {
             ir_block_t *b = &s->cab[r.block];
-            b->run_cap = IR_RUN_TAPS;
+            /* THE CAP IS THE WHOLE DIFFERENCE between the two types, and
+             * it is a knob on a reverb because it is a CPU knob wearing a
+             * time label - ~0.09 us a tap against a 2370 us frame. */
+            b->run_cap = (r.kind == BLK_IR) ? ir_rv_taps(b) : IR_RUN_TAPS;
             /* The placement filters keep their SETTING across a cab swap -
              * "the mic is where I put it" - but not their STATE, or the
              * old cabinet's tails ring on through the new one. */
@@ -388,12 +402,12 @@ static void *worker_thread(void *arg) {
             int n = ir_block_load(b, r.path);
             if (n > 0)
                 snprintf(msg, sizeof(msg),
-                         "Nam A2c: block %d cab '%s' %d taps (%.0f ms) gain %+.1f dB",
-                         r.block + 1, b->name, n, 1000.0f * n / SAMPLE_RATE,
-                         b->norm_db);
+                         "Nam A2c: block %d %s '%s' %d taps (%.0f ms) gain %+.1f dB",
+                         r.block + 1, r.kind == BLK_IR ? "ir" : "cab",
+                         b->name, n, 1000.0f * n / SAMPLE_RATE, b->norm_db);
             else
-                snprintf(msg, sizeof(msg), "Nam A2c: block %d cab FAILED %s",
-                         r.block + 1, r.path);
+                snprintf(msg, sizeof(msg), "Nam A2c: block %d %s FAILED %s",
+                         r.block + 1, r.kind == BLK_IR ? "ir" : "cab", r.path);
             plugin_log(msg);
         }
     }
@@ -497,6 +511,13 @@ static void scan_lists(a2c_t *s) {
     snprintf(dir, sizeof(dir), "%s/cabs", s->module_dir);
     s->cab_count = scan_directory(dir, s->cab_names, s->cab_paths,
                                   MAX_CABS, is_cab_file);
+    /* A SEPARATE FOLDER, not a subfolder of cabs/. The two are the same
+     * file format and nothing else: a cab is 23 ms and gets a mic moved
+     * around it, a room is up to 372 ms and gets a dry signal kept. One
+     * list would put a hall in the picker you reach for a 4x12. */
+    snprintf(dir, sizeof(dir), "%s/irs", s->module_dir);
+    s->ir_count = scan_directory(dir, s->ir_names, s->ir_paths,
+                                 MAX_CABS, is_cab_file);
 }
 
 /* The manager only offers a folder it can see, so they are created rather
@@ -505,6 +526,8 @@ static void scan_lists(a2c_t *s) {
 static void ensure_model_dirs(const char *module_dir) {
     char dir[MAX_PATH_LEN];
     snprintf(dir, sizeof(dir), "%s/models", module_dir);
+    mkdir(dir, 0755);
+    snprintf(dir, sizeof(dir), "%s/irs", module_dir);
     mkdir(dir, 0755);
     for (int c = 1; c < MODEL_CAT_COUNT; c++) {
         snprintf(dir, sizeof(dir), "%s/models/%s", module_dir, MODEL_CATS[c]);
@@ -536,6 +559,10 @@ static void request_load(a2c_t *s, int block, int kind, int index) {
         snprintf(r.path, sizeof(r.path), "%s", s->model_paths[index]);
         s->amp[block].index = index;
         s->amp[block].loading.store(true, std::memory_order_release);
+    } else if (kind == BLK_IR) {
+        if (index < 0 || index >= s->ir_count) return;
+        snprintf(r.path, sizeof(r.path), "%s", s->ir_paths[index]);
+        s->cab[block].index = index;
     } else {
         if (index < 0 || index >= s->cab_count) return;
         snprintf(r.path, sizeof(r.path), "%s", s->cab_paths[index]);
@@ -714,6 +741,9 @@ static void run_block(a2c_t *s, int b, float *buf, int n, float bpm) {
         case BLK_CAB:
             ir_block_process(&s->cab[b], buf, n);
             mic_process(&s->cab[b].mic, buf, n);
+            break;
+        case BLK_IR:
+            ir_reverb_process(&s->cab[b], buf, s->scratch, n);
             break;
         case BLK_FX:
             if (s->fx[b].line && s->fx[b].rv) {
@@ -924,6 +954,11 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
              * than a silence you then have to diagnose. */
             if (t == BLK_NAM && s->amp[b].index < 0 && s->model_count > 0)
                 request_load(s, b, BLK_NAM, 0);
+            if (t == BLK_IR) {
+                ir_rv_defaults(&s->cab[b]);
+                s->cab[b].index = -1;
+                if (s->ir_count > 0) request_load(s, b, BLK_IR, 0);
+            }
             if (t == BLK_CAB) {
                 /* AS CAPTURED is the only honest zero for a mic move, and
                  * it is the CENTRE of the distance knob rather than its
@@ -933,8 +968,8 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                 mic_defaults(&s->cab[b].mic);
                 mic_update(&s->cab[b].mic);
                 mic_reset_state(&s->cab[b].mic);
-                if (s->cab[b].index < 0 && s->cab_count > 0)
-                    request_load(s, b, BLK_CAB, 0);
+                s->cab[b].index = -1;
+                if (s->cab_count > 0) request_load(s, b, BLK_CAB, 0);
             }
             if (t == BLK_FX) fx_block_reset(&s->fx[b]);
             s->fade_in[b] = FADE_IN_SAMPLES;
@@ -950,6 +985,10 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             int q = atoi(val);
             s->amp[b].quality = (q < 0) ? 0 : (q > 2) ? 2 : q;
             nam_block_apply_quality(&s->amp[b]);
+        } else if (strcmp(sub, "ir") == 0) {
+            const int i = atoi(val);
+            if (i >= 0 && i < s->ir_count && i != s->cab[b].index)
+                request_load(s, b, BLK_IR, i);
         } else if (strcmp(sub, "cab") == 0) {
             int i = atoi(val);
             if (i != s->cab[b].index) request_load(s, b, BLK_CAB, i);
@@ -977,8 +1016,21 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
              * does not drag one's settings onto the other. */
             const int idx = sub[1] - '1';
             const float v = clampf(atof(val), 0.0f, 1.0f);
-            if (s->type[b] == BLK_CAB) mic_set(&s->cab[b].mic, idx, v);
-            else                       s->fx[b].p[idx] = v;
+            if (s->type[b] == BLK_CAB) {
+                mic_set(&s->cab[b].mic, idx, v);
+            } else if (s->type[b] == BLK_IR) {
+                if (idx < IR_RV_PARAMS) {
+                    const float was = s->cab[b].rv[idx];
+                    s->cab[b].rv[idx] = v;
+                    /* LENGTH IS A RELOAD, not a parameter the run reads:
+                     * the taps themselves are trimmed and faded at load,
+                     * so changing it has to go back to the file. */
+                    if (idx == IR_RV_LEN && was != v && s->cab[b].index >= 0)
+                        request_load(s, b, BLK_IR, s->cab[b].index);
+                }
+            } else {
+                s->fx[b].p[idx] = v;
+            }
         }
         return;
     }
@@ -1049,13 +1101,17 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         if (strcmp(sub, "on") == 0)      return snprintf(buf, buf_len, "%d", s->on[b] ? 0 : 1);
         if (strcmp(sub, "model") == 0)   return snprintf(buf, buf_len, "%d", s->amp[b].index < 0 ? 0 : s->amp[b].index);
         if (strcmp(sub, "quality") == 0) return snprintf(buf, buf_len, "%d", s->amp[b].quality);
-        if (strcmp(sub, "cab") == 0)     return snprintf(buf, buf_len, "%d", s->cab[b].index < 0 ? 0 : s->cab[b].index);
+        if (strcmp(sub, "cab") == 0 || strcmp(sub, "ir") == 0)
+            return snprintf(buf, buf_len, "%d", s->cab[b].index < 0 ? 0 : s->cab[b].index);
         if (strcmp(sub, "fx") == 0)      return snprintf(buf, buf_len, "%d", s->fx[b].id);
         if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0) {
             const int idx = sub[1] - '1';
             if (s->type[b] == BLK_CAB)
                 return snprintf(buf, buf_len, "%.4f",
                                 idx < MIC_PARAMS ? s->cab[b].mic.p[idx] : 0.0f);
+            if (s->type[b] == BLK_IR)
+                return snprintf(buf, buf_len, "%.4f",
+                                idx < IR_RV_PARAMS ? s->cab[b].rv[idx] : 0.0f);
             return snprintf(buf, buf_len, "%.4f", s->fx[b].p[idx]);
         }
         if (strcmp(sub, "lane") == 0)
@@ -1140,14 +1196,17 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             w += snprintf(buf + w, buf_len - w,
                 "%s{\"type\":%d,\"on\":%d,\"model\":%d,\"quality\":%d,\"cab\":%d,"
                 "\"fx\":%d,\"p\":[%.4f,%.4f,%.4f,%.4f,%.4f],"
-                "\"mic\":[%.4f,%.4f,%.4f,%.4f]}",
+                "\"mic\":[%.4f,%.4f,%.4f,%.4f],"
+                "\"rv\":[%.4f,%.4f,%.4f,%.4f]}",
                 i ? "," : "", s->type[i], s->on[i],
                 s->amp[i].index, s->amp[i].quality, s->cab[i].index,
                 s->fx[i].id,
                 s->fx[i].p[0], s->fx[i].p[1], s->fx[i].p[2],
                 s->fx[i].p[3], s->fx[i].p[4],
                 s->cab[i].mic.p[0], s->cab[i].mic.p[1],
-                s->cab[i].mic.p[2], s->cab[i].mic.p[3]);
+                s->cab[i].mic.p[2], s->cab[i].mic.p[3],
+                s->cab[i].rv[0], s->cab[i].rv[1],
+                s->cab[i].rv[2], s->cab[i].rv[3]);
         }
         w += snprintf(buf + w, buf_len - w, "]}");
         return w;
@@ -1184,6 +1243,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
     if (strcmp(key, "cab_list") == 0)
         return emit_options(buf, buf_len, s->cab_names, s->cab_count);
+    if (strcmp(key, "ir_list") == 0)
+        return emit_options(buf, buf_len, s->ir_names, s->ir_count);
     /* THE KNOB TABLE, SERVED ONCE.
      *
      * The screen has to print "480 ms" and "-6.0 dB" rather than "37", and
@@ -1238,9 +1299,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
 
     if (strcmp(key, "chain_params") == 0) {
-        char models[4096], cabs[4096];
+        char models[4096], cabs[4096], irs[4096];
         emit_options(models, sizeof(models), s->model_names, s->model_count);
         emit_options(cabs, sizeof(cabs), s->cab_names, s->cab_count);
+        emit_options(irs, sizeof(irs), s->ir_names, s->ir_count);
 
         int w = 0;
         w += snprintf(buf + w, buf_len - w,
@@ -1278,8 +1340,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * array is invalid JSON, which is silently rejected and falls back
          * to module.json, which is how `access` and `live` went missing for
          * four builds. */
-        const int per_block = (int)(strlen(models) * 1 + strlen(cabs) * 1 +
-                                    strlen(fxopts) + 1024);
+        const int per_block = (int)(strlen(models) + strlen(cabs) +
+                                    strlen(irs) + strlen(fxopts) + 1024);
         /* BOTH ROWS, AND THE ROW LETTER IS A PARAMETER. Emitting only
          * `b` left every top-row key undeclared, which is not an error
          * anywhere - the write lands, the read answers, and the host's
@@ -1289,7 +1351,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         for (int i = 1; i <= NUM_COLS && w + per_block < buf_len; i++) {
             w += snprintf(buf + w, buf_len - w,
                 ",{\"key\":\"%c%d_type\",\"name\":\"Type\",\"type\":\"enum\","
-                  "\"options\":[\"Off\",\"NAM\",\"Cab\",\"FX\"],\"default\":0}"
+                  "\"options\":[\"Off\",\"NAM\",\"Cab\",\"FX\",\"IR\"],\"default\":0}"
                 ",{\"key\":\"%c%d_on\",\"name\":\"On\",\"type\":\"enum\","
                   "\"options\":[\"On\",\"Bypass\"],\"default\":0}"
                 ",{\"key\":\"%c%d_model\",\"name\":\"Model\",\"type\":\"enum\","
@@ -1298,9 +1360,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                   "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0}"
                 ",{\"key\":\"%c%d_cab\",\"name\":\"Cab\",\"type\":\"enum\","
                   "\"options\":%s,\"default\":0}"
+                ",{\"key\":\"%c%d_ir\",\"name\":\"IR\",\"type\":\"enum\","
+                  "\"options\":%s,\"default\":0}"
                 ",{\"key\":\"%c%d_fx\",\"name\":\"Pedal\",\"type\":\"enum\","
                   "\"options\":%s,\"default\":0}",
-                rl, i, rl, i, rl, i, models, rl, i, rl, i, cabs, rl, i, fxopts);
+                rl, i, rl, i, rl, i, models, rl, i, rl, i, cabs, rl, i, irs,
+                rl, i, fxopts);
             for (int k = 1; k <= FX_PARAMS; k++)
                 w += snprintf(buf + w, buf_len - w,
                     ",{\"key\":\"%c%d_p%d\",\"name\":\"P%d\",\"type\":\"float\","

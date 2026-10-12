@@ -2,7 +2,7 @@
   "id": "nam-a2c",
   "name": "Nam A2c",
   "abbrev": "A2C",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Sixteen blocks in two rows - a main chain and a parallel one, panned and merged where you choose. NAM captures, cab IRs with mic placement, and 50 modelled pedals.",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
@@ -17,7 +17,7 @@
       ".ir"
     ],
     "allowFolders": true,
-    "description": "NAM captures by category (a subfolder of models/ is the category) and cabinet IRs",
+    "description": "NAM captures by category (a subfolder of models/ is the category), cabinet IRs, and reverb IRs",
     "hint": "Find amp models at",
     "hint_url": "https://tone3000.com",
     "hint_url_label": "TONE3000",
@@ -70,6 +70,15 @@
           ".ir"
         ],
         "description": "Mic placement is applied on top of whichever is loaded"
+      },
+      {
+        "path": "irs",
+        "label": "Reverb IRs",
+        "extensions": [
+          ".wav",
+          ".ir"
+        ],
+        "description": "Rooms, halls, plates and springs - offered inside the Time list"
       }
     ]
   },

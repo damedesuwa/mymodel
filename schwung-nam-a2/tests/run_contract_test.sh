@@ -220,11 +220,14 @@ FIXDIR = os.environ["FIXDIR"]
 for root, dirs, files in os.walk(os.path.join(FIXDIR, "models")):
     rel = os.path.relpath(root, FIXDIR)
     made.add(rel.replace(os.sep, "/"))
-missing = (made | {"cabs"}) - declared
+for d2 in ("cabs", "irs"):
+    if os.path.isdir(os.path.join(FIXDIR, d2)):
+        made.add(d2)
+missing = made - declared
 if missing:
     print("FAIL: the module creates %s but module.json declares no folder for it"
           % sorted(missing)); fail = 1
-unmade = declared - (made | {"cabs"})
+unmade = declared - made
 if unmade:
     print("FAIL: module.json declares %s but nothing creates it" % sorted(unmade))
     fail = 1

@@ -619,6 +619,95 @@ int main(int argc, char **argv) {
         }
     }
 
+
+    /* ------------------------------------------------------------------
+     * REVERB IR.
+     *
+     * The same convolution as a cab with the dry kept and a tap count you
+     * choose. Each knob is checked for the thing it claims: a reverb that
+     * merely "sounds different" would pass on any of them.
+     * ------------------------------------------------------------------ */
+    {
+        char list[1024] = {0};
+        api->get_param(in, "ir_list", list, sizeof(list));
+        if (!strstr(list, "(none)")) {
+            for (int b = 1; b <= 8; b++) {
+                char k[16];
+                snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0");
+                snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
+            }
+            api->set_param(in, "merge", "0");
+            api->set_param(in, "pan_a", "0.0");
+            api->set_param(in, "pan_b", "0.0");
+            api->set_param(in, "b1_type", "4");           /* BLK_IR */
+            for (int i = 0; i < 80; i++) { struct timespec t = {0, 20000000L}; nanosleep(&t, NULL); }
+
+            int16_t a[128 * 2];
+            /* THE TAIL IS THE WHOLE POINT, so it is measured as energy
+             * AFTER the input stops - which is the one thing a filter
+             * cannot fake. */
+            auto tail = [&](const char *key, const char *val) {
+                if (key) api->set_param(in, key, val);
+                for (int i = 0; i < 60; i++) { struct timespec t = {0, 10000000L}; nanosleep(&t, NULL); }
+                for (int blk = 0; blk < 40; blk++) {      /* flush */
+                    memset(a, 0, sizeof(a));
+                    api->process_block(in, a, 128);
+                }
+                for (int blk = 0; blk < 8; blk++) {       /* a short burst */
+                    for (int i = 0; i < 128; i++) {
+                        double t = (blk * 128.0 + i) / 44100.0;
+                        a[i * 2] = a[i * 2 + 1] =
+                            (int16_t)(0.4 * sin(2 * M_PI * 440.0 * t) * 20000);
+                    }
+                    api->process_block(in, a, 128);
+                }
+                double e = 0;
+                for (int blk = 0; blk < 60; blk++) {      /* silence after */
+                    memset(a, 0, sizeof(a));
+                    api->process_block(in, a, 128);
+                    for (int i = 0; i < 128; i++) {
+                        double v = a[i * 2] / 32768.0;
+                        e += v * v;
+                    }
+                }
+                return sqrt(e / (60 * 128));
+            };
+
+            const double dry  = tail("b1_p1", "0.0");     /* Mix 0 */
+            const double wet  = tail("b1_p1", "0.6");
+            printf("\nir: tail after the note stops  mix 0 %.6f  mix 60%% %.6f\n",
+                   dry, wet);
+            if (!(dry < 0.0005)) {
+                printf("   <-- Mix 0 is not transparent\n"); fails++;
+            }
+            if (!(wet > dry * 20 && wet > 0.002)) {
+                printf("   <-- there is no tail\n"); fails++;
+            }
+
+            /* LEN IS TAPS, so a longer one rings for longer. */
+            const double t_short = tail("b1_p2", "0.0");   /* 46 ms  */
+            const double t_long  = tail("b1_p2", "1.0");   /* 372 ms */
+            printf("ir: 46ms %.6f -> 372ms %.6f (%.2fx)\n",
+                   t_short, t_long, t_long / (t_short + 1e-12));
+            if (!(t_long > t_short * 1.5)) {
+                printf("   <-- Len does not change how long it rings\n"); fails++;
+            }
+
+            /* LOW CUT TAKES THE BOTTOM OFF THE TAIL AND NOT THE DRY. */
+            api->set_param(in, "b1_p2", "0.5");
+            const double lc_off = tail("b1_p4", "0.0");
+            const double lc_on  = tail("b1_p4", "1.0");    /* 400 Hz */
+            api->set_param(in, "b1_p4", "0.0");
+            printf("ir: locut off %.6f -> 400Hz %.6f (%.2fx)\n",
+                   lc_off, lc_on, lc_on / (lc_off + 1e-12));
+            if (!(lc_on < lc_off * 0.8)) {
+                printf("   <-- the low cut does not reach the tail\n"); fails++;
+            }
+        } else {
+            printf("\nir: no irs/ in the fixture, reverb unchecked\n");
+        }
+    }
+
     api->destroy_instance(in);
     printf("\n%s\n", fails ? "FAILED" : "PASS");
     return fails ? 1 : 0;

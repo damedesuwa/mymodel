@@ -122,6 +122,32 @@
       ]
     },
     {
+      "title": "Reverb IRs",
+      "lines": [
+        "Drop a room/hall/plate/spring",
+        "IR into irs/ and it turns up",
+        "in the TIME list, after the",
+        "modelled reverbs.",
+        "A cab IR is 23ms; a room is",
+        "seconds - so LEN is a knob,",
+        "and it is a CPU knob with a",
+        "time on it:",
+        "  46ms  ~190us",
+        "  93ms  ~380us",
+        " 186ms  ~760us",
+        " 372ms ~1520us of 2370",
+        "Mix 0 is transparent - the dry",
+        "is never touched, Mix only",
+        "raises the wet.",
+        "Pre  gap before the room",
+        "     answers, 0-104ms",
+        "LoCut keeps the tail out of",
+        "     the low end, 20-400Hz",
+        "Upload in the web manager,",
+        "Reverb IRs -> Manage."
+      ]
+    },
+    {
       "title": "Reading the panel",
       "lines": [
         "Top right: CPU. Beside it, the",

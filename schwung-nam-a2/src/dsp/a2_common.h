@@ -60,8 +60,23 @@ extern "C" {
  * The READ length is larger because a cab IR is routinely a 500 ms file
  * (the one that produced the crackle is 24000 frames at 48 kHz) and it has
  * to be resampled from its own rate before any of it can be trimmed. */
-#define MAX_IR_RUN 8192
-#define MAX_IR_READ 65536
+/* A CAB IR IS 23 ms AND A REVERB IR IS SECONDS, and the only thing that
+ * separates them here is how many taps are RUN. Direct convolution costs
+ * ~0.09 us a tap on the device, so the length knob is a CPU knob wearing
+ * a time label and the budget is the honest reason it tops out:
+ *
+ *   2048 taps    46 ms    ~190 us
+ *   4096         93 ms    ~380 us
+ *   8192        186 ms    ~760 us
+ *  16384        372 ms   ~1520 us   (of a 2370 us frame)
+ *
+ * READ is three seconds so a real hall capture is resampled from all of
+ * itself rather than from its first second - what gets dropped is the
+ * tail, which is the part the cap is choosing to drop anyway. */
+#define MAX_IR_RUN 16384
+#define MAX_IR_READ 131072
+#define IR_RV_PARAMS 4
+#define IR_PRE_MAX 4608          /* 104 ms of pre-delay */
 
 
 #define SAMPLE_RATE 44100.0f
@@ -622,7 +637,39 @@ typedef struct {
     int    index;        /* which entry of the shared cab list */
     char   name[MAX_NAME_LEN];
     mic_t  mic;          /* where the mic is, relative to the capture */
+
+    /* REVERB ONLY. The same struct runs both because the difference
+     * between a cabinet and a room is the tap count, not the code - and a
+     * block is one type at a time, so two sets of storage would be two
+     * ways for one block to be two things. */
+    float  rv[IR_RV_PARAMS];
+    float  pre[IR_PRE_MAX];       /* pre-delay, up to 100 ms */
+    int    pre_w;
+    float  hp_x1, hp_y1, hp_a;    /* one-pole low cut */
 } ir_block_t;
+
+enum { IR_RV_MIX = 0, IR_RV_LEN, IR_RV_PRE, IR_RV_LOCUT };
+
+/* The four lengths the Len knob offers, in taps. */
+static const int IR_RV_TAPS[4] = { 2048, 4096, 8192, 16384 };
+
+static void ir_rv_defaults(ir_block_t *b) {
+    b->rv[IR_RV_MIX]   = 0.30f;   /* a pedal's Reverb knob, not a wash   */
+    b->rv[IR_RV_LEN]   = 1.0f / 3.0f;  /* 93 ms - the cheap useful one   */
+    b->rv[IR_RV_PRE]   = 0.0f;
+    b->rv[IR_RV_LOCUT] = 0.0f;    /* off; the knob is 20..400 Hz         */
+    b->pre_w = 0;
+    b->hp_x1 = b->hp_y1 = 0.0f;
+    b->hp_a = 0.0f;
+    memset(b->pre, 0, sizeof(b->pre));
+}
+
+static int ir_rv_taps(const ir_block_t *b) {
+    int i = (int)(b->rv[IR_RV_LEN] * 3.0f + 0.5f);
+    if (i < 0) i = 0;
+    if (i > 3) i = 3;
+    return IR_RV_TAPS[i];
+}
 
 /* Direct time-domain convolution, TAP-OUTER.
  *
@@ -659,6 +706,56 @@ static void ir_block_process(ir_block_t *b, float *audio, int frames) {
     }
 
     for (int i = 0; i < n; i++) audio[i] = acc[i];
+}
+
+/* A REVERB IS THE SAME CONVOLUTION WITH THE DRY KEPT.
+ *
+ * The cab runs in place and is 100% wet, which is what a speaker is. A
+ * room is not: the dry has to survive, so the wet is a COPY and the two
+ * meet at the end. Pre-delay before the convolution (it is a gap before
+ * the room answers, not a delay on the answer), low cut after it (what
+ * you are cutting is the room's own mud, and cutting before would also
+ * thin what feeds it).
+ *
+ * The dry stays at UNITY and Mix only raises the wet, like the one knob
+ * on a reverb pedal - so a block at Mix 0 is transparent rather than
+ * quiet, which is also what makes it safe to drop into a live chain.
+ */
+static void ir_reverb_process(ir_block_t *b, float *audio, float *wet, int n) {
+    if (!b->ir || b->len <= 0 || !b->history) return;
+
+    const int   pre = (int)(b->rv[IR_RV_PRE] * (float)(IR_PRE_MAX - 1));
+    const float mix = b->rv[IR_RV_MIX] * 1.5f;
+
+    if (pre > 0) {
+        for (int i = 0; i < n; i++) {
+            b->pre[b->pre_w] = flush_denormal(audio[i]);
+            int r = b->pre_w - pre;
+            if (r < 0) r += IR_PRE_MAX;
+            wet[i] = b->pre[r];
+            if (++b->pre_w >= IR_PRE_MAX) b->pre_w = 0;
+        }
+    } else {
+        for (int i = 0; i < n; i++) wet[i] = audio[i];
+    }
+
+    ir_block_process(b, wet, n);
+
+    if (b->rv[IR_RV_LOCUT] > 0.001f) {
+        /* 20 Hz is off in all but name; 400 Hz is a reverb that stays out
+         * of the way of a guitar's body. One pole is enough for a tail. */
+        const float hz = 20.0f + b->rv[IR_RV_LOCUT] * 380.0f;
+        b->hp_a = expf(-2.0f * (float)M_PI * hz / SAMPLE_RATE);
+        for (int i = 0; i < n; i++) {
+            const float x = wet[i];
+            const float y = b->hp_a * (b->hp_y1 + x - b->hp_x1);
+            b->hp_x1 = flush_denormal(x);
+            b->hp_y1 = flush_denormal(y);
+            wet[i] = y;
+        }
+    }
+
+    for (int i = 0; i < n; i++) audio[i] += wet[i] * mix;
 }
 
 static void ir_block_free(ir_block_t *b) {

@@ -130,7 +130,7 @@ const CC_JOG_TURN = 14;
 const CC_JOG_CLICK = 3;
 const CC_SHIFT = 49;
 
-const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3;
+const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3, TYPE_IR = 4;
 
 /*
  * ONE KNOB DECIDES WHAT THE BLOCK IS, and it used to take two.
@@ -199,42 +199,48 @@ const CATS = [
     { name: 'Mod',    type: TYPE_FX,  led: [16, 95],      /* azure   */
       items: [23, 46, 24, 25, 26, 45, 27, 28, 29] },
     { name: 'Time',   type: TYPE_FX,  led: [22, 107],     /* purple  */
-      items: [30, 31, 32, 33, 49, 34, 48, 35] },
+      items: [30, 31, 32, 33, 49, 34, 48, 35], ir_items: true },
     { name: 'Pitch',  type: TYPE_FX,  led: [23, 109],     /* pink    */
       items: [36, 37, 38, 39] },
 ];
 
-/* AN ITEM IS A PEDAL *OR* A CAPTURE, and the sign says which.
+/* AN ITEM IS A PEDAL, A CAPTURE *OR* AN IR, and a band of the integer
+ * says which.
  *
- * >= 0 is an FX id; < 0 is `-(model index + 1)`. One tagged integer
- * rather than a pair, because `items` is walked, indexed and compared in
- * a dozen places and every one of them would have had to learn a shape. */
-function namItem(modelIdx) { return -(modelIdx + 1); }
-function itemIsNam(item)   { return item < 0; }
-function itemModel(item)   { return -item - 1; }
+ * One tagged integer rather than a pair, because `items` is walked,
+ * indexed and compared in a dozen places and every one of them would have
+ * had to learn a shape. It was a SIGN for one release and ran out the
+ * moment a third kind arrived; bands cost nothing extra and the FX ids,
+ * which are written down by hand in CATS, keep their own numbers. */
+const ITEM_NAM = 10000, ITEM_IR = 20000;
+function namItem(i)      { return ITEM_NAM + i; }
+function irItem(i)       { return ITEM_IR + i; }
+function itemType(item)  {
+    return item >= ITEM_IR  ? TYPE_IR
+         : item >= ITEM_NAM ? TYPE_NAM : TYPE_FX;
+}
+function itemIndex(item) { return item % ITEM_NAM; }
 
 function itemOfBlock(b) {
     if (st.type[b] === TYPE_NAM) return namItem(st.model[b] | 0);
+    if (st.type[b] === TYPE_IR)  return irItem(st.ir[b] | 0);
     return st.fx[b] | 0;
 }
 
 /* The one place a block's identity is written, so the type and the thing
  * it names can never be set apart from each other. */
+const ITEM_KEY = { [TYPE_NAM]: 'model', [TYPE_IR]: 'ir', [TYPE_FX]: 'fx' };
+const ITEM_CACHE = { [TYPE_NAM]: 'model', [TYPE_IR]: 'ir', [TYPE_FX]: 'fx' };
+
 function setItem(b, item) {
-    if (itemIsNam(item)) {
-        const m = itemModel(item);
-        st.model[b] = m;
-        st.val[keyOf(b, 'model')] = m;
-        setp(keyOf(b, 'model'), m);
-        st.type[b] = TYPE_NAM;
-    } else {
-        st.fx[b] = item;
-        st.val[keyOf(b, 'fx')] = item;
-        setp(keyOf(b, 'fx'), item);
-        st.type[b] = TYPE_FX;
-    }
-    st.val[keyOf(b, 'type')] = st.type[b];
-    setp(keyOf(b, 'type'), st.type[b]);
+    const t = itemType(item);
+    const v = itemIndex(item);
+    st[ITEM_CACHE[t]][b] = v;
+    st.val[keyOf(b, ITEM_KEY[t])] = v;
+    setp(keyOf(b, ITEM_KEY[t]), v);
+    st.type[b] = t;
+    st.val[keyOf(b, 'type')] = t;
+    setp(keyOf(b, 'type'), t);
 }
 
 function catOfBlock(b) {
@@ -247,7 +253,7 @@ function catOfBlock(b) {
     /* A capture in no folder we know, or an id from a newer build: Amp
      * for a capture, the first pedal family for anything else. Never a
      * category whose TYPE disagrees with the block's. */
-    return (t === TYPE_NAM) ? 1 : 3;
+    return (t === TYPE_NAM) ? 1 : (t === TYPE_IR) ? 10 : 3;
 }
 
 /* Rebuilt whenever the model list is read, which is once. A category's
@@ -257,10 +263,16 @@ function catOfBlock(b) {
 function attachNamItems() {
     const cats = st.names.modelCat || [];
     for (const c of CATS) {
-        if (c.nam_cat === undefined) continue;
-        c.items = (c.items || []).filter(i => !itemIsNam(i));
-        for (let m = 0; m < cats.length; m++)
-            if (cats[m] === c.nam_cat) c.items.push(namItem(m));
+        c.items = (c.items || []).filter(i => itemType(i) === TYPE_FX);
+        if (c.nam_cat !== undefined)
+            for (let m = 0; m < cats.length; m++)
+                if (cats[m] === c.nam_cat) c.items.push(namItem(m));
+        /* REVERB CAPTURES land in Time, where the modelled reverbs
+         * already are. Same rule as the pedal captures: after the
+         * built-ins, because those are the same on every device. */
+        if (c.ir_items)
+            for (let i = 0; i < (st.names.ir || []).length; i++)
+                c.items.push(irItem(i));
     }
 }
 
@@ -381,6 +393,21 @@ function knobsFor(type, fxId) {
                         o: 'Off|57|421|Ribbn|Cond' } },
                 { key: 'p4', label: 'Phase', kind: 'spec',
                   kn: { n: 'Phase', u: '', lo: 0, hi: 2, c: 2, o: 'Norm|Inv' } }];
+    if (type === TYPE_IR)
+        /* A ROOM, NOT A SPEAKER: the dry survives, so there is a Mix;
+         * and Len is a CPU knob with a time label - ~0.09 us a tap
+         * against a 2370 us frame, which is why it tops out at 372 ms
+         * rather than at whatever the file holds. */
+        return [CAT_KNOB, { key: 'ir', label: 'IR', kind: 'fxid' },
+                { key: 'p1', label: 'Mix', kind: 'spec',
+                  kn: { n: 'Mix', u: '%', lo: 0, hi: 100, c: 0 } },
+                { key: 'p2', label: 'Len', kind: 'spec',
+                  kn: { n: 'Len', u: '', lo: 0, hi: 4, c: 2,
+                        o: '46ms|93ms|186ms|372ms' } },
+                { key: 'p3', label: 'Pre', kind: 'spec',
+                  kn: { n: 'Pre', u: 'ms', lo: 0, hi: 104, c: 0 } },
+                { key: 'p4', label: 'LoCut', kind: 'spec',
+                  kn: { n: 'LoCut', u: 'Hz', lo: 20, hi: 400, c: 0 } }];
     if (type === TYPE_FX) {
         const out = [CAT_KNOB, { key: 'fx', label: 'Pedal', kind: 'fxid' }];
         const spec = st.specs[fxId];
@@ -533,11 +560,12 @@ const st = {
     on: new Array(NUM_BLOCKS).fill(1),
     fx: new Array(NUM_BLOCKS).fill(0),
     model: new Array(NUM_BLOCKS).fill(0),
+    ir: new Array(NUM_BLOCKS).fill(0),
     cpu: 0,
     peak: 0,                    /* out level, %% of full scale - see drawMeter */
     blockCpu: new Array(NUM_BLOCKS).fill(0),
     val: {},                    /* "b3_drive" -> number */
-    names: { model: [], cab: [], fx: [], modelCat: [] },
+    names: { model: [], cab: [], ir: [], fx: [], modelCat: [] },
     specs: [],                  /* fx_specs, read once - see specKnob */
     build: '?',
     rot: 0,
@@ -553,7 +581,7 @@ function loadLists() {
             if (Array.isArray(a)) st.names.modelCat = a;
         }
     } catch (e) { }
-    for (const k of ['model', 'cab', 'fx']) {
+    for (const k of ['model', 'cab', 'ir', 'fx']) {
         try {
             const j = getp(k + '_list');
             if (j) st.names[k] = JSON.parse(j);
@@ -573,12 +601,15 @@ function loadLists() {
 /* What a tagged item is called: a capture by its file name, a pedal by
  * the served table's. */
 function itemName(item) {
-    if (itemIsNam(item)) return listNameFor('model', itemModel(item));
+    const t = itemType(item);
+    if (t === TYPE_NAM) return listNameFor('model', itemIndex(item));
+    if (t === TYPE_IR)  return listNameFor('ir', itemIndex(item));
     return st.names.fx[item] || String(item);
 }
 
 function listNameFor(key, idx) {
-    const arr = (key === 'model') ? st.names.model : st.names.cab;
+    const arr = (key === 'model') ? st.names.model
+              : (key === 'ir')    ? st.names.ir : st.names.cab;
     if (!arr || !arr.length) return String(idx + 1);
     const n = arr[idx];
     return (typeof n === 'string' && n.length) ? n : String(idx + 1);
@@ -629,6 +660,7 @@ function rotateRead() {
          * three on the even one - a fourth read there is 11 ms of IPC in
          * a single tick. */
         st.model[b] = num(getp(keyOf(b, 'model')), st.model[b]);
+        st.ir[b] = num(getp(keyOf(b, 'ir')), st.ir[b]);
     }
 }
 
@@ -937,6 +969,7 @@ function blockLabel(b) {
     if (t === TYPE_FX)  return st.names.fx[st.fx[b]] || 'FX';
     if (t === TYPE_NAM) return 'NAM';
     if (t === TYPE_CAB) return 'CAB';
+    if (t === TYPE_IR)  return 'IR';
     return '';
 }
 
@@ -1188,7 +1221,8 @@ function drawFooter(list) {
      * same list - the footer's whole job is saying where in that list you
      * are, and a capture that fell through to the generic branch would
      * lose the one place its full name fits. */
-    if (st.type[sel] === TYPE_FX || st.type[sel] === TYPE_NAM) {
+    if (st.type[sel] === TYPE_FX || st.type[sel] === TYPE_NAM ||
+        st.type[sel] === TYPE_IR) {
         const it = itemOfBlock(sel);
         const c = catOfBlock(sel);
         const items = CATS[c].items || [it];
@@ -1533,6 +1567,7 @@ globalThis.chain_ui = {
             st.on[b] = num(getp(keyOf(b, 'on')), 0) === 0 ? 1 : 0;
             st.fx[b] = num(getp(keyOf(b, 'fx')), 0);
             st.model[b] = num(getp(keyOf(b, 'model')), 0);
+            st.ir[b] = num(getp(keyOf(b, 'ir')), 0);
         }
         st.cpu = num(getp('cpu'), 0);
         for (const key of ['in_level', 'out_level', 'merge', 'pan_a', 'pan_b']) {

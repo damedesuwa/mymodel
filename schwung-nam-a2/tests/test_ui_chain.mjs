@@ -29,6 +29,7 @@ const params = {
     model_list: JSON.stringify(['Recto', 'Plexi', 'My RAT', 'My Muff']),
     model_cats: JSON.stringify([0, 0, 2, 3]),        /* amp amp dist fuzz */
     cab_list: JSON.stringify(['TF MESA']),
+    ir_list: JSON.stringify(['Big Hall', 'Plate A']),
     /* THE PEDAL TABLE COMES FROM THE PLUGIN, not from a copy written out
      * here. tests/run_contract_test.sh compiles the real plugin and writes
      * what it serves into the fixture; this reads it. A hand-written table
@@ -335,7 +336,10 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
      * while it is fresh, which is the whole point of it. */
     advance(2000);
     drawn.length = 0; repaint();
-    ok(drawn.some(t => String(t) === 'Digital Dly  Time 1/8'),
+    /* The count is not pinned: a category grows by however many captures
+     * are on the card, and a test that spelled it out would fail on a
+     * device with files rather than on a bug. */
+    ok(drawn.some(t => /^Digital Dly {2}Time 1\/\d+$/.test(String(t))),
        'footer: names the pedal, its family and its place in it');
 
     /* EVERY CATEGORY HAS ITS OWN PAD COLOUR, and the two brightnesses are
@@ -505,6 +509,37 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ok(drawnAt.some(d => d[2] === 'Recto'), 'nam: named by its file');
     ok(!drawnAt.some(d => d[2] === 'Model'),
        'nam: and the separate Model picker is gone - one knob does both');
+
+    /* A REVERB IR IS A BLOCK TYPE, and it lands in Time where the
+     * modelled reverbs already are. The difference from a cab is the tap
+     * count and that the dry survives. */
+    board({ b1: 0 });
+    ui.init();
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    turn(K1, +1, CAT.TIME);
+    writes.length = 0;
+    turn(K2, +1, 20);                       /* past the delays and verbs */
+    ok(writes.some(([k, v]) => k === 'b1_type' && v === '4'),
+       'ir: walking off the end of Time reaches an IR');
+    ok(writes.some(([k, v]) => k === 'b1_ir' && v === '0'),
+       'ir: and picks it out of irs/, by index');
+    drawnAt.length = 0; repaint();
+    for (const want of ['Mix', 'Len'])
+        ok(drawnAt.some(d => d[2] === want), 'ir: the reverb page names ' + want);
+    ui.onMidiMessageInternal([0xb0, K5, 1]);
+    ui.onMidiMessageInternal([0xb0, K6, 1]);
+    drawnAt.length = 0; repaint();
+    for (const want of ['Pre', 'LoCut'])
+        ok(drawnAt.some(d => d[2] === want), 'ir: the reverb page names ' + want);
+    /* LENGTH IS A CPU KNOB WITH A TIME LABEL, so it says the time. */
+    ok(drawnAt.some(d => /^(46|93|186|372)ms$/.test(d[2])) ||
+       drawnAt.some(d => /ms$/.test(d[2])),
+       'ir: and Len reads as a time, not an index');
+    /* It must NOT wear the cab's mic knobs - a room has no mic to move. */
+    ok(!drawnAt.some(d => d[2] === 'Phase'),
+       'ir: a room is not a cabinet, so no mic controls');
 
     /* A CAB BLOCK CARRIES THE MIC, on the five encoders a cab never used.
      * The wire already has p1..p5 per slot, so this needed no new keys -
