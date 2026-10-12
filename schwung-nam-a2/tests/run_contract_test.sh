@@ -194,6 +194,20 @@ if mods == ['(none)'] or cabs == ['(none)']:
 else:
     print("ok   pickers: %d model(s), %d cab(s)" % (len(mods), len(cabs)))
 
+# A fresh cab sits where the capture put it, with no mic character added.
+rb = {}
+for line in open("/tmp/a2c_contract.txt"):
+    if line.startswith("b4_p"):
+        k, _, v = line.partition(" ")
+        rb[k.strip()] = v.strip()
+want = {"b4_p1": 0.0, "b4_p2": 0.5, "b4_p3": 0.0, "b4_p4": 0.0}
+for k, v in want.items():
+    got = rb.get(k)
+    if got is None or abs(float(got) - v) > 1e-4:
+        print("FAIL %s: a fresh cab must read %.1f, got %s" % (k, v, got)); fail = 1
+if not fail:
+    print("ok   a fresh cab's mic is at the capture, character off")
+
 print("FAILED" if fail else "PASS")
 sys.exit(1 if fail else 0)
 PY

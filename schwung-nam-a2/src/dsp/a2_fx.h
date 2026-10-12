@@ -334,54 +334,9 @@ static inline float fx_coeff(float hz) {
 
 static inline float fx_db2lin(float db) { return powf(10.0f, db / 20.0f); }
 
-/* A peaking bell, one biquad, used for every mid hump and every EQ band.
- * Coefficients are recomputed once per BLOCK, never per sample. */
-typedef struct { float b0, b1, b2, a1, a2; } fx_bq_t;
-typedef struct { float x1, x2, y1, y2; } fx_bqs_t;
-
-static void fx_bq_peak(fx_bq_t *c, float hz, float q, float db) {
-    float A = powf(10.0f, db / 40.0f);
-    float w = 2.0f * (float)M_PI * hz / SAMPLE_RATE;
-    float sn = sinf(w), cs = cosf(w);
-    float alpha = sn / (2.0f * q);
-    float a0 = 1.0f + alpha / A;
-    c->b0 = (1.0f + alpha * A) / a0;
-    c->b1 = (-2.0f * cs) / a0;
-    c->b2 = (1.0f - alpha * A) / a0;
-    c->a1 = (-2.0f * cs) / a0;
-    c->a2 = (1.0f - alpha / A) / a0;
-}
-
-static void fx_bq_shelf(fx_bq_t *c, float hz, float db, int high) {
-    float A = powf(10.0f, db / 40.0f);
-    float w = 2.0f * (float)M_PI * hz / SAMPLE_RATE;
-    float sn = sinf(w), cs = cosf(w);
-    float alpha = sn / 2.0f * sqrtf((A + 1.0f / A) * (1.0f / 0.9f - 1.0f) + 2.0f);
-    float ta = 2.0f * sqrtf(A) * alpha;
-    float a0;
-    if (high) {
-        a0 = (A + 1.0f) - (A - 1.0f) * cs + ta;
-        c->b0 = A * ((A + 1.0f) + (A - 1.0f) * cs + ta) / a0;
-        c->b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cs) / a0;
-        c->b2 = A * ((A + 1.0f) + (A - 1.0f) * cs - ta) / a0;
-        c->a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cs) / a0;
-        c->a2 = ((A + 1.0f) - (A - 1.0f) * cs - ta) / a0;
-    } else {
-        a0 = (A + 1.0f) + (A - 1.0f) * cs + ta;
-        c->b0 = A * ((A + 1.0f) - (A - 1.0f) * cs + ta) / a0;
-        c->b1 = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cs) / a0;
-        c->b2 = A * ((A + 1.0f) - (A - 1.0f) * cs - ta) / a0;
-        c->a1 = -2.0f * ((A - 1.0f) + (A + 1.0f) * cs) / a0;
-        c->a2 = ((A + 1.0f) + (A - 1.0f) * cs - ta) / a0;
-    }
-}
-
-static inline float fx_bq_run(const fx_bq_t *c, fx_bqs_t *s, float x) {
-    float y = c->b0 * x + c->b1 * s->x1 + c->b2 * s->x2 - c->a1 * s->y1 - c->a2 * s->y2;
-    s->x2 = s->x1; s->x1 = flush_denormal(x);
-    s->y2 = s->y1; s->y1 = flush_denormal(y);
-    return y;
-}
+/* The biquads this file used to own live in a2_common.h now: the cab's mic
+ * emulation needs the same three functions and sits in that header, which
+ * this one includes rather than the other way round. */
 
 /* ------------------------------------------------------------------ state */
 

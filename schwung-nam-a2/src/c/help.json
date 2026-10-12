@@ -71,6 +71,32 @@
       ]
     },
     {
+      "title": "Mic placement (Cab)",
+      "lines": [
+        "An IR is ONE mic in ONE place.",
+        "These add the DIFFERENCE from",
+        "there, which is what moving a",
+        "real mic does.",
+        "3 Pos   dust cap -> cone edge.",
+        "        Loses the top, gains a",
+        "        little body.",
+        "4 Dist  SIGNED cm from where",
+        "        the IR was captured.",
+        "        - = closer: bass rise",
+        "        + = further: air loss,",
+        "            and REAL time of",
+        "            flight (1ms/34cm)",
+        "5 Mic   Off / 57 / 421 /",
+        "        Ribbon / Cond - a",
+        "        character on top",
+        "6 Phase Norm / Inv",
+        "Two cabs in the two lanes with",
+        "different Dist comb exactly as",
+        "two mics in a room do. That is",
+        "what Dist is really for."
+      ]
+    },
+    {
       "title": "Reading the panel",
       "lines": [
         "Top right: CPU. Beside it, the",

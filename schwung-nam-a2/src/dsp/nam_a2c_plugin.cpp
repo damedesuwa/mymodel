@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "v1"
+#define NAM_A2C_BUILD_ID "mic"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -380,6 +380,10 @@ static void *worker_thread(void *arg) {
         } else if (r.kind == BLK_CAB) {
             ir_block_t *b = &s->cab[r.block];
             b->run_cap = IR_RUN_TAPS;
+            /* The placement filters keep their SETTING across a cab swap -
+             * "the mic is where I put it" - but not their STATE, or the
+             * old cabinet's tails ring on through the new one. */
+            mic_reset_state(&b->mic);
             int n = ir_block_load(b, r.path);
             if (n > 0)
                 snprintf(msg, sizeof(msg),
@@ -570,6 +574,8 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
         new (&s->amp[i].loading) std::atomic<bool>(false);
         s->cab[i].index = -1;
         s->cab[i].run_cap = IR_RUN_TAPS;
+        mic_defaults(&s->cab[i].mic);
+        mic_update(&s->cab[i].mic);
         s->fx[i].id = FX_TS808;
         for (int k = 0; k < FX_PARAMS; k++) s->fx[i].p[k] = 0.5f;
     }
@@ -659,6 +665,7 @@ static void run_block(a2c_t *s, int b, float *buf, int n, float bpm) {
             break;
         case BLK_CAB:
             ir_block_process(&s->cab[b], buf, n);
+            mic_process(&s->cab[b].mic, buf, n);
             break;
         case BLK_FX:
             if (s->fx[b].line && s->fx[b].rv) {
@@ -869,8 +876,18 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
              * than a silence you then have to diagnose. */
             if (t == BLK_NAM && s->amp[b].index < 0 && s->model_count > 0)
                 request_load(s, b, BLK_NAM, 0);
-            if (t == BLK_CAB && s->cab[b].index < 0 && s->cab_count > 0)
-                request_load(s, b, BLK_CAB, 0);
+            if (t == BLK_CAB) {
+                /* AS CAPTURED is the only honest zero for a mic move, and
+                 * it is the CENTRE of the distance knob rather than its
+                 * bottom - you can walk either way from where the IR was
+                 * taken. Reset here, so a slot that was something else
+                 * does not inherit a position. */
+                mic_defaults(&s->cab[b].mic);
+                mic_update(&s->cab[b].mic);
+                mic_reset_state(&s->cab[b].mic);
+                if (s->cab[b].index < 0 && s->cab_count > 0)
+                    request_load(s, b, BLK_CAB, 0);
+            }
             if (t == BLK_FX) fx_block_reset(&s->fx[b]);
             s->fade_in[b] = FADE_IN_SAMPLES;
         } else if (strcmp(sub, "on") == 0) {
@@ -904,7 +921,16 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
              * types carry the shape and this carried nothing else. */
             (void)val;
         } else if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0) {
-            s->fx[b].p[sub[1] - '1'] = clampf(atof(val), 0.0f, 1.0f);
+            /* THE SAME FIVE KEYS SERVE WHATEVER THE BLOCK IS. A cab has
+             * four of its own (mic placement) and the wire already
+             * carries five per slot, so they route by TYPE rather than
+             * growing a second set of names nothing else would use. Two
+             * separate stores, so switching a block between Cab and FX
+             * does not drag one's settings onto the other. */
+            const int idx = sub[1] - '1';
+            const float v = clampf(atof(val), 0.0f, 1.0f);
+            if (s->type[b] == BLK_CAB) mic_set(&s->cab[b].mic, idx, v);
+            else                       s->fx[b].p[idx] = v;
         }
         return;
     }
@@ -977,8 +1003,13 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         if (strcmp(sub, "quality") == 0) return snprintf(buf, buf_len, "%d", s->amp[b].quality);
         if (strcmp(sub, "cab") == 0)     return snprintf(buf, buf_len, "%d", s->cab[b].index < 0 ? 0 : s->cab[b].index);
         if (strcmp(sub, "fx") == 0)      return snprintf(buf, buf_len, "%d", s->fx[b].id);
-        if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0)
-            return snprintf(buf, buf_len, "%.4f", s->fx[b].p[sub[1] - '1']);
+        if (sub[0] == 'p' && sub[1] >= '1' && sub[1] <= '5' && sub[2] == 0) {
+            const int idx = sub[1] - '1';
+            if (s->type[b] == BLK_CAB)
+                return snprintf(buf, buf_len, "%.4f",
+                                idx < MIC_PARAMS ? s->cab[b].mic.p[idx] : 0.0f);
+            return snprintf(buf, buf_len, "%.4f", s->fx[b].p[idx]);
+        }
         if (strcmp(sub, "lane") == 0)
             return snprintf(buf, buf_len, "%d", (b < NUM_COLS) ? 0 : 1);
         if (strcmp(sub, "cpu") == 0) {
@@ -1060,12 +1091,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         for (int i = 0; i < NUM_BLOCKS && w < buf_len - 256; i++) {
             w += snprintf(buf + w, buf_len - w,
                 "%s{\"type\":%d,\"on\":%d,\"model\":%d,\"quality\":%d,\"cab\":%d,"
-                "\"fx\":%d,\"p\":[%.4f,%.4f,%.4f,%.4f,%.4f]}",
+                "\"fx\":%d,\"p\":[%.4f,%.4f,%.4f,%.4f,%.4f],"
+                "\"mic\":[%.4f,%.4f,%.4f,%.4f]}",
                 i ? "," : "", s->type[i], s->on[i],
                 s->amp[i].index, s->amp[i].quality, s->cab[i].index,
                 s->fx[i].id,
                 s->fx[i].p[0], s->fx[i].p[1], s->fx[i].p[2],
-                s->fx[i].p[3], s->fx[i].p[4]);
+                s->fx[i].p[3], s->fx[i].p[4],
+                s->cab[i].mic.p[0], s->cab[i].mic.p[1],
+                s->cab[i].mic.p[2], s->cab[i].mic.p[3]);
         }
         w += snprintf(buf + w, buf_len - w, "]}");
         return w;

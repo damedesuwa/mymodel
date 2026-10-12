@@ -467,6 +467,158 @@ int main(int argc, char **argv) {
         }
     }
 
+
+    /* ------------------------------------------------------------------
+     * MIC PLACEMENT ON THE CAB.
+     *
+     * An IR is one mic in one place. What this adds is the DIFFERENCE
+     * between there and where you want it, so each control is checked for
+     * the thing it claims rather than for "the sound changed".
+     * ------------------------------------------------------------------ */
+    {
+        for (int b = 1; b <= 8; b++) {
+            char k[16];
+            snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0");
+            snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
+        }
+        api->set_param(in, "merge", "0");
+        api->set_param(in, "pan_a", "0.0");
+        api->set_param(in, "pan_b", "0.0");
+        api->set_param(in, "b1_type", "2");            /* BLK_CAB */
+        for (int i = 0; i < 60; i++) { struct timespec t = {0, 20000000L}; nanosleep(&t, NULL); }
+
+        char nm[256] = {0};
+        api->get_param(in, "b1_cab", nm, sizeof(nm));
+        int16_t a[128 * 2];
+
+        /* An IMPULSE, so the delay is a position in the file and not an
+         * inference from a correlation. */
+        auto peak_at = [&](const char *p2) {
+            api->set_param(in, "b1_p2", p2);
+            for (int blk = 0; blk < 20; blk++) {        /* settle */
+                memset(a, 0, sizeof(a));
+                api->process_block(in, a, 128);
+            }
+            int best = -1; double bv = 0;
+            for (int blk = 0; blk < 4; blk++) {
+                memset(a, 0, sizeof(a));
+                if (blk == 0) { a[0] = a[1] = 20000; }
+                api->process_block(in, a, 128);
+                for (int i = 0; i < 128; i++) {
+                    double v = fabs(a[i * 2] / 32768.0);
+                    if (v > bv) { bv = v; best = blk * 128 + i; }
+                }
+            }
+            return best;
+        };
+        /* RMS AT ONE FREQUENCY, which is what a shelf is specified in.
+         *
+         * The first version of this measured "brightness" as the mean
+         * absolute first difference of a sawtooth, and read a -12 dB
+         * shelf at 3 kHz as a 4% change - because the cab itself has
+         * almost no energy up there and the metric was dominated by the
+         * fundamental. A sine at the frequency under test cannot be
+         * fooled that way, and the number it gives is the shelf. */
+        auto rms_at = [&](double hz, const char *key, const char *val) {
+            api->set_param(in, key, val);
+            double e = 0;
+            for (int blk = 0; blk < 200; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    double t = (blk * 128.0 + i) / 44100.0;
+                    a[i * 2] = a[i * 2 + 1] =
+                        (int16_t)(0.45 * sin(2 * M_PI * hz * t) * 20000);
+                }
+                api->process_block(in, a, 128);
+                if (blk < 80) continue;
+                for (int i = 0; i < 128; i++) {
+                    double v = a[i * 2] / 32768.0;
+                    e += v * v;
+                }
+            }
+            return sqrt(e / (120 * 128));
+        };
+
+        const int p_near = peak_at("0.5");              /* as captured */
+        const int p_far  = peak_at("1.0");              /* +40 cm      */
+        api->set_param(in, "b1_p2", "0.5");
+        printf("\nmic: impulse peak  as-captured %d  +40cm %d  (expect +%d)\n",
+               p_near, p_far, (int)(40.0 / 34300.0 * 44100.0));
+        if (p_far - p_near < 45 || p_far - p_near > 57) {
+            printf("   <-- time of flight is not 40 cm\n"); fails++;
+        }
+
+        /* -12 dB of shelf at the cone edge: under half the amplitude,
+         * and the low end must NOT follow it down. */
+        const double hi_cap  = rms_at(4500, "b1_p1", "0.0");
+        const double hi_edge = rms_at(4500, "b1_p1", "1.0");
+        const double lo_cap  = rms_at(200,  "b1_p1", "0.0");
+        const double lo_edge = rms_at(200,  "b1_p1", "1.0");
+        api->set_param(in, "b1_p1", "0.0");
+        printf("mic: pos 4.5k  cap %.5f -> edge %.5f (%.2fx)   200Hz %.2fx\n",
+               hi_cap, hi_edge, hi_edge / (hi_cap + 1e-12),
+               lo_edge / (lo_cap + 1e-12));
+        if (!(hi_edge < hi_cap * 0.45)) {
+            printf("   <-- walking out to the edge did not lose the top\n"); fails++;
+        }
+        if (!(lo_edge > lo_cap * 0.95)) {
+            printf("   <-- it took the low end with it, which is not a move\n"); fails++;
+        }
+
+        /* Proximity is a LOW-end effect, and the knob is centred on the
+         * capture so going BELOW centre is what raises it. */
+        const double pr_mid   = rms_at(90, "b1_p2", "0.5");
+        const double pr_close = rms_at(90, "b1_p2", "0.0");   /* -40 cm */
+        api->set_param(in, "b1_p2", "0.5");
+        printf("mic: prox 90Hz as-captured %.5f -> close %.5f (%.2fx)\n",
+               pr_mid, pr_close, pr_close / (pr_mid + 1e-12));
+        if (!(pr_close > pr_mid * 1.8)) {
+            printf("   <-- closing in did not raise the bass\n"); fails++;
+        }
+
+        const double c_rib = rms_at(7000, "b1_p3", "0.75");   /* Ribbon    */
+        const double c_con = rms_at(7000, "b1_p3", "1.0");    /* Condenser */
+        api->set_param(in, "b1_p3", "0.0");
+        printf("mic: char 7k   ribbon %.5f  condenser %.5f (%.2fx)\n",
+               c_rib, c_con, c_con / (c_rib + 1e-12));
+        if (!(c_rib < c_con * 0.6)) {
+            printf("   <-- a ribbon is not darker than a condenser\n"); fails++;
+        }
+
+        /* PHASE IS THE WHOLE CHAIN'S PROOF. If it is a sample-exact
+         * negation then nothing else moved between the two runs - which
+         * is also what says the DEFAULTS are a no-op rather than a filter
+         * that happens to be mild. */
+        api->set_param(in, "b1_p1", "0.0");
+        api->set_param(in, "b1_p2", "0.5");
+        api->set_param(in, "b1_p3", "0.0");
+        auto capture = [&](const char *ph, int16_t *out) {
+            api->set_param(in, "b1_p4", ph);
+            for (int blk = 0; blk < 120; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    double t = (blk * 128.0 + i) / 44100.0;
+                    a[i * 2] = a[i * 2 + 1] =
+                        (int16_t)(0.30 * sin(2 * M_PI * 220.0 * t) * 20000);
+                }
+                api->process_block(in, a, 128);
+            }
+            memcpy(out, a, sizeof(int16_t) * 256);
+        };
+        int16_t norm[256], inv[256];
+        capture("0.0", norm);
+        capture("1.0", inv);
+        api->set_param(in, "b1_p4", "0.0");
+        int bad = 0, live = 0;
+        for (int i = 0; i < 256; i++) {
+            if (abs(norm[i]) > 200) live++;
+            if (abs(norm[i] + inv[i]) > 2) bad++;
+        }
+        printf("mic: phase         %d live samples, %d not a clean negation\n",
+               live, bad);
+        if (live < 100 || bad > 0) {
+            printf("   <-- Inv is not the exact negation of Norm\n"); fails++;
+        }
+    }
+
     api->destroy_instance(in);
     printf("\n%s\n", fails ? "FAILED" : "PASS");
     return fails ? 1 : 0;

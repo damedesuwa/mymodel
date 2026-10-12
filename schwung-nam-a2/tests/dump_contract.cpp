@@ -43,8 +43,16 @@ int main(int argc, char **argv) {
     api->set_param(inst, "b3_type", "3");
     api->set_param(inst, "b3_drive", "0.75");
     api->set_param(inst, "b3_on", "1");
+    /* A CAB'S FIVE ENCODERS ARE THE MIC, and its defaults are not the
+     * knobs' midpoints: Dist is centred on the capture (0.5) because that
+     * is the only zero an IR has, while Mic sits at Off (0.0) because a
+     * capture already contains one. Those two differ, so a store that
+     * seeded everything the same way would look right on one and wrong on
+     * the other. */
+    api->set_param(inst, "b4_type", "2");
     const char *rb[] = { "b3_type", "b3_drive", "b3_on", "b1_type", "cpu",
-                         "name", "is_loading", "sel_block" };
+                         "name", "is_loading", "sel_block",
+                         "b4_p1", "b4_p2", "b4_p3", "b4_p4" };
     printf("===readback===\n");
     for (unsigned i = 0; i < sizeof(rb) / sizeof(rb[0]); i++) {
         int n = api->get_param(inst, rb[i], buf, sizeof(buf));

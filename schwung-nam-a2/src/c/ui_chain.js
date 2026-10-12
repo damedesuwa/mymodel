@@ -265,6 +265,7 @@ function specText(kn, p) {
     if (u === 'dB')   return (v >= 0 ? '+' : '') + v.toFixed(1);
     if (u === '%')    return Math.round(v) + '%';
     if (u === 'cent') return Math.round(v) + 'c';
+    if (u === 'cm')   return (v > 0 ? '+' : '') + Math.round(v) + 'cm';
     if (u === 'Hz')   return (v >= 1000) ? (v / 1000).toFixed(1) + 'k' : Math.round(v) + 'Hz';
     if (u === 'ms') {
         /* THE UNIT RIDES ON THE VALUE, NOT THE LABEL. It was on the label
@@ -294,7 +295,22 @@ function knobsFor(type, fxId) {
                 { key: 'quality', label: 'Qual', kind: 'enum', n: 3,
                   names: ['Full', 'Slim', 'Lite'] }];
     if (type === TYPE_CAB)
-        return [CAT_KNOB, { key: 'cab', label: 'Cab', kind: 'list' }];
+        /* WHERE THE MIC IS, relative to wherever the IR was captured -
+         * which is the only zero a capture can offer, so Dist is centred
+         * rather than bottomed. Declared as `kn` specs so they get the
+         * served table's formatting, bars and stepping without a second
+         * set of rules: a cab knob reads +12cm or Ribbn for the same
+         * reason a Delay reads 480ms. */
+        return [CAT_KNOB, { key: 'cab', label: 'Cab', kind: 'list' },
+                { key: 'p1', label: 'Pos', kind: 'spec',
+                  kn: { n: 'Pos', u: '%', lo: 0, hi: 100, c: 0 } },
+                { key: 'p2', label: 'Dist', kind: 'spec',
+                  kn: { n: 'Dist', u: 'cm', lo: -40, hi: 40, c: 0 } },
+                { key: 'p3', label: 'Mic', kind: 'spec',
+                  kn: { n: 'Mic', u: '', lo: 0, hi: 5, c: 2,
+                        o: 'Off|57|421|Ribbn|Cond' } },
+                { key: 'p4', label: 'Phase', kind: 'spec',
+                  kn: { n: 'Phase', u: '', lo: 0, hi: 2, c: 2, o: 'Norm|Inv' } }];
     if (type === TYPE_FX) {
         const out = [CAT_KNOB, { key: 'fx', label: 'Pedal', kind: 'fxid' }];
         const spec = st.specs[fxId];

@@ -346,9 +346,269 @@ static int nam_find_name(char names[][MAX_NAME_LEN], int count, const char *targ
 }
 
 /* --- set_param --- */
+/* A peaking bell, one biquad, used for every mid hump and every EQ band.
+ * Coefficients are recomputed once per BLOCK, never per sample. */
+typedef struct { float b0, b1, b2, a1, a2; } fx_bq_t;
+typedef struct { float x1, x2, y1, y2; } fx_bqs_t;
+
+static void fx_bq_peak(fx_bq_t *c, float hz, float q, float db) {
+    float A = powf(10.0f, db / 40.0f);
+    float w = 2.0f * (float)M_PI * hz / SAMPLE_RATE;
+    float sn = sinf(w), cs = cosf(w);
+    float alpha = sn / (2.0f * q);
+    float a0 = 1.0f + alpha / A;
+    c->b0 = (1.0f + alpha * A) / a0;
+    c->b1 = (-2.0f * cs) / a0;
+    c->b2 = (1.0f - alpha * A) / a0;
+    c->a1 = (-2.0f * cs) / a0;
+    c->a2 = (1.0f - alpha / A) / a0;
+}
+
+static void fx_bq_shelf(fx_bq_t *c, float hz, float db, int high) {
+    float A = powf(10.0f, db / 40.0f);
+    float w = 2.0f * (float)M_PI * hz / SAMPLE_RATE;
+    float sn = sinf(w), cs = cosf(w);
+    float alpha = sn / 2.0f * sqrtf((A + 1.0f / A) * (1.0f / 0.9f - 1.0f) + 2.0f);
+    float ta = 2.0f * sqrtf(A) * alpha;
+    float a0;
+    if (high) {
+        a0 = (A + 1.0f) - (A - 1.0f) * cs + ta;
+        c->b0 = A * ((A + 1.0f) + (A - 1.0f) * cs + ta) / a0;
+        c->b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cs) / a0;
+        c->b2 = A * ((A + 1.0f) + (A - 1.0f) * cs - ta) / a0;
+        c->a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cs) / a0;
+        c->a2 = ((A + 1.0f) - (A - 1.0f) * cs - ta) / a0;
+    } else {
+        a0 = (A + 1.0f) + (A - 1.0f) * cs + ta;
+        c->b0 = A * ((A + 1.0f) - (A - 1.0f) * cs + ta) / a0;
+        c->b1 = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cs) / a0;
+        c->b2 = A * ((A + 1.0f) - (A - 1.0f) * cs - ta) / a0;
+        c->a1 = -2.0f * ((A - 1.0f) + (A + 1.0f) * cs) / a0;
+        c->a2 = ((A + 1.0f) + (A - 1.0f) * cs - ta) / a0;
+    }
+}
+
+static inline float fx_bq_run(const fx_bq_t *c, fx_bqs_t *s, float x) {
+    float y = c->b0 * x + c->b1 * s->x1 + c->b2 * s->x2 - c->a1 * s->y1 - c->a2 * s->y2;
+    s->x2 = s->x1; s->x1 = flush_denormal(x);
+    s->y2 = s->y1; s->y1 = flush_denormal(y);
+    return y;
+}
+
 /* ======================================================================== */
 /* IR BLOCK - a cabinet, as a thing rather than as part of one amp.          */
 /* ======================================================================== */
+
+/* ======================================================================== */
+/* MIC PLACEMENT, APPLIED AFTER THE IR RATHER THAN BAKED INTO IT            */
+/* ======================================================================== */
+/*
+ * AN IR IS ONE MIC IN ONE PLACE, and that is its whole limitation: the
+ * capture already contains a position and nothing downstream can get it
+ * back out. What CAN be done is add the DIFFERENCE between where the mic
+ * was and where you want it, which is what a real move does to the signal
+ * and is four cheap filters plus a delay.
+ *
+ * Done as a post-filter, not by re-filtering the taps. Same sound either
+ * way - convolution is linear, so filtering the IR and filtering its
+ * output are the same operation - but a knob turn would mean rebuilding
+ * 1024 taps on a thread that must not block, while a biquad coefficient
+ * is three transcendentals and takes effect on the next sample. The whole
+ * chain costs ~5 us against the convolution's ~90.
+ *
+ * What each control is modelling, and why it is that shape:
+ *
+ *  POS   cap -> cone edge. On a 12" speaker the dust cap beams the top
+ *        end; walking the mic out to the surround loses it progressively
+ *        and the low mids come up as the cone's own break-up is less
+ *        direct. A high shelf and a small bell, moving together.
+ *
+ *  DIST  relative to wherever the capture was taken, because that is the
+ *        only honest zero. Three separate things happen at once and they
+ *        are three separate filters:
+ *          - proximity. A cardioid's bass rise is a near-field effect
+ *            that collapses within a few centimetres, so it is an
+ *            exponential in distance and not a straight line.
+ *          - air and off-beam loss as you back away.
+ *          - TIME OF FLIGHT, 1 ms per 34 cm. Inaudible on its own and the
+ *            entire point when two cabs are running in the two lanes:
+ *            moving one mic back combs against the other exactly as it
+ *            does in a room. This is what makes the control worth having
+ *            rather than a tone knob with a distance label on it.
+ *
+ *  MIC   a second character on top of the captured one, so it is OFF by
+ *        default. A 57 is not flat and neither is a ribbon; this is the
+ *        difference between them, not a mic from nothing.
+ *
+ *  PHASE the dual-mic control. One sample of polarity.
+ *
+ * DEFAULTS ARE A BIT-EXACT NO-OP. `active` is false until something is
+ * moved off its default, so a board built before this existed sounds
+ * identical and pays nothing.
+ */
+#define MIC_DELAY_MAX 128        /* 2.9 ms - covers +60 cm with room */
+#define MIC_PARAMS    4
+
+enum { MIC_OFF = 0, MIC_D57, MIC_D421, MIC_RIBBON, MIC_COND, MIC_KINDS };
+
+typedef struct {
+    float p[MIC_PARAMS];        /* the encoders, 0..1, as the wire has them */
+    int   active;               /* anything off its default? */
+
+    fx_bq_t  pos_hi, pos_body, prox, air, chr_a, chr_b;
+    fx_bqs_t s_pos_hi, s_pos_body, s_prox, s_air, s_chr_a, s_chr_b;
+    int   use_pos, use_dist, use_chr;
+    float gain;                 /* level, and polarity, in one multiply */
+
+    float dly[MIC_DELAY_MAX];
+    int   dly_w;
+    float dly_samples;
+} mic_t;
+
+/* 0 = as captured. Dist sits at the CENTRE because the capture is the
+ * zero and you can move either way from it; the others are one-sided. */
+static void mic_defaults(mic_t *m) {
+    memset(m, 0, sizeof(*m));
+    m->p[0] = 0.0f;             /* Pos   - at the cap            */
+    m->p[1] = 0.5f;             /* Dist  - where it was captured */
+    m->p[2] = 0.0f;             /* Mic   - Off                   */
+    m->p[3] = 0.0f;             /* Phase - normal                */
+}
+
+/* Centimetres, signed, from wherever the capture was taken.
+ *
+ * LINEAR AND SYMMETRIC, because the knob is LABELLED in centimetres and a
+ * curve here would make the printed number a lie. It was exponential for
+ * the near field until the UI side was written: 0.005 per detent over
+ * +-40 cm is 0.4 cm a click, which is finer than the resolution the
+ * curve was there to buy. */
+#define MIC_CM_RANGE 40.0f
+static float mic_cm(float p) { return (p * 2.0f - 1.0f) * MIC_CM_RANGE; }
+
+static void mic_update(mic_t *m) {
+    const float pos = m->p[0];
+    const float cm  = mic_cm(m->p[1]);
+    const int   knd = (int)(m->p[2] * (MIC_KINDS - 1) + 0.5f);
+    const int   inv = (m->p[3] >= 0.5f);
+
+    m->use_pos  = (pos > 0.0005f);
+    m->use_dist = (cm > 0.05f || cm < -0.05f);
+    m->use_chr  = (knd > MIC_OFF && knd < MIC_KINDS);
+    m->active   = (m->use_pos || m->use_dist || m->use_chr || inv);
+
+    if (m->use_pos) {
+        /* Measured spread between a 57 on the cap and the same mic at the
+         * surround is 10-14 dB from about 3 kHz up, with the low mids
+         * coming up a little as it goes. */
+        fx_bq_shelf(&m->pos_hi,  3000.0f, -12.0f * pos, 1);
+        fx_bq_peak (&m->pos_body, 450.0f, 0.9f, 2.5f * pos);
+    }
+
+    float gain_db = 0.0f;
+    m->dly_samples = 0.0f;
+    if (m->use_dist) {
+        if (cm > 0.0f) {
+            /* Backing off: proximity collapses, air takes the top, and
+             * the arrival moves later. Level drops a little - not the
+             * inverse square, which over this range would make the knob
+             * a volume control with a tone side effect. */
+            fx_bq_shelf(&m->prox, 120.0f, 0.0f, 0);
+            fx_bq_shelf(&m->air, 7000.0f, -2.5f * (cm / MIC_CM_RANGE), 1);
+            m->dly_samples = (cm / 34300.0f) * SAMPLE_RATE;
+            gain_db = -3.0f * (cm / MIC_CM_RANGE);
+        } else {
+            /* Closing in: the cardioid's bass rise, and a touch more top
+             * because you are further inside the beam. */
+            const float c = -cm / MIC_CM_RANGE;        /* 0 .. 1 */
+            fx_bq_shelf(&m->prox, 120.0f, 9.0f * c * c, 0);
+            fx_bq_shelf(&m->air, 5000.0f, 1.5f * c, 1);
+        }
+    }
+    m->gain = powf(10.0f, gain_db / 20.0f) * (inv ? -1.0f : 1.0f);
+
+    if (m->use_chr) {
+        switch (knd) {
+            case MIC_D57:                        /* presence, thin below */
+                fx_bq_peak (&m->chr_a, 5500.0f, 1.0f, 4.0f);
+                fx_bq_shelf(&m->chr_b,   90.0f, -3.0f, 0);
+                break;
+            case MIC_D421:                       /* fuller, softer top   */
+                fx_bq_peak (&m->chr_a, 3500.0f, 0.8f, 2.0f);
+                fx_bq_shelf(&m->chr_b,  110.0f, 2.0f, 0);
+                break;
+            case MIC_RIBBON:                     /* dark and warm        */
+                fx_bq_shelf(&m->chr_a, 5000.0f, -7.0f, 1);
+                fx_bq_peak (&m->chr_b,  250.0f, 0.8f, 2.0f);
+                break;
+            default:                             /* condenser: open, airy */
+                fx_bq_shelf(&m->chr_a, 9000.0f, 3.0f, 1);
+                fx_bq_peak (&m->chr_b,  800.0f, 0.9f, -1.5f);
+                break;
+        }
+    }
+}
+
+static void mic_set(mic_t *m, int idx, float v) {
+    if (idx < 0 || idx >= MIC_PARAMS) return;
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    if (m->p[idx] == v) return;
+    m->p[idx] = v;
+    mic_update(m);
+}
+
+/* Changing cab must not leave the previous one's filter tails running
+ * through the new one, and must not leave a delay line full of it. */
+static void mic_reset_state(mic_t *m) {
+    memset(&m->s_pos_hi, 0, sizeof(m->s_pos_hi));
+    memset(&m->s_pos_body, 0, sizeof(m->s_pos_body));
+    memset(&m->s_prox, 0, sizeof(m->s_prox));
+    memset(&m->s_air, 0, sizeof(m->s_air));
+    memset(&m->s_chr_a, 0, sizeof(m->s_chr_a));
+    memset(&m->s_chr_b, 0, sizeof(m->s_chr_b));
+    memset(m->dly, 0, sizeof(m->dly));
+    m->dly_w = 0;
+}
+
+static void mic_process(mic_t *m, float *audio, int n) {
+    if (!m->active) return;
+
+    if (m->use_pos)
+        for (int i = 0; i < n; i++) {
+            float x = fx_bq_run(&m->pos_hi, &m->s_pos_hi, audio[i]);
+            audio[i] = fx_bq_run(&m->pos_body, &m->s_pos_body, x);
+        }
+    if (m->use_dist)
+        for (int i = 0; i < n; i++) {
+            float x = fx_bq_run(&m->prox, &m->s_prox, audio[i]);
+            audio[i] = fx_bq_run(&m->air, &m->s_air, x);
+        }
+    if (m->use_chr)
+        for (int i = 0; i < n; i++) {
+            float x = fx_bq_run(&m->chr_a, &m->s_chr_a, audio[i]);
+            audio[i] = fx_bq_run(&m->chr_b, &m->s_chr_b, x);
+        }
+
+    /* FRACTIONAL, because the whole value of this is the comb it makes
+     * against the other lane and a delay that snaps to whole samples
+     * moves that comb in steps you can hear as zips. */
+    if (m->dly_samples > 0.001f) {
+        const float d = (m->dly_samples > (float)(MIC_DELAY_MAX - 2))
+                        ? (float)(MIC_DELAY_MAX - 2) : m->dly_samples;
+        const int   di = (int)d;
+        const float fr = d - (float)di;
+        for (int i = 0; i < n; i++) {
+            m->dly[m->dly_w] = flush_denormal(audio[i]);
+            int r0 = m->dly_w - di;      if (r0 < 0) r0 += MIC_DELAY_MAX;
+            int r1 = r0 - 1;             if (r1 < 0) r1 += MIC_DELAY_MAX;
+            audio[i] = m->dly[r0] * (1.0f - fr) + m->dly[r1] * fr;
+            if (++m->dly_w >= MIC_DELAY_MAX) m->dly_w = 0;
+        }
+    }
+
+    if (m->gain != 1.0f)
+        for (int i = 0; i < n; i++) audio[i] *= m->gain;
+}
 
 typedef struct {
     float *ir;           /* resampled, trimmed, normalised taps */
@@ -360,6 +620,7 @@ typedef struct {
     float  sum;
     int    index;        /* which entry of the shared cab list */
     char   name[MAX_NAME_LEN];
+    mic_t  mic;          /* where the mic is, relative to the capture */
 } ir_block_t;
 
 /* Direct time-domain convolution, TAP-OUTER.

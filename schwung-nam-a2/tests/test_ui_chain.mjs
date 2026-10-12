@@ -458,6 +458,43 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ok(!writes.some(([k]) => k === 'b1_on'),
        'bypass: but a live block is not re-bypassed under you');
 
+    /* A CAB BLOCK CARRIES THE MIC, on the five encoders a cab never used.
+     * The wire already has p1..p5 per slot, so this needed no new keys -
+     * they route by the block's TYPE on the plugin side. */
+    board({ b1: 2 });                                /* TYPE_CAB */
+    /* As the plugin serves a fresh cab: at the cap, at the captured
+     * distance, no added character. NOT the knobs' midpoints - 0.5 on
+     * Mic would be a 421 - so these come from mic_defaults and the
+     * contract test pins that they do. */
+    params['b1_p1'] = '0.0'; params['b1_p2'] = '0.5';
+    params['b1_p3'] = '0.0'; params['b1_p4'] = '0.0';
+    ui.init();
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    drawnAt.length = 0; repaint();
+    for (const want of ['Pos', 'Dist'])
+        ok(drawnAt.some(d => d[2] === want), 'mic: the cab page names ' + want);
+    /* The strip shows four cells, so the last two are reached by touching
+     * their encoder - the same as any pedal with five controls. */
+    ui.onMidiMessageInternal([0xb0, K5, 1]);
+    ui.onMidiMessageInternal([0xb0, K6, 1]);
+    drawnAt.length = 0; repaint();
+    for (const want of ['Mic', 'Phase'])
+        ok(drawnAt.some(d => d[2] === want), 'mic: the cab page names ' + want);
+    ok(drawnAt.some(d => d[2] === 'Off'), 'mic: and Mic is Off by default');
+    drawnAt.length = 0;
+    ui.onMidiMessageInternal([0xb0, K4, 1]);
+    repaint();
+    /* Dist is CENTRED on the capture, which is the only zero an IR has,
+     * so it reads in signed centimetres and its bar fills from the middle. */
+    ok(drawnAt.some(d => /^[+-]?\d+cm$/.test(d[2])),
+       'mic: and Dist reads in centimetres, signed');
+    writes.length = 0;
+    for (let i = 0; i < 20; i++) ui.onMidiMessageInternal([0xb0, K4, 1]);
+    ok(writes.some(([k, v]) => k === 'b1_p2' && Number(v) > 0.5),
+       'mic: encoder 4 walks the mic away from the cab');
+
     /* THE TOP ROW IS BLOCKS NOW, not a routing row.
      *
      * It used to carry its own language - tap a dark pad to split, tap a
