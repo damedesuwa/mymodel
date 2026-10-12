@@ -2,7 +2,7 @@
   "id": "nam-a2c",
   "name": "Nam A2c",
   "abbrev": "A2C",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Sixteen blocks in two rows - a main chain and a parallel one, panned and merged where you choose. NAM captures, cab IRs with mic placement, and 50 modelled pedals.",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
@@ -17,14 +17,61 @@
       ".ir"
     ],
     "allowFolders": true,
-    "ensure_dirs": [
-      "models",
-      "cabs"
-    ],
-    "description": "Manage NAM models (.nam) and cabinet IRs (.wav)",
+    "description": "NAM captures by category (a subfolder of models/ is the category) and cabinet IRs",
     "hint": "Find amp models at",
     "hint_url": "https://tone3000.com",
-    "hint_url_label": "TONE3000"
+    "hint_url_label": "TONE3000",
+    "folders": [
+      {
+        "path": "models",
+        "label": "Amp captures",
+        "extensions": [
+          ".nam"
+        ],
+        "description": "Loose .nam files here are offered under Amp"
+      },
+      {
+        "path": "models/od",
+        "label": "Overdrive captures",
+        "extensions": [
+          ".nam"
+        ],
+        "description": "Offered inside the OD list, beside the modelled pedals"
+      },
+      {
+        "path": "models/dist",
+        "label": "Distortion captures",
+        "extensions": [
+          ".nam"
+        ],
+        "description": "Offered inside the Dist list"
+      },
+      {
+        "path": "models/fuzz",
+        "label": "Fuzz captures",
+        "extensions": [
+          ".nam"
+        ],
+        "description": "Offered inside the Fuzz list"
+      },
+      {
+        "path": "models/boost",
+        "label": "Boost captures",
+        "extensions": [
+          ".nam"
+        ],
+        "description": "Offered inside the Boost list"
+      },
+      {
+        "path": "cabs",
+        "label": "Cabinet IRs",
+        "extensions": [
+          ".wav",
+          ".ir"
+        ],
+        "description": "Mic placement is applied on top of whichever is loaded"
+      }
+    ]
   },
   "capabilities": {
     "chainable": true,

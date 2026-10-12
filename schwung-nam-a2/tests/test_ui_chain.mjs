@@ -24,7 +24,10 @@ catch (e) {
 const params = {
     sel_block: '8', cpu: '41', build: 'test',   /* main row, column 1 */
     split: '0', pan_a: '-1.0', pan_b: '1.0',
-    model_list: JSON.stringify(['OCD', 'Recto']),
+    /* Two in models/ (Amp) and two in a category folder, which is what
+     * the plugin's scan produces: root first, then each folder. */
+    model_list: JSON.stringify(['Recto', 'Plexi', 'My RAT', 'My Muff']),
+    model_cats: JSON.stringify([0, 0, 2, 3]),        /* amp amp dist fuzz */
     cab_list: JSON.stringify(['TF MESA']),
     /* THE PEDAL TABLE COMES FROM THE PLUGIN, not from a copy written out
      * here. tests/run_contract_test.sh compiles the real plugin and writes
@@ -133,7 +136,7 @@ ok(padBlock === 1, 'tick() raises host_pad_block(1)');
  * line you read while playing - and onto the menu, which is where you go
  * when you are asking questions about the module. */
 ok(!drawn.some(t => String(t).includes('test')), 'pedalboard header is not carrying the build id');
-ok(drawn.some(t => t === 'NAM'), 'pedalboard draws block types');
+ok(drawn.some(t => t === 'Amp'), 'pedalboard draws block types');
 
 /* A pad TAP stomps. */
 writes.length = 0;
@@ -457,6 +460,51 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
        'bypass: the next category still lands');
     ok(!writes.some(([k]) => k === 'b1_on'),
        'bypass: but a live block is not re-bypassed under you');
+
+    /* A CAPTURE SITS INSIDE THE CATEGORY IT IS A CAPTURE OF.
+     *
+     * `models/` was flat and had one picker called NAM, so a capture of a
+     * RAT was behind a menu entry saying "amp" while the modelled RAT was
+     * in Dist. A subfolder is the category now, loose files stay Amp, and
+     * knob 2 walks pedals and captures together. */
+    board({ b1: 0 });
+    ui.init();
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    turn(K1, +1, CAT.DIST);                 /* Off -> ... -> Dist */
+    /* Past every modelled Dist pedal and onto the capture in models/dist. */
+    writes.length = 0;
+    turn(K2, +1, 20);
+    ok(writes.some(([k, v]) => k === 'b1_type' && v === '1'),
+       'nam: walking off the end of Dist reaches a capture');
+    ok(writes.some(([k, v]) => k === 'b1_model' && v === '2'),
+       'nam: and it is the one in models/dist, by index');
+    drawnAt.length = 0; repaint();
+    /* Clipped to the cell, as every name on this row is - the footer is
+     * where the full one lives. */
+    ok(drawnAt.some(d => /^My RA/.test(d[2])),
+       'nam: the picker names the file, not an index');
+    ok(drawnAt.some(d => d[2] === 'Dist'),
+       'nam: and the block is still in Dist, not in Amp');
+    /* Back down past it returns to the modelled pedals - one list. */
+    writes.length = 0;
+    turn(K2, -1, 20);
+    ok(writes.some(([k, v]) => k === 'b1_type' && v === '3'),
+       'nam: turning back reaches the modelled pedals again');
+    /* A capture in no folder is an Amp, which is what every install that
+     * predates this has. */
+    board({ b1: 1 });                               /* TYPE_NAM */
+    params['b1_model'] = '0';                       /* models/ root */
+    ui.init();
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'Amp'), 'nam: a loose capture is an Amp');
+    ok(drawnAt.some(d => d[2] === 'Recto'), 'nam: named by its file');
+    ok(!drawnAt.some(d => d[2] === 'Model'),
+       'nam: and the separate Model picker is gone - one knob does both');
 
     /* A CAB BLOCK CARRIES THE MIC, on the five encoders a cab never used.
      * The wire already has p1..p5 per slot, so this needed no new keys -

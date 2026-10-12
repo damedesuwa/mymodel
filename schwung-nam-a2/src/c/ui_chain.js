@@ -164,18 +164,34 @@ const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3;
  * the two that are not pedals at all sit outside both: the amp is red and
  * the cab is brown.
  */
+/*
+ * A CAPTURE IS NOT A SEPARATE KIND OF THING FROM A PEDAL.
+ *
+ * `models/` was flat and had one picker called NAM, so a capture of a
+ * RAT sat behind a menu entry that said "amp" while the modelled RAT sat
+ * in Dist - the same pedal, two places, by file type rather than by what
+ * it is. There are far more pedal captures in the wild than amp ones, so
+ * the picker nobody would look in was the one holding most of them.
+ *
+ * A SUBFOLDER OF models/ IS THE CATEGORY, and `nam_cat` says which one
+ * this list takes. Loose files stay Amp, so nothing has to be moved. A
+ * capture then appears INSIDE Dist, next to the RAT, and knob 2 walks
+ * both - which is also one control fewer than before, because the old
+ * separate Model picker is gone.
+ */
 const CATS = [
     { name: 'Off',    type: TYPE_OFF, led: [0, 0] },
-    { name: 'NAM',    type: TYPE_NAM, led: [1, 65] },     /* red     */
+    { name: 'Amp',    type: TYPE_NAM, led: [1, 65],       /* red     */
+      items: [], nam_cat: 0 },
     { name: 'Cab',    type: TYPE_CAB, led: [5, 73] },     /* brown   */
     { name: 'OD',     type: TYPE_FX,  led: [8, 79],       /* yellow  */
-      items: [0, 1, 2, 3, 4, 40, 41] },
+      items: [0, 1, 2, 3, 4, 40, 41], nam_cat: 1 },
     { name: 'Dist',   type: TYPE_FX,  led: [3, 69],       /* orange  */
-      items: [5, 6, 7, 42, 8, 9] },
+      items: [5, 6, 7, 42, 8, 9], nam_cat: 2 },
     { name: 'Fuzz',   type: TYPE_FX,  led: [26, 115],     /* magenta */
-      items: [10, 11, 43] },
+      items: [10, 11, 43], nam_cat: 3 },
     { name: 'Boost',  type: TYPE_FX,  led: [122, 118],    /* white   */
-      items: [12, 44] },
+      items: [12, 44], nam_cat: 4 },
     { name: 'Dyn',    type: TYPE_FX,  led: [15, 93],      /* teal    */
       items: [13, 14, 15, 16, 17, 18] },
     { name: 'Filter', type: TYPE_FX,  led: [11, 85],      /* green   */
@@ -188,13 +204,64 @@ const CATS = [
       items: [36, 37, 38, 39] },
 ];
 
+/* AN ITEM IS A PEDAL *OR* A CAPTURE, and the sign says which.
+ *
+ * >= 0 is an FX id; < 0 is `-(model index + 1)`. One tagged integer
+ * rather than a pair, because `items` is walked, indexed and compared in
+ * a dozen places and every one of them would have had to learn a shape. */
+function namItem(modelIdx) { return -(modelIdx + 1); }
+function itemIsNam(item)   { return item < 0; }
+function itemModel(item)   { return -item - 1; }
+
+function itemOfBlock(b) {
+    if (st.type[b] === TYPE_NAM) return namItem(st.model[b] | 0);
+    return st.fx[b] | 0;
+}
+
+/* The one place a block's identity is written, so the type and the thing
+ * it names can never be set apart from each other. */
+function setItem(b, item) {
+    if (itemIsNam(item)) {
+        const m = itemModel(item);
+        st.model[b] = m;
+        st.val[keyOf(b, 'model')] = m;
+        setp(keyOf(b, 'model'), m);
+        st.type[b] = TYPE_NAM;
+    } else {
+        st.fx[b] = item;
+        st.val[keyOf(b, 'fx')] = item;
+        setp(keyOf(b, 'fx'), item);
+        st.type[b] = TYPE_FX;
+    }
+    st.val[keyOf(b, 'type')] = st.type[b];
+    setp(keyOf(b, 'type'), st.type[b]);
+}
+
 function catOfBlock(b) {
     const t = st.type[b];
-    if (t !== TYPE_FX) return (t === TYPE_NAM) ? 1 : (t === TYPE_CAB) ? 2 : 0;
-    const id = st.fx[b] | 0;
-    for (let c = 3; c < CATS.length; c++)
-        if (CATS[c].items.indexOf(id) >= 0) return c;
-    return 3;
+    if (t === TYPE_OFF) return 0;
+    if (t === TYPE_CAB) return 2;
+    const it = itemOfBlock(b);
+    for (let c = 1; c < CATS.length; c++)
+        if ((CATS[c].items || []).indexOf(it) >= 0) return c;
+    /* A capture in no folder we know, or an id from a newer build: Amp
+     * for a capture, the first pedal family for anything else. Never a
+     * category whose TYPE disagrees with the block's. */
+    return (t === TYPE_NAM) ? 1 : 3;
+}
+
+/* Rebuilt whenever the model list is read, which is once. A category's
+ * captures go AFTER its pedals: the modelled ones are the same on every
+ * device and the captures are yours, so the list reads the same way on
+ * any two boards up to the point where it starts being personal. */
+function attachNamItems() {
+    const cats = st.names.modelCat || [];
+    for (const c of CATS) {
+        if (c.nam_cat === undefined) continue;
+        c.items = (c.items || []).filter(i => !itemIsNam(i));
+        for (let m = 0; m < cats.length; m++)
+            if (cats[m] === c.nam_cat) c.items.push(namItem(m));
+    }
 }
 
 const White = 120;
@@ -290,8 +357,11 @@ function specLabel(kn) { return kn.n; }
 function knobsFor(type, fxId) {
     const CAT_KNOB = { key: 'cat', label: 'Block', kind: 'cat' };
     if (type === TYPE_NAM)
+        /* The same encoder as a pedal's, because a capture IS one of the
+         * things that category holds. The separate Model picker is gone
+         * with it. */
         return [CAT_KNOB,
-                { key: 'model', label: 'Model', kind: 'list' },
+                { key: 'fx', label: 'Capture', kind: 'fxid' },
                 { key: 'quality', label: 'Qual', kind: 'enum', n: 3,
                   names: ['Full', 'Slim', 'Lite'] }];
     if (type === TYPE_CAB)
@@ -462,11 +532,12 @@ const st = {
     type: new Array(NUM_BLOCKS).fill(0),
     on: new Array(NUM_BLOCKS).fill(1),
     fx: new Array(NUM_BLOCKS).fill(0),
+    model: new Array(NUM_BLOCKS).fill(0),
     cpu: 0,
     peak: 0,                    /* out level, %% of full scale - see drawMeter */
     blockCpu: new Array(NUM_BLOCKS).fill(0),
     val: {},                    /* "b3_drive" -> number */
-    names: { model: [], cab: [], fx: [] },
+    names: { model: [], cab: [], fx: [], modelCat: [] },
     specs: [],                  /* fx_specs, read once - see specKnob */
     build: '?',
     rot: 0,
@@ -475,6 +546,13 @@ const st = {
 /* The lists are read ONCE. They change only when a file lands on the card,
  * which cannot happen while this screen is up. */
 function loadLists() {
+    try {
+        const j = getp('model_cats');
+        if (j !== null && j !== '') {
+            const a = JSON.parse(j);
+            if (Array.isArray(a)) st.names.modelCat = a;
+        }
+    } catch (e) { }
     for (const k of ['model', 'cab', 'fx']) {
         try {
             const j = getp(k + '_list');
@@ -490,6 +568,13 @@ function loadLists() {
         const j = getp('fx_specs');
         if (j) st.specs = JSON.parse(j);
     } catch (e) { st.specs = []; }
+}
+
+/* What a tagged item is called: a capture by its file name, a pedal by
+ * the served table's. */
+function itemName(item) {
+    if (itemIsNam(item)) return listNameFor('model', itemModel(item));
+    return st.names.fx[item] || String(item);
 }
 
 function listNameFor(key, idx) {
@@ -540,6 +625,10 @@ function rotateRead() {
         st.fx[b] = num(getp(keyOf(b, 'fx')), st.fx[b]);
     } else {
         st.blockCpu[b] = num(getp(keyOf(b, 'cpu')), st.blockCpu[b]);
+        /* On the ODD stop, which reads one key, rather than beside the
+         * three on the even one - a fourth read there is 11 ms of IPC in
+         * a single tick. */
+        st.model[b] = num(getp(keyOf(b, 'model')), st.model[b]);
     }
 }
 
@@ -1047,7 +1136,7 @@ function drawCells() {
         let shown;
         const v = st.val[fullKey(spec)];
         if (spec.kind === 'cat')        shown = CATS[catOfBlock(sel)].name;
-        else if (spec.kind === 'fxid')  shown = st.names.fx[st.fx[sel]] || String(st.fx[sel]);
+        else if (spec.kind === 'fxid')  shown = itemName(itemOfBlock(sel));
         else if (spec.kind === 'spec')  shown = (v === undefined) ? '-' : specText(spec.kn, v);
         else if (spec.kind === 'float') shown = (v === undefined) ? '-' : String(Math.round(v * 100));
         else if (spec.kind === 'enum')  shown = (v === undefined) ? '-'
@@ -1095,12 +1184,16 @@ function drawFooter(list) {
     }
     const w = 126 - right;
 
-    if (st.type[sel] === TYPE_FX) {
-        const id = st.fx[sel] | 0;
+    /* A CAPTURE GETS THE SAME LINE A PEDAL DOES, because it is in the
+     * same list - the footer's whole job is saying where in that list you
+     * are, and a capture that fell through to the generic branch would
+     * lose the one place its full name fits. */
+    if (st.type[sel] === TYPE_FX || st.type[sel] === TYPE_NAM) {
+        const it = itemOfBlock(sel);
         const c = catOfBlock(sel);
-        const items = CATS[c].items || [id];
-        const at = items.indexOf(id);
-        ptext(1, FOOT_Y, (st.names.fx[id] || String(id)) + '  ' +
+        const items = CATS[c].items || [it];
+        const at = items.indexOf(it);
+        ptext(1, FOOT_Y, itemName(it) + '  ' +
               CATS[c].name + ' ' + (at + 1) + '/' + items.length, 1, w);
         return;
     }
@@ -1161,7 +1254,7 @@ function knobFill(spec) {
         return catOfBlock(sel) / (CATS.length - 1);
     if (spec.kind === 'fxid') {
         const items = CATS[catOfBlock(sel)].items || [];
-        const i = items.indexOf(st.fx[sel] | 0);
+        const i = items.indexOf(itemOfBlock(sel));
         return (items.length < 2 || i < 0) ? 1 : i / (items.length - 1);
     }
     const v = st.val[fullKey(spec)];
@@ -1311,15 +1404,6 @@ function onKnob(idx, ccValue) {
         if (c > CATS.length - 1) c = CATS.length - 1;
         if (c === catOfBlock(sel)) return;
         const cat = CATS[c];
-        /* Writing the pedal BEFORE the type, because the type write is
-         * what makes the plugin reach for a default - and a block that
-         * lands on its default for a frame is a block that makes a
-         * different noise for a frame. */
-        if (cat.items) {
-            st.fx[sel] = cat.items[0];
-            st.val[selKey('fx')] = cat.items[0];
-            setp(selKey('fx'), cat.items[0]);
-        }
         /* A NEW BLOCK ARRIVES BYPASSED.
          *
          * Turning knob 1 past Off used to put a pedal straight into the
@@ -1337,9 +1421,22 @@ function onKnob(idx, ccValue) {
             st.val[selKey('on')] = 1;
             setp(selKey('on'), 1);
         }
-        st.type[sel] = cat.type;
-        st.val[selKey('type')] = cat.type;
-        setp(selKey('type'), cat.type);
+        /* THE ITEM DECIDES THE TYPE, not the category: an Amp category
+         * holding no captures has nothing to land on, and a Dist one
+         * lands on a modelled pedal or on your own capture depending on
+         * which is first. `setItem` writes the pair together so they
+         * cannot be set apart - the write order used to matter here
+         * because the type write is what makes the plugin reach for a
+         * default, and a block on its default for a frame is a block
+         * that makes a different noise for a frame. */
+        const first = (cat.items && cat.items.length) ? cat.items[0] : undefined;
+        if (first !== undefined) {
+            setItem(sel, first);
+        } else {
+            st.type[sel] = cat.type;
+            st.val[selKey('type')] = cat.type;
+            setp(selKey('type'), cat.type);
+        }
         if (st.on[sel] === 0) flash(blockName(sel) + ' ADDED - BYPASSED');
         readSelected();
         return;
@@ -1349,17 +1446,16 @@ function onKnob(idx, ccValue) {
         const step = knobSteps(idx, d);
         if (!step) return;
         const items = CATS[catOfBlock(sel)].items || [];
-        const cur = st.fx[sel] | 0;
+        const cur = itemOfBlock(sel);
         let i = items.indexOf(cur) + step;
         if (i < 0) i = 0;
         if (i > items.length - 1) i = items.length - 1;
         const want = items[i];
         if (want === undefined || want === cur) return;
-        st.fx[sel] = want;
-        st.val[selKey('fx')] = want;
-        setp(selKey('fx'), want);
-        /* The pedal changed, so its knobs are a different set - what they
-         * are pointing at has to be re-read rather than carried over. */
+        setItem(sel, want);
+        /* The pedal changed, so its knobs are a different set - and a
+         * capture has a different set again. What they point at has to be
+         * re-read rather than carried over. */
         readSelected();
         return;
     }
@@ -1425,6 +1521,7 @@ globalThis.chain_ui = {
         for (let i = 0; i < NUM_KNOBS; i++) ringCache[i] = -1;
         resetKnobAcc();
         loadLists();
+        attachNamItems();
         st.build = getp('build') || '?';
         /* THE MAIN ROW'S FIRST BLOCK IS WHERE THIS OPENS. Slot 0 is the
          * top row, which on a mono board is off the path entirely - so
@@ -1435,6 +1532,7 @@ globalThis.chain_ui = {
             st.type[b] = num(getp(keyOf(b, 'type')), 0);
             st.on[b] = num(getp(keyOf(b, 'on')), 0) === 0 ? 1 : 0;
             st.fx[b] = num(getp(keyOf(b, 'fx')), 0);
+            st.model[b] = num(getp(keyOf(b, 'model')), 0);
         }
         st.cpu = num(getp('cpu'), 0);
         for (const key of ['in_level', 'out_level', 'merge', 'pan_a', 'pan_b']) {

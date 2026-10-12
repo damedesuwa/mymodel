@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "mic"
+#define NAM_A2C_BUILD_ID "namcat"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -185,6 +185,7 @@ typedef struct {
     /* Shared lists, scanned once. A model or a cab belongs to the module,
      * not to a block - eight blocks pointing at one file is ordinary. */
     int  model_count;
+    int  model_cat[MAX_MODELS];   /* which models/<folder> it came from */
     char model_names[MAX_MODELS][MAX_NAME_LEN];
     char model_paths[MAX_MODELS][MAX_PATH_LEN];
     int  cab_count;
@@ -455,14 +456,60 @@ static void *diag_thread(void *arg) {
 /* Lists                                                                     */
 /* ======================================================================== */
 
+/* A CAPTURE IS NOT NECESSARILY AN AMP, and the card is where that gets
+ * said. There are far more pedal captures in the wild than amp ones, and
+ * a flat `models/` put every one of them behind a picker called NAM -
+ * nowhere near the Dist pedals they belong beside.
+ *
+ * A SUBFOLDER IS THE CATEGORY. Loose files stay Amp, so an install that
+ * predates this keeps working and nobody has to move anything; drop a
+ * capture in `models/dist/` and it appears in the Dist list next to the
+ * RAT. The web manager needs no change at all for this - it already
+ * renders a module's declared `folders` with a file count and a Manage
+ * button, and uploads take the destination path. The one thing missing
+ * was that the folders have to EXIST before it will offer them, which is
+ * the module's job and is done here. */
+static const char *MODEL_CATS[] = { "amp", "od", "dist", "fuzz", "boost" };
+#define MODEL_CAT_COUNT ((int)(sizeof(MODEL_CATS) / sizeof(MODEL_CATS[0])))
+
 static void scan_lists(a2c_t *s) {
     char dir[MAX_PATH_LEN];
+
+    /* Root first and tagged `amp`, then each folder in turn, so the list
+     * arrives grouped - the UI slices it by category and a scattered one
+     * would need a sort it has no reason to own. */
     snprintf(dir, sizeof(dir), "%s/models", s->module_dir);
     s->model_count = scan_directory(dir, s->model_names, s->model_paths,
                                     MAX_MODELS, is_model_file);
+    for (int i = 0; i < s->model_count; i++) s->model_cat[i] = 0;
+
+    for (int c = 1; c < MODEL_CAT_COUNT && s->model_count < MAX_MODELS; c++) {
+        snprintf(dir, sizeof(dir), "%s/models/%s", s->module_dir, MODEL_CATS[c]);
+        const int room = MAX_MODELS - s->model_count;
+        const int n = scan_directory(dir,
+                                     &s->model_names[s->model_count],
+                                     &s->model_paths[s->model_count],
+                                     room, is_model_file);
+        for (int i = 0; i < n; i++) s->model_cat[s->model_count + i] = c;
+        s->model_count += n;
+    }
+
     snprintf(dir, sizeof(dir), "%s/cabs", s->module_dir);
     s->cab_count = scan_directory(dir, s->cab_names, s->cab_paths,
                                   MAX_CABS, is_cab_file);
+}
+
+/* The manager only offers a folder it can see, so they are created rather
+ * than waited for. Once, at instance creation, beside the scan that is
+ * already reading this directory. */
+static void ensure_model_dirs(const char *module_dir) {
+    char dir[MAX_PATH_LEN];
+    snprintf(dir, sizeof(dir), "%s/models", module_dir);
+    mkdir(dir, 0755);
+    for (int c = 1; c < MODEL_CAT_COUNT; c++) {
+        snprintf(dir, sizeof(dir), "%s/models/%s", module_dir, MODEL_CATS[c]);
+        mkdir(dir, 0755);
+    }
 }
 
 /* ======================================================================== */
@@ -592,6 +639,7 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     s->pan_b = 1.0f;
 
     report_install(s);
+    ensure_model_dirs(s->module_dir);
     scan_lists(s);
 
     s->worker_stop = 0;
@@ -1121,6 +1169,19 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * from the one scan so they cannot disagree. */
     if (strcmp(key, "model_list") == 0)
         return emit_options(buf, buf_len, s->model_names, s->model_count);
+    /* PARALLEL TO model_list, by index. A name carrying its folder would
+     * have been one read instead of two and is worse: the name is what
+     * the picker prints, and "dist/Big Muff" in a cell that holds six
+     * characters prints "dist/". */
+    if (strcmp(key, "model_cats") == 0) {
+        int w = 0;
+        w += snprintf(buf + w, buf_len - w, "[");
+        for (int i = 0; i < s->model_count && w < buf_len - 8; i++)
+            w += snprintf(buf + w, buf_len - w, "%s%d", i ? "," : "",
+                          s->model_cat[i]);
+        w += snprintf(buf + w, buf_len - w, "]");
+        return w;
+    }
     if (strcmp(key, "cab_list") == 0)
         return emit_options(buf, buf_len, s->cab_names, s->cab_count);
     /* THE KNOB TABLE, SERVED ONCE.

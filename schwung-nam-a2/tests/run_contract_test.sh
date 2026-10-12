@@ -43,7 +43,7 @@ if m:
     print("ok   fx_specs fixture written (%d bytes)" % len(raw))
 GENPY
 
-python3 - <<'PY'
+FIXDIR="$FIX" python3 - <<'PY'
 
 import json, re, sys
 txt = open('/tmp/a2c_contract.txt').read()
@@ -207,6 +207,42 @@ for k, v in want.items():
         print("FAIL %s: a fresh cab must read %.1f, got %s" % (k, v, got)); fail = 1
 if not fail:
     print("ok   a fresh cab's mic is at the capture, character off")
+
+# A SUBFOLDER OF models/ IS THE CATEGORY, and the manager only offers a
+# folder it can see - so the module creates them, and module.json declares
+# them for the manager to render. Those two lists must agree, or a folder
+# is uploadable into and never read, or scanned and never offered.
+import os
+mj = json.load(open("src/c/module.json"))
+declared = set(f["path"] for f in mj["assets"].get("folders", []))
+made = set()
+FIXDIR = os.environ["FIXDIR"]
+for root, dirs, files in os.walk(os.path.join(FIXDIR, "models")):
+    rel = os.path.relpath(root, FIXDIR)
+    made.add(rel.replace(os.sep, "/"))
+missing = (made | {"cabs"}) - declared
+if missing:
+    print("FAIL: the module creates %s but module.json declares no folder for it"
+          % sorted(missing)); fail = 1
+unmade = declared - (made | {"cabs"})
+if unmade:
+    print("FAIL: module.json declares %s but nothing creates it" % sorted(unmade))
+    fail = 1
+if not fail:
+    print("ok   model folders: %d, created and declared alike" % len(declared))
+
+# Served per model, parallel to the names, so the UI can slice the list.
+cats = section("model_cats")
+names = next(x for x in cp if x["key"] == "b1_model")["options"]
+if cats is None:
+    print("FAIL: model_cats is not served"); fail = 1
+else:
+    arr = json.loads(cats)
+    if len(arr) != len(names):
+        print("FAIL: model_cats has %d entries for %d models"
+              % (len(arr), len(names))); fail = 1
+    else:
+        print("ok   model_cats: %d, one per model" % len(arr))
 
 print("FAILED" if fail else "PASS")
 sys.exit(1 if fail else 0)

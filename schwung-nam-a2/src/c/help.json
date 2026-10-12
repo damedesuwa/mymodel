@@ -19,6 +19,31 @@
       ]
     },
     {
+      "title": "NAM captures by category",
+      "lines": [
+        "A capture is not always an amp",
+        "- most of them are pedals.",
+        "A SUBFOLDER of models/ is the",
+        "category:",
+        "  models/        -> Amp",
+        "  models/od/     -> OD",
+        "  models/dist/   -> Dist",
+        "  models/fuzz/   -> Fuzz",
+        "  models/boost/  -> Boost",
+        "Drop a .nam in models/dist and",
+        "it turns up in the Dist list,",
+        "after the modelled pedals.",
+        "Knob 2 walks both - there is no",
+        "separate Model picker any more.",
+        "Upload them in the web manager",
+        "(move.local:7700), Modules ->",
+        "this module -> the folder's",
+        "Manage button.",
+        "Loose files stay Amp, so an old",
+        "install needs nothing moved."
+      ]
+    },
+    {
       "title": "Reading the board",
       "lines": [
         "It is a WIRE with boxes on it,",

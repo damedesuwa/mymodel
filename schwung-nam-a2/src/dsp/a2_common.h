@@ -28,6 +28,7 @@
 #include <ctime>
 #include <unistd.h>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <algorithm>
 #include <atomic>
 #include <pthread.h>
