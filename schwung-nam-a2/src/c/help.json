@@ -19,28 +19,27 @@
       ]
     },
     {
-      "title": "NAM captures by category",
+      "title": "Your own files",
       "lines": [
-        "A capture is not always an amp",
-        "- most of them are pedals.",
-        "A SUBFOLDER of models/ is the",
-        "category:",
-        "  models/        -> Amp",
-        "  models/od/     -> OD",
-        "  models/dist/   -> Dist",
-        "  models/fuzz/   -> Fuzz",
-        "  models/boost/  -> Boost",
-        "Drop a .nam in models/dist and",
-        "it turns up in the Dist list,",
-        "after the modelled pedals.",
-        "Knob 2 walks both - there is no",
-        "separate Model picker any more.",
+        "EVERY FOLDER IS NAMED AFTER",
+        "THE LIST IT FEEDS. Drop a file",
+        "in and it shows up there.",
+        "  amps/     .nam -> Amp",
+        "  od/       .nam -> OD",
+        "  dist/     .nam -> Dist",
+        "  fuzz/     .nam -> Fuzz",
+        "  boost/    .nam -> Boost",
+        "  cabs/     .wav -> Cab",
+        "  reverbs/  .wav -> Reverb",
+        "Yours appear AFTER the built-in",
+        "pedals in each list, on knob 2.",
         "Upload them in the web manager",
-        "(move.local:7700), Modules ->",
-        "this module -> the folder's",
-        "Manage button.",
-        "Loose files stay Amp, so an old",
-        "install needs nothing moved."
+        "(move.local:7700): Modules ->",
+        "this one -> the folder's Manage",
+        "button.",
+        "Old installs: models/ and irs/",
+        "are renamed for you on first",
+        "run - nothing to move."
       ]
     },
     {
@@ -61,11 +60,13 @@
     {
       "title": "The encoders",
       "lines": [
-        "1  Block: Off / NAM / Cab, then",
-        "   OD Dist Fuzz Boost Dyn",
-        "   Filter Mod Time Pitch",
-        "2  which model, cab or pedal",
-        "3-7  that pedal's own controls",
+        "1  Block: Off, then",
+        "   Amp Cab OD Dist Fuzz Boost",
+        "   Dyn Filter Mod Delay",
+        "   Reverb Pitch",
+        "2  which pedal, capture, cab",
+        "   or IR - one list each",
+        "3-7  that block's own controls",
         "8  board output level",
         "Each category has its own pad",
         "colour; dim = bypassed.",
@@ -122,29 +123,23 @@
       ]
     },
     {
-      "title": "Reverb IRs",
+      "title": "Reverb IRs and CPU",
       "lines": [
-        "Drop a room/hall/plate/spring",
-        "IR into irs/ and it turns up",
-        "in the TIME list, after the",
-        "modelled reverbs.",
         "A cab IR is 23ms; a room is",
-        "seconds - so LEN is a knob,",
-        "and it is a CPU knob with a",
-        "time on it:",
-        "  46ms  ~190us",
-        "  93ms  ~380us",
-        " 186ms  ~760us",
-        " 372ms ~1520us of 2370",
+        "seconds. So LEN is a knob, and",
+        "it is a CPU knob with a time",
+        "written on it:",
+        "   46ms  ~190us",
+        "   93ms  ~380us",
+        "  186ms  ~760us",
+        "  372ms ~1520us of 2370",
         "Mix 0 is transparent - the dry",
         "is never touched, Mix only",
         "raises the wet.",
-        "Pre  gap before the room",
-        "     answers, 0-104ms",
-        "LoCut keeps the tail out of",
-        "     the low end, 20-400Hz",
-        "Upload in the web manager,",
-        "Reverb IRs -> Manage."
+        "Pre   gap before the room",
+        "      answers, 0-104ms",
+        "LoCut keeps the tail out of the",
+        "      low end, 20-400Hz"
       ]
     },
     {
@@ -194,15 +189,6 @@
         "NAM Full ~1200us, Slim ~250us.",
         "Cab ~60us. A pedal 5-11us.",
         "So: one amp, and seven pedals."
-      ]
-    },
-    {
-      "title": "Files",
-      "lines": [
-        "models/  .nam captures",
-        "cabs/    .wav impulse responses",
-        "Drop them in with the web",
-        "manager at move.local:7700."
       ]
     }
   ]

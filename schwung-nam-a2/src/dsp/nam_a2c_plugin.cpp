@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "irverb"
+#define NAM_A2C_BUILD_ID "names"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -192,7 +192,7 @@ typedef struct {
     /* Shared lists, scanned once. A model or a cab belongs to the module,
      * not to a block - eight blocks pointing at one file is ordinary. */
     int  model_count;
-    int  model_cat[MAX_MODELS];   /* which models/<folder> it came from */
+    char model_dir[MAX_MODELS][16];   /* the folder it came from */
     char model_names[MAX_MODELS][MAX_NAME_LEN];
     char model_paths[MAX_MODELS][MAX_PATH_LEN];
     int  cab_count;
@@ -470,68 +470,118 @@ static void *diag_thread(void *arg) {
 /* Lists                                                                     */
 /* ======================================================================== */
 
-/* A CAPTURE IS NOT NECESSARILY AN AMP, and the card is where that gets
- * said. There are far more pedal captures in the wild than amp ones, and
- * a flat `models/` put every one of them behind a picker called NAM -
- * nowhere near the Dist pedals they belong beside.
+/* THE FOLDER NAME IS THE CATEGORY NAME ON SCREEN.
  *
- * A SUBFOLDER IS THE CATEGORY. Loose files stay Amp, so an install that
- * predates this keeps working and nobody has to move anything; drop a
- * capture in `models/dist/` and it appears in the Dist list next to the
- * RAT. The web manager needs no change at all for this - it already
- * renders a module's declared `folders` with a file count and a Manage
- * button, and uploads take the destination path. The one thing missing
- * was that the folders have to EXIST before it will offer them, which is
- * the module's job and is done here. */
-static const char *MODEL_CATS[] = { "amp", "od", "dist", "fuzz", "boost" };
-#define MODEL_CAT_COUNT ((int)(sizeof(MODEL_CATS) / sizeof(MODEL_CATS[0])))
+ * It was `models/` with `models/dist/` inside it for captures, and `irs/`
+ * for reverbs - which needed a rule explained ("a subfolder of models is
+ * the category") and a name that says nothing ("irs"). Reported as
+ * exactly that: hard to tell what goes where.
+ *
+ * Seven folders at the module root, each named after the list it feeds:
+ *
+ *   amps/ od/ dist/ fuzz/ boost/   .nam captures
+ *   cabs/                          cabinet IRs
+ *   reverbs/                       reverb IRs
+ *
+ * There is no rule left to explain. `Dist` on screen is `dist/` on the
+ * card, and the web manager shows them by the same names because
+ * module.json declares the same list - which the contract test pins
+ * against this one.
+ */
+typedef struct { const char *dir; int kind; } asset_dir_t;
+static const asset_dir_t ASSET_DIRS[] = {
+    { "amps",    BLK_NAM },
+    { "od",      BLK_NAM },
+    { "dist",    BLK_NAM },
+    { "fuzz",    BLK_NAM },
+    { "boost",   BLK_NAM },
+    { "cabs",    BLK_CAB },
+    { "reverbs", BLK_IR  },
+};
+#define ASSET_DIR_COUNT ((int)(sizeof(ASSET_DIRS) / sizeof(ASSET_DIRS[0])))
+
+/* The old names, renamed once. A rename is one syscall and costs nothing
+ * next boot; copying would double every capture on the card, and leaving
+ * them where they were would make a device that had files look like a
+ * device that had none. The old root is still SCANNED as amps below, so a
+ * rename that could not happen - read-only card, a half-finished move -
+ * loses nothing, it just stops being visible in the manager. */
+static void migrate_asset_dirs(const char *module_dir) {
+    static const char *moves[][2] = {
+        { "models/od",    "od"      },
+        { "models/dist",  "dist"    },
+        { "models/fuzz",  "fuzz"    },
+        { "models/boost", "boost"   },
+        { "models",       "amps"    },
+        { "irs",          "reverbs" },
+    };
+    char from[MAX_PATH_LEN], to[MAX_PATH_LEN];
+    for (unsigned i = 0; i < sizeof(moves) / sizeof(moves[0]); i++) {
+        snprintf(from, sizeof(from), "%s/%s", module_dir, moves[i][0]);
+        snprintf(to,   sizeof(to),   "%s/%s", module_dir, moves[i][1]);
+        DIR *d = opendir(from);
+        if (!d) continue;
+        closedir(d);
+        d = opendir(to);
+        if (d) { closedir(d); continue; }    /* the new one already exists */
+        if (rename(from, to) == 0) {
+            char msg[MAX_PATH_LEN + 64];
+            snprintf(msg, sizeof(msg), "Nam A2c: moved %s -> %s",
+                     moves[i][0], moves[i][1]);
+            plugin_log(msg);
+        }
+    }
+}
+
+static void ensure_asset_dirs(const char *module_dir) {
+    char dir[MAX_PATH_LEN];
+    for (int i = 0; i < ASSET_DIR_COUNT; i++) {
+        snprintf(dir, sizeof(dir), "%s/%s", module_dir, ASSET_DIRS[i].dir);
+        mkdir(dir, 0755);
+    }
+}
 
 static void scan_lists(a2c_t *s) {
     char dir[MAX_PATH_LEN];
+    s->model_count = 0;
+    s->cab_count = 0;
+    s->ir_count = 0;
 
-    /* Root first and tagged `amp`, then each folder in turn, so the list
-     * arrives grouped - the UI slices it by category and a scattered one
-     * would need a sort it has no reason to own. */
-    snprintf(dir, sizeof(dir), "%s/models", s->module_dir);
-    s->model_count = scan_directory(dir, s->model_names, s->model_paths,
-                                    MAX_MODELS, is_model_file);
-    for (int i = 0; i < s->model_count; i++) s->model_cat[i] = 0;
-
-    for (int c = 1; c < MODEL_CAT_COUNT && s->model_count < MAX_MODELS; c++) {
-        snprintf(dir, sizeof(dir), "%s/models/%s", s->module_dir, MODEL_CATS[c]);
-        const int room = MAX_MODELS - s->model_count;
-        const int n = scan_directory(dir,
-                                     &s->model_names[s->model_count],
-                                     &s->model_paths[s->model_count],
-                                     room, is_model_file);
-        for (int i = 0; i < n; i++) s->model_cat[s->model_count + i] = c;
-        s->model_count += n;
+    for (int i = 0; i < ASSET_DIR_COUNT; i++) {
+        snprintf(dir, sizeof(dir), "%s/%s", s->module_dir, ASSET_DIRS[i].dir);
+        if (ASSET_DIRS[i].kind == BLK_NAM) {
+            const int room = MAX_MODELS - s->model_count;
+            if (room <= 0) continue;
+            const int n = scan_directory(dir,
+                                         &s->model_names[s->model_count],
+                                         &s->model_paths[s->model_count],
+                                         room, is_model_file);
+            /* The DIRECTORY is what the UI matches on, not an index into
+             * a copy of this table it would have to keep in step. */
+            for (int k = 0; k < n; k++)
+                snprintf(s->model_dir[s->model_count + k],
+                         sizeof(s->model_dir[0]), "%s", ASSET_DIRS[i].dir);
+            s->model_count += n;
+        } else if (ASSET_DIRS[i].kind == BLK_CAB) {
+            s->cab_count = scan_directory(dir, s->cab_names, s->cab_paths,
+                                          MAX_CABS, is_cab_file);
+        } else {
+            s->ir_count = scan_directory(dir, s->ir_names, s->ir_paths,
+                                         MAX_CABS, is_cab_file);
+        }
     }
 
-    snprintf(dir, sizeof(dir), "%s/cabs", s->module_dir);
-    s->cab_count = scan_directory(dir, s->cab_names, s->cab_paths,
-                                  MAX_CABS, is_cab_file);
-    /* A SEPARATE FOLDER, not a subfolder of cabs/. The two are the same
-     * file format and nothing else: a cab is 23 ms and gets a mic moved
-     * around it, a room is up to 372 ms and gets a dry signal kept. One
-     * list would put a hall in the picker you reach for a 4x12. */
-    snprintf(dir, sizeof(dir), "%s/irs", s->module_dir);
-    s->ir_count = scan_directory(dir, s->ir_names, s->ir_paths,
-                                 MAX_CABS, is_cab_file);
-}
-
-/* The manager only offers a folder it can see, so they are created rather
- * than waited for. Once, at instance creation, beside the scan that is
- * already reading this directory. */
-static void ensure_model_dirs(const char *module_dir) {
-    char dir[MAX_PATH_LEN];
-    snprintf(dir, sizeof(dir), "%s/models", module_dir);
-    mkdir(dir, 0755);
-    snprintf(dir, sizeof(dir), "%s/irs", module_dir);
-    mkdir(dir, 0755);
-    for (int c = 1; c < MODEL_CAT_COUNT; c++) {
-        snprintf(dir, sizeof(dir), "%s/models/%s", module_dir, MODEL_CATS[c]);
-        mkdir(dir, 0755);
+    /* The pre-rename root, so a card whose move did not happen still
+     * plays. Nothing points at it and the manager does not show it. */
+    if (s->model_count < MAX_MODELS) {
+        snprintf(dir, sizeof(dir), "%s/models", s->module_dir);
+        const int n = scan_directory(dir, &s->model_names[s->model_count],
+                                     &s->model_paths[s->model_count],
+                                     MAX_MODELS - s->model_count, is_model_file);
+        for (int k = 0; k < n; k++)
+            snprintf(s->model_dir[s->model_count + k],
+                     sizeof(s->model_dir[0]), "%s", "amps");
+        s->model_count += n;
     }
 }
 
@@ -666,7 +716,8 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     s->pan_b = 1.0f;
 
     report_install(s);
-    ensure_model_dirs(s->module_dir);
+    migrate_asset_dirs(s->module_dir);
+    ensure_asset_dirs(s->module_dir);
     scan_lists(s);
 
     s->worker_stop = 0;
@@ -1228,16 +1279,17 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * from the one scan so they cannot disagree. */
     if (strcmp(key, "model_list") == 0)
         return emit_options(buf, buf_len, s->model_names, s->model_count);
-    /* PARALLEL TO model_list, by index. A name carrying its folder would
-     * have been one read instead of two and is worse: the name is what
+    /* PARALLEL TO model_list, by index, and carrying the folder NAME so
+     * the UI matches on the thing the user typed rather than on an index
+     * into a copy of a table. Not folded into the name: the name is what
      * the picker prints, and "dist/Big Muff" in a cell that holds six
      * characters prints "dist/". */
-    if (strcmp(key, "model_cats") == 0) {
+    if (strcmp(key, "model_dirs") == 0) {
         int w = 0;
         w += snprintf(buf + w, buf_len - w, "[");
-        for (int i = 0; i < s->model_count && w < buf_len - 8; i++)
-            w += snprintf(buf + w, buf_len - w, "%s%d", i ? "," : "",
-                          s->model_cat[i]);
+        for (int i = 0; i < s->model_count && w < buf_len - 32; i++)
+            w += snprintf(buf + w, buf_len - w, "%s\"%s\"", i ? "," : "",
+                          s->model_dir[i]);
         w += snprintf(buf + w, buf_len - w, "]");
         return w;
     }

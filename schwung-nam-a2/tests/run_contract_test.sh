@@ -20,9 +20,12 @@ g++ -std=c++20 -O1 -w -o /tmp/a2c_dump_contract \
 
 FIX=$(mktemp -d)
 trap 'rm -rf "$FIX"' EXIT
-mkdir -p "$FIX/models" "$FIX/cabs"
-[ -d src/models ] && cp src/models/* "$FIX/models/" 2>/dev/null || true
-[ -d src/cabs ]   && cp src/cabs/*   "$FIX/cabs/"   2>/dev/null || true
+# The same seven the plugin makes and build.sh stages. Listed once here;
+# the check below is what keeps this in step with the other two lists.
+for d in amps od dist fuzz boost cabs reverbs; do
+    mkdir -p "$FIX/$d"
+    [ -d "src/$d" ] && cp "src/$d"/* "$FIX/$d/" 2>/dev/null || true
+done
 
 echo "--- running ---"
 /tmp/a2c_dump_contract "$FIX" > /tmp/a2c_contract.txt
@@ -208,44 +211,47 @@ for k, v in want.items():
 if not fail:
     print("ok   a fresh cab's mic is at the capture, character off")
 
-# A SUBFOLDER OF models/ IS THE CATEGORY, and the manager only offers a
-# folder it can see - so the module creates them, and module.json declares
-# them for the manager to render. Those two lists must agree, or a folder
-# is uploadable into and never read, or scanned and never offered.
+# THE FOLDER NAME IS THE CATEGORY NAME, and three lists have to say the
+# same seven words: the plugin's table (which creates and scans them),
+# module.json (which is what the web manager renders), and the UI's
+# categories. A folder on one side only is either uploadable into and
+# never read, or scanned and never offered - and neither says anything on
+# the device.
 import os
 mj = json.load(open("src/c/module.json"))
 declared = set(f["path"] for f in mj["assets"].get("folders", []))
-made = set()
 FIXDIR = os.environ["FIXDIR"]
-for root, dirs, files in os.walk(os.path.join(FIXDIR, "models")):
-    rel = os.path.relpath(root, FIXDIR)
-    made.add(rel.replace(os.sep, "/"))
-for d2 in ("cabs", "irs"):
-    if os.path.isdir(os.path.join(FIXDIR, d2)):
-        made.add(d2)
-missing = made - declared
-if missing:
-    print("FAIL: the module creates %s but module.json declares no folder for it"
-          % sorted(missing)); fail = 1
-unmade = declared - made
-if unmade:
-    print("FAIL: module.json declares %s but nothing creates it" % sorted(unmade))
-    fail = 1
+made = set(d for d in os.listdir(FIXDIR)
+           if os.path.isdir(os.path.join(FIXDIR, d)))
+if made != declared:
+    print("FAIL: the module creates %s, module.json declares %s"
+          % (sorted(made), sorted(declared))); fail = 1
+
+ui = open("src/c/ui_chain.js").read()
+ui_dirs = set(re.findall(r"folder: '([a-z]+)'", ui))
+if ui_dirs != declared:
+    print("FAIL: ui_chain.js points at %s, the module makes %s"
+          % (sorted(ui_dirs), sorted(declared))); fail = 1
 if not fail:
-    print("ok   model folders: %d, created and declared alike" % len(declared))
+    print("ok   asset folders: %d, named the same in all three" % len(declared))
 
 # Served per model, parallel to the names, so the UI can slice the list.
-cats = section("model_cats")
+cats = section("model_dirs")
 names = next(x for x in cp if x["key"] == "b1_model")["options"]
 if cats is None:
     print("FAIL: model_cats is not served"); fail = 1
 else:
     arr = json.loads(cats)
     if len(arr) != len(names):
-        print("FAIL: model_cats has %d entries for %d models"
+        print("FAIL: model_dirs has %d entries for %d models"
               % (len(arr), len(names))); fail = 1
     else:
-        print("ok   model_cats: %d, one per model" % len(arr))
+        bad = [x for x in arr if x not in declared]
+        if bad:
+            print("FAIL: model_dirs names %s, which is no declared folder"
+                  % sorted(set(bad))); fail = 1
+        else:
+            print("ok   model_dirs: %d, one per model, all declared" % len(arr))
 
 print("FAILED" if fail else "PASS")
 sys.exit(1 if fail else 0)

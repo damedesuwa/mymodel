@@ -2,7 +2,7 @@
   "id": "nam-a2c",
   "name": "Nam A2c",
   "abbrev": "A2C",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Sixteen blocks in two rows - a main chain and a parallel one, panned and merged where you choose. NAM captures, cab IRs with mic placement, and 50 modelled pedals.",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",
@@ -17,68 +17,68 @@
       ".ir"
     ],
     "allowFolders": true,
-    "description": "NAM captures by category (a subfolder of models/ is the category), cabinet IRs, and reverb IRs",
+    "description": "Every folder is named after the list it feeds",
     "hint": "Find amp models at",
     "hint_url": "https://tone3000.com",
     "hint_url_label": "TONE3000",
     "folders": [
       {
-        "path": "models",
-        "label": "Amp captures",
+        "path": "amps",
+        "label": "Amp captures (.nam)",
         "extensions": [
           ".nam"
         ],
-        "description": "Loose .nam files here are offered under Amp"
+        "description": "Shown in the Amp list"
       },
       {
-        "path": "models/od",
-        "label": "Overdrive captures",
+        "path": "od",
+        "label": "Overdrive captures (.nam)",
         "extensions": [
           ".nam"
         ],
-        "description": "Offered inside the OD list, beside the modelled pedals"
+        "description": "Shown in the OD list, after the modelled pedals"
       },
       {
-        "path": "models/dist",
-        "label": "Distortion captures",
+        "path": "dist",
+        "label": "Distortion captures (.nam)",
         "extensions": [
           ".nam"
         ],
-        "description": "Offered inside the Dist list"
+        "description": "Shown in the Dist list"
       },
       {
-        "path": "models/fuzz",
-        "label": "Fuzz captures",
+        "path": "fuzz",
+        "label": "Fuzz captures (.nam)",
         "extensions": [
           ".nam"
         ],
-        "description": "Offered inside the Fuzz list"
+        "description": "Shown in the Fuzz list"
       },
       {
-        "path": "models/boost",
-        "label": "Boost captures",
+        "path": "boost",
+        "label": "Boost captures (.nam)",
         "extensions": [
           ".nam"
         ],
-        "description": "Offered inside the Boost list"
+        "description": "Shown in the Boost list"
       },
       {
         "path": "cabs",
-        "label": "Cabinet IRs",
+        "label": "Cabinet IRs (.wav)",
         "extensions": [
           ".wav",
           ".ir"
         ],
-        "description": "Mic placement is applied on top of whichever is loaded"
+        "description": "Shown in the Cab list. Mic placement is applied on top"
       },
       {
-        "path": "irs",
-        "label": "Reverb IRs",
+        "path": "reverbs",
+        "label": "Reverb IRs (.wav)",
         "extensions": [
           ".wav",
           ".ir"
         ],
-        "description": "Rooms, halls, plates and springs - offered inside the Time list"
+        "description": "Rooms, halls, plates, springs. Shown in the Reverb list"
       }
     ]
   },

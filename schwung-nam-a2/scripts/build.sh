@@ -355,19 +355,19 @@ chmod +x "dist/$MODULE_ID/$MODULE_ID.so"
 # lands the expected directory layout. Existing files are preserved on
 # extract; tar only overwrites same-named files (these dirs are empty by
 # default - no models/cabs are bundled).
-mkdir -p "dist/$MODULE_ID/models" "dist/$MODULE_ID/cabs"
-
-# find, not a glob: src/models and src/cabs normally hold only a .gitkeep
-# placeholder (dotfile) so any bundled real models/cabs stay opt-in, and a
-# bare `src/models/*` glob doesn't match dotfiles - it matches nothing, so
-# on a .gitkeep-only tree the literal unexpanded pattern was passed to cp
-# and it failed with "cannot stat 'src/models/*'".
-if [ -d "src/models" ]; then
-    find src/models -maxdepth 1 -type f ! -name '.gitkeep' -exec cp {} "dist/$MODULE_ID/models/" \;
-fi
-if [ -d "src/cabs" ]; then
-    find src/cabs -maxdepth 1 -type f ! -name '.gitkeep' -exec cp {} "dist/$MODULE_ID/cabs/" \;
-fi
+# THE FOLDER NAME IS THE CATEGORY NAME ON SCREEN, so the list of them
+# lives in one place and this loop copies whatever is in each. `irs` and
+# `models` were what these were called, and neither said what went in it.
+#
+# find, not a glob: these normally hold only a .gitkeep, and a bare
+# `src/<d>/*` doesn't match dotfiles - it matches nothing, so the glob is
+# passed through literally and cp fails with "cannot stat".
+for d in amps od dist fuzz boost cabs reverbs; do
+    mkdir -p "dist/$MODULE_ID/$d"
+    [ -d "src/$d" ] || continue
+    find "src/$d" -maxdepth 1 -type f ! -name '.gitkeep' \
+        -exec cp {} "dist/$MODULE_ID/$d/" \;
+done
 
 # Create tarball for release
 cd dist

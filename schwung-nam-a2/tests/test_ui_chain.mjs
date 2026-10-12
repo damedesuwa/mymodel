@@ -27,7 +27,7 @@ const params = {
     /* Two in models/ (Amp) and two in a category folder, which is what
      * the plugin's scan produces: root first, then each folder. */
     model_list: JSON.stringify(['Recto', 'Plexi', 'My RAT', 'My Muff']),
-    model_cats: JSON.stringify([0, 0, 2, 3]),        /* amp amp dist fuzz */
+    model_dirs: JSON.stringify(['amps','amps','dist','fuzz']),
     cab_list: JSON.stringify(['TF MESA']),
     ir_list: JSON.stringify(['Big Hall', 'Plate A']),
     /* THE PEDAL TABLE COMES FROM THE PLUGIN, not from a copy written out
@@ -215,14 +215,16 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
         for (let i = 0; i < n; i++) { advance(50); ui.tick(); }
     };
     /* Off NAM Cab OD Dist Fuzz Boost Dyn Filter Mod Time Pitch */
-    const CAT = { OFF:0, NAM:1, CAB:2, OD:3, DIST:4, FUZZ:5, BOOST:6,
-                  DYN:7, FILTER:8, MOD:9, TIME:10, PITCH:11 };
-    const gotoCat = (c) => { turn(K1, -1, 12); turn(K1, +1, c); };
+    /* Delay and Reverb are two lists now, so `reverbs/` lands somewhere
+     * with the same name on screen. */
+    const CAT = { OFF:0, AMP:1, CAB:2, OD:3, DIST:4, FUZZ:5, BOOST:6,
+                  DYN:7, FILTER:8, MOD:9, DELAY:10, REVERB:11, PITCH:12 };
+    const gotoCat = (c) => { turn(K1, -1, 16); turn(K1, +1, c); };
 
     /* The sensitivity itself, which is the thing that was wrong twice:
      * four detents must move NOTHING, and the fifth must move exactly
      * one. */
-    turn(K1, -1, 12);                                /* park on Off */
+    turn(K1, -1, 16);                                /* park on Off */
     writes.length = 0;
     for (let i = 0; i < STEP - 1; i++) ui.onMidiMessageInternal([0xb0, K1, 1]);
     ok(writes.length === 0, 'knob: a part turn does not make a step');
@@ -233,7 +235,7 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
      * ticks - and at three ticks a step that was three items per message
      * on a fifty-entry list. The cap is what stops a real turn crossing
      * the whole list faster than it can be read. */
-    turn(K1, -1, 12);                                /* park on Off */
+    turn(K1, -1, 16);                                /* park on Off */
     writes.length = 0;
     ui.onMidiMessageInternal([0xb0, K1, 20]);        /* twenty ticks at once */
     ok(params['b4_type'] === '0',
@@ -312,8 +314,8 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     /* MODE RE-LABELS ITS NEIGHBOUR. The delay's Time is milliseconds until
      * Mode says Note, and then the same encoder is a division - which is
      * only safe because the alternate travels in the plugin's own table. */
-    gotoCat(CAT.TIME);
-    ok(params['b4_fx'] === '30', 'time: starts at the Digital Delay');
+    gotoCat(CAT.DELAY);
+    ok(params['b4_fx'] === '30', 'delay: starts at the Digital Delay');
     params['b4_p1'] = '0.5'; params['b4_p4'] = '0';
     ui.init();
     drawn.length = 0; ui.tick();
@@ -339,7 +341,7 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     /* The count is not pinned: a category grows by however many captures
      * are on the card, and a test that spelled it out would fail on a
      * device with files rather than on a bug. */
-    ok(drawn.some(t => /^Digital Dly {2}Time 1\/\d+$/.test(String(t))),
+    ok(drawn.some(t => /^Digital Dly {2}Delay 1\/\d+$/.test(String(t))),
        'footer: names the pedal, its family and its place in it');
 
     /* EVERY CATEGORY HAS ITS OWN PAD COLOUR, and the two brightnesses are
@@ -518,11 +520,11 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ui.onMidiMessageInternal([0x90, 68, 127]);
     advance(1000); ui.tick();
     ui.onMidiMessageInternal([0x80, 68, 0]);
-    turn(K1, +1, CAT.TIME);
+    turn(K1, +1, CAT.REVERB);
     writes.length = 0;
     turn(K2, +1, 20);                       /* past the delays and verbs */
     ok(writes.some(([k, v]) => k === 'b1_type' && v === '4'),
-       'ir: walking off the end of Time reaches an IR');
+       'ir: walking off the end of Reverb reaches an IR');
     ok(writes.some(([k, v]) => k === 'b1_ir' && v === '0'),
        'ir: and picks it out of irs/, by index');
     drawnAt.length = 0; repaint();

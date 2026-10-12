@@ -182,24 +182,34 @@ const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3, TYPE_IR = 4;
 const CATS = [
     { name: 'Off',    type: TYPE_OFF, led: [0, 0] },
     { name: 'Amp',    type: TYPE_NAM, led: [1, 65],       /* red     */
-      items: [], nam_cat: 0 },
-    { name: 'Cab',    type: TYPE_CAB, led: [5, 73] },     /* brown   */
+      items: [], folder: 'amps', from: 'nam' },
+    /* The Cab picker is its own knob rather than the shared item list -
+     * a cabinet is not something you walk past on the way to a pedal -
+     * so `from: 'cab'` only records which folder feeds it. */
+    { name: 'Cab',    type: TYPE_CAB, led: [5, 73],       /* brown   */
+      folder: 'cabs', from: 'cab' },
     { name: 'OD',     type: TYPE_FX,  led: [8, 79],       /* yellow  */
-      items: [0, 1, 2, 3, 4, 40, 41], nam_cat: 1 },
+      items: [0, 1, 2, 3, 4, 40, 41], folder: 'od', from: 'nam' },
     { name: 'Dist',   type: TYPE_FX,  led: [3, 69],       /* orange  */
-      items: [5, 6, 7, 42, 8, 9], nam_cat: 2 },
+      items: [5, 6, 7, 42, 8, 9], folder: 'dist', from: 'nam' },
     { name: 'Fuzz',   type: TYPE_FX,  led: [26, 115],     /* magenta */
-      items: [10, 11, 43], nam_cat: 3 },
+      items: [10, 11, 43], folder: 'fuzz', from: 'nam' },
     { name: 'Boost',  type: TYPE_FX,  led: [122, 118],    /* white   */
-      items: [12, 44], nam_cat: 4 },
+      items: [12, 44], folder: 'boost', from: 'nam' },
     { name: 'Dyn',    type: TYPE_FX,  led: [15, 93],      /* teal    */
       items: [13, 14, 15, 16, 17, 18] },
     { name: 'Filter', type: TYPE_FX,  led: [11, 85],      /* green   */
       items: [19, 47, 20, 21, 22] },
     { name: 'Mod',    type: TYPE_FX,  led: [16, 95],      /* azure   */
       items: [23, 46, 24, 25, 26, 45, 27, 28, 29] },
-    { name: 'Time',   type: TYPE_FX,  led: [22, 107],     /* purple  */
-      items: [30, 31, 32, 33, 49, 34, 48, 35], ir_items: true },
+    /* DELAY AND REVERB ARE TWO LISTS, because `reverbs/` on the card has
+     * to land somewhere with the same name on screen - and eight items
+     * behind one knob, half of which are the wrong half, was the walk
+     * nobody wanted anyway. */
+    { name: 'Delay',  type: TYPE_FX,  led: [22, 107],     /* purple  */
+      items: [30, 31, 32, 33] },
+    { name: 'Reverb', type: TYPE_FX,  led: [17, 97],      /* blue    */
+      items: [34, 48, 35, 49], folder: 'reverbs', from: 'ir' },
     { name: 'Pitch',  type: TYPE_FX,  led: [23, 109],     /* pink    */
       items: [36, 37, 38, 39] },
 ];
@@ -253,24 +263,27 @@ function catOfBlock(b) {
     /* A capture in no folder we know, or an id from a newer build: Amp
      * for a capture, the first pedal family for anything else. Never a
      * category whose TYPE disagrees with the block's. */
-    return (t === TYPE_NAM) ? 1 : (t === TYPE_IR) ? 10 : 3;
+    return (t === TYPE_NAM) ? 1 : (t === TYPE_IR) ? 11 : 3;
 }
 
 /* Rebuilt whenever the model list is read, which is once. A category's
  * captures go AFTER its pedals: the modelled ones are the same on every
  * device and the captures are yours, so the list reads the same way on
  * any two boards up to the point where it starts being personal. */
+/* Matched on the FOLDER NAME the plugin reports, not on an index into a
+ * copy of its table - the two lists would have had to be kept in step by
+ * hand, and the failure is a capture that silently lands in the wrong
+ * picker. */
 function attachNamItems() {
-    const cats = st.names.modelCat || [];
+    const dirs = st.names.modelDir || [];
     for (const c of CATS) {
         c.items = (c.items || []).filter(i => itemType(i) === TYPE_FX);
-        if (c.nam_cat !== undefined)
-            for (let m = 0; m < cats.length; m++)
-                if (cats[m] === c.nam_cat) c.items.push(namItem(m));
-        /* REVERB CAPTURES land in Time, where the modelled reverbs
-         * already are. Same rule as the pedal captures: after the
-         * built-ins, because those are the same on every device. */
-        if (c.ir_items)
+        if (c.from === 'nam')
+            for (let m = 0; m < dirs.length; m++)
+                if (dirs[m] === c.folder) c.items.push(namItem(m));
+        /* Yours go AFTER the built-ins: those are the same on every
+         * device, so two boards read alike up to where it gets personal. */
+        if (c.from === 'ir')
             for (let i = 0; i < (st.names.ir || []).length; i++)
                 c.items.push(irItem(i));
     }
@@ -565,7 +578,7 @@ const st = {
     peak: 0,                    /* out level, %% of full scale - see drawMeter */
     blockCpu: new Array(NUM_BLOCKS).fill(0),
     val: {},                    /* "b3_drive" -> number */
-    names: { model: [], cab: [], ir: [], fx: [], modelCat: [] },
+    names: { model: [], cab: [], ir: [], fx: [], modelDir: [] },
     specs: [],                  /* fx_specs, read once - see specKnob */
     build: '?',
     rot: 0,
@@ -575,10 +588,10 @@ const st = {
  * which cannot happen while this screen is up. */
 function loadLists() {
     try {
-        const j = getp('model_cats');
+        const j = getp('model_dirs');
         if (j !== null && j !== '') {
             const a = JSON.parse(j);
-            if (Array.isArray(a)) st.names.modelCat = a;
+            if (Array.isArray(a)) st.names.modelDir = a;
         }
     } catch (e) { }
     for (const k of ['model', 'cab', 'ir', 'fx']) {
