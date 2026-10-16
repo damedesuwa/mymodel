@@ -463,7 +463,7 @@ static inline float fx_bq_run(const fx_bq_t *c, fx_bqs_t *s, float x) {
  * identical and pays nothing.
  */
 #define MIC_DELAY_MAX 128        /* 2.9 ms - covers +60 cm with room */
-#define MIC_PARAMS    4
+#define MIC_PARAMS    5
 
 enum { MIC_OFF = 0, MIC_D57, MIC_D421, MIC_RIBBON, MIC_COND, MIC_KINDS };
 
@@ -471,9 +471,10 @@ typedef struct {
     float p[MIC_PARAMS];        /* the encoders, 0..1, as the wire has them */
     int   active;               /* anything off its default? */
 
-    fx_bq_t  pos_hi, pos_body, prox, air, chr_a, chr_b;
+    fx_bq_t  pos_hi, pos_body, prox, air, chr_a, chr_b, damp_lo, damp_hi;
     fx_bqs_t s_pos_hi, s_pos_body, s_prox, s_air, s_chr_a, s_chr_b;
-    int   use_pos, use_dist, use_chr;
+    fx_bqs_t s_damp_lo, s_damp_hi;
+    int   use_pos, use_dist, use_chr, use_damp;
     float gain;                 /* level, and polarity, in one multiply */
 
     float dly[MIC_DELAY_MAX];
@@ -489,6 +490,7 @@ static void mic_defaults(mic_t *m) {
     m->p[1] = 0.5f;             /* Dist  - where it was captured */
     m->p[2] = 0.0f;             /* Mic   - Off                   */
     m->p[3] = 0.0f;             /* Phase - normal                */
+    m->p[4] = 0.0f;             /* Damp  - tight, as the IR sits */
 }
 
 /* Centimetres, signed, from wherever the capture was taken.
@@ -510,7 +512,31 @@ static void mic_update(mic_t *m) {
     m->use_pos  = (pos > 0.0005f);
     m->use_dist = (cm > 0.05f || cm < -0.05f);
     m->use_chr  = (knd > MIC_OFF && knd < MIC_KINDS);
-    m->active   = (m->use_pos || m->use_dist || m->use_chr || inv);
+
+    /* WHY AN IR SOUNDS STIFFER THAN THE CAB IT CAME FROM.
+     *
+     * A speaker is not a flat load. Its impedance PEAKS at the cabinet's
+     * resonance - around 95 Hz for a closed 4x12 - and climbs again above
+     * a kilohertz with the voice coil's inductance. A valve output stage
+     * has a high output impedance and poor damping, so it delivers MORE
+     * voltage exactly where the load fights it, and the rig gets a bump
+     * at both ends. A solid state amp, or an IR played through an FRFR,
+     * does not.
+     *
+     * The IR cannot contain this: it was measured through ONE amp, and
+     * whatever that amp's damping was is baked in as a constant. So this
+     * is the knob for which power stage is driving it - 0 is tight, and
+     * up is a valve amp letting the cabinet ring.
+     */
+    const float dmp = m->p[4];
+    m->use_damp = (dmp > 0.001f);
+    if (m->use_damp) {
+        fx_bq_peak (&m->damp_lo,   95.0f, 1.2f, 5.0f * dmp);
+        fx_bq_shelf(&m->damp_hi, 3000.0f, 2.5f * dmp, 1);
+    }
+
+    m->active   = (m->use_pos || m->use_dist || m->use_chr ||
+                   m->use_damp || inv);
 
     if (m->use_pos) {
         /* Measured spread between a 57 on the cap and the same mic at the
@@ -582,6 +608,8 @@ static void mic_reset_state(mic_t *m) {
     memset(&m->s_air, 0, sizeof(m->s_air));
     memset(&m->s_chr_a, 0, sizeof(m->s_chr_a));
     memset(&m->s_chr_b, 0, sizeof(m->s_chr_b));
+    memset(&m->s_damp_lo, 0, sizeof(m->s_damp_lo));
+    memset(&m->s_damp_hi, 0, sizeof(m->s_damp_hi));
     memset(m->dly, 0, sizeof(m->dly));
     m->dly_w = 0;
 }
@@ -603,6 +631,11 @@ static void mic_process(mic_t *m, float *audio, int n) {
         for (int i = 0; i < n; i++) {
             float x = fx_bq_run(&m->chr_a, &m->s_chr_a, audio[i]);
             audio[i] = fx_bq_run(&m->chr_b, &m->s_chr_b, x);
+        }
+    if (m->use_damp)
+        for (int i = 0; i < n; i++) {
+            float x = fx_bq_run(&m->damp_lo, &m->s_damp_lo, audio[i]);
+            audio[i] = fx_bq_run(&m->damp_hi, &m->s_damp_hi, x);
         }
 
     /* FRACTIONAL, because the whole value of this is the comb it makes

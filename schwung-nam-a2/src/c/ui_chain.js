@@ -182,7 +182,7 @@ const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3, TYPE_IR = 4;
 const CATS = [
     { name: 'Off',    type: TYPE_OFF, led: [0, 0] },
     { name: 'Amp',    type: TYPE_NAM, led: [1, 65],       /* red     */
-      items: [], folder: 'amps', from: 'nam', tail: [50] },
+      items: [], folder: 'amps', from: 'nam', tail: [50, 51] },
     /* The Cab picker is its own knob rather than the shared item list -
      * a cabinet is not something you walk past on the way to a pedal -
      * so `from: 'cab'` only records which folder feeds it. */
@@ -419,7 +419,11 @@ function knobsFor(type, fxId) {
                   kn: { n: 'Mic', u: '', lo: 0, hi: 5, c: 2,
                         o: 'Off|57|421|Ribbn|Cond' } },
                 { key: 'p4', label: 'Phase', kind: 'spec',
-                  kn: { n: 'Phase', u: '', lo: 0, hi: 2, c: 2, o: 'Norm|Inv' } }];
+                  kn: { n: 'Phase', u: '', lo: 0, hi: 2, c: 2, o: 'Norm|Inv' } },
+                /* Which POWER STAGE is driving the cab, which an IR
+                 * cannot contain - it was measured through one amp. */
+                { key: 'p5', label: 'Damp', kind: 'spec',
+                  kn: { n: 'Damp', u: '%', lo: 0, hi: 100, c: 0 } }];
     if (type === TYPE_IR)
         /* A ROOM, NOT A SPEAKER: the dry survives, so there is a Mix;
          * and Len is a CPU knob with a time label - ~0.09 us a tap

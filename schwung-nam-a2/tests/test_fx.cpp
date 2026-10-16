@@ -832,6 +832,192 @@ int main(int argc, char **argv) {
         }
     }
 
+
+    /* ------------------------------------------------------------------
+     * THE POWER STAGE'S MEMORY.
+     *
+     * A .nam is a static function, so everything here is something it
+     * CANNOT have rather than something it does badly. Each claim is
+     * measured on the axis it is about: sag over TIME, bias over LEVEL.
+     * ------------------------------------------------------------------ */
+    {
+        for (int b = 1; b <= 8; b++) {
+            char k[16];
+            snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0");
+            snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
+        }
+        api->set_param(in, "merge", "0");
+        api->set_param(in, "pan_a", "0.0");
+        api->set_param(in, "pan_b", "0.0");
+        api->set_param(in, "b1_type", "3");
+        api->set_param(in, "b1_fx", "51");            /* Power Amp */
+        int16_t a[128 * 2];
+
+        /* RMS of one window of a held note, `skip` blocks after it starts.
+         * Sag is a shape in time, so the only honest measurement of it is
+         * two windows of the SAME note. */
+        auto note = [&](double amp, const char *sag, const char *bloom,
+                        const char *bias, int skip, int win) {
+            api->set_param(in, "b1_p1", sag);
+            api->set_param(in, "b1_p2", bloom);
+            api->set_param(in, "b1_p3", bias);
+            for (int blk = 0; blk < 300; blk++) {     /* let it recover */
+                memset(a, 0, sizeof(a));
+                api->process_block(in, a, 128);
+            }
+            double e = 0; int kept = 0;
+            for (int blk = 0; blk < skip + win; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    double t = (blk * 128.0 + i) / 44100.0;
+                    a[i * 2] = a[i * 2 + 1] =
+                        (int16_t)(amp * sin(2 * M_PI * 220.0 * t) * 20000);
+                }
+                api->process_block(in, a, 128);
+                if (blk < skip) continue;
+                for (int i = 0; i < 128; i++) {
+                    double v = a[i * 2] / 32768.0;
+                    e += v * v;
+                }
+                kept++;
+            }
+            return 20.0 * log10(sqrt(e / (kept * 128)) + 1e-12);
+        };
+
+        /* 1. A HELD LOUD NOTE DROOPS. Two windows of ONE note: its first
+         * 17 ms against 200 ms in.
+         *
+         * From the ONSET, not from 30 ms in. The rail takes ~45 ms to
+         * fall, so a window starting at 30 ms has already lost half the
+         * droop it is there to measure - which read as the sag being
+         * half the size it is. */
+        const double on_0  = note(0.6, "0.0", "0.5", "0.0", 0, 6);
+        const double lt_0  = note(0.6, "0.0", "0.5", "0.0", 70, 8);
+        const double on_1  = note(0.6, "1.0", "0.5", "0.0", 0, 6);
+        const double lt_1  = note(0.6, "1.0", "0.5", "0.0", 70, 8);
+        printf("\npa: held note  sag 0 %+.2f dB over 200ms,  sag 10 %+.2f dB\n",
+               lt_0 - on_0, lt_1 - on_1);
+        if (fabs(lt_0 - on_0) > 0.5) {
+            printf("   <-- it droops with Sag at zero\n"); fails++;
+        }
+        if (!(lt_1 - on_1 < -2.5)) {
+            printf("   <-- a held note does not sag\n"); fails++;
+        }
+
+        /* 2. IT IS LEVEL DEPENDENT. A quiet note must barely move, or
+         * this is a compressor wearing an amp's name. */
+        const double q_on = note(0.05, "1.0", "0.5", "0.0", 0, 6);
+        const double q_lt = note(0.05, "1.0", "0.5", "0.0", 70, 8);
+        printf("pa: quiet note sag 10 %+.2f dB over the same 200ms\n",
+               q_lt - q_on);
+        if (!(fabs(q_lt - q_on) < fabs(lt_1 - on_1) * 0.4)) {
+            printf("   <-- it ducks quiet playing as hard as loud\n"); fails++;
+        }
+
+        /* 3. BLOOM IS THE RECOVERY, so a long one is still down later. */
+        const double fast = note(0.6, "1.0", "0.0", "0.0", 160, 8);
+        const double slow = note(0.6, "1.0", "1.0", "0.0", 160, 8);
+        printf("pa: at 460ms   bloom 50ms %+.2f dB  bloom 600ms %+.2f dB\n",
+               fast, slow);
+        if (!(slow < fast - 0.3)) {
+            printf("   <-- Bloom does not change the recovery\n"); fails++;
+        }
+
+        /* 4. BIAS ADDS HARMONICS ON A LOUD NOTE AND NOT ON A QUIET ONE.
+         * Measured as the energy that is NOT at the fundamental. */
+        auto thd = [&](double amp, const char *bias) {
+            api->set_param(in, "b1_p1", "0.0");
+            api->set_param(in, "b1_p3", bias);
+            for (int blk = 0; blk < 200; blk++) {
+                memset(a, 0, sizeof(a));
+                api->process_block(in, a, 128);
+            }
+            double re = 0, im = 0, tot = 0; long cnt = 0;
+            for (int blk = 0; blk < 120; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    double t = (blk * 128.0 + i) / 44100.0;
+                    a[i * 2] = a[i * 2 + 1] =
+                        (int16_t)(amp * sin(2 * M_PI * 110.0 * t) * 20000);
+                }
+                api->process_block(in, a, 128);
+                if (blk < 40) continue;
+                for (int i = 0; i < 128; i++) {
+                    double t = (blk * 128.0 + i) / 44100.0;
+                    double v = a[i * 2] / 32768.0;
+                    re += v * cos(2 * M_PI * 110.0 * t);
+                    im += v * sin(2 * M_PI * 110.0 * t);
+                    tot += v * v; cnt++;
+                }
+            }
+            double fund = 2.0 * sqrt(re * re + im * im) / cnt;
+            double rms  = sqrt(tot / cnt);
+            double h    = rms * rms - fund * fund / 2.0;
+            return 100.0 * sqrt(h > 0 ? h : 0) / (rms + 1e-12);
+        };
+        const double d_loud_0 = thd(0.6,  "0.0"), d_loud_1 = thd(0.6,  "1.0");
+        const double d_soft_1 = thd(0.05, "1.0");
+        printf("pa: non-fundamental  loud bias 0 %.1f%% -> 10 %.1f%%   "
+               "quiet bias 10 %.1f%%\n", d_loud_0, d_loud_1, d_soft_1);
+        if (!(d_loud_1 > d_loud_0 + 3.0)) {
+            printf("   <-- Bias adds nothing on a hard note\n"); fails++;
+        }
+        if (!(d_soft_1 < d_loud_1 * 0.5)) {
+            printf("   <-- Bias spits on quiet playing too\n"); fails++;
+        }
+        api->set_param(in, "b1_p1", "0.0");
+        api->set_param(in, "b1_p3", "0.0");
+    }
+
+    /* ------------------------------------------------------------------
+     * SPEAKER DAMPING, on the cab.
+     * ------------------------------------------------------------------ */
+    {
+        char list[1024] = {0};
+        api->get_param(in, "cab_list", list, sizeof(list));
+        if (!strstr(list, "(none)")) {
+            for (int b = 1; b <= 8; b++) {
+                char k[16];
+                snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0");
+            }
+            api->set_param(in, "b1_type", "2");       /* BLK_CAB */
+            for (int i = 0; i < 60; i++) { struct timespec t = {0, 20000000L}; nanosleep(&t, NULL); }
+            int16_t a[128 * 2];
+            auto at = [&](double hz, const char *damp) {
+                api->set_param(in, "b1_p5", damp);
+                double e = 0;
+                for (int blk = 0; blk < 180; blk++) {
+                    for (int i = 0; i < 128; i++) {
+                        double t = (blk * 128.0 + i) / 44100.0;
+                        a[i * 2] = a[i * 2 + 1] =
+                            (int16_t)(0.4 * sin(2 * M_PI * hz * t) * 20000);
+                    }
+                    api->process_block(in, a, 128);
+                    if (blk < 80) continue;
+                    for (int i = 0; i < 128; i++) {
+                        double v = a[i * 2] / 32768.0;
+                        e += v * v;
+                    }
+                }
+                return 20.0 * log10(sqrt(e / (100 * 128)) + 1e-12);
+            };
+            const double res  = at(95,   "1.0") - at(95,   "0.0");
+            const double mid  = at(500,  "1.0") - at(500,  "0.0");
+            const double top  = at(5000, "1.0") - at(5000, "0.0");
+            api->set_param(in, "b1_p5", "0.0");
+            printf("\ndamp: 0->10  %+.1f dB at the 95Hz resonance, "
+                   "%+.1f at 500Hz, %+.1f at 5k\n", res, mid, top);
+            if (!(res > 3.0)) {
+                printf("   <-- the cabinet resonance does not come up\n"); fails++;
+            }
+            if (fabs(mid) > 1.5) {
+                printf("   <-- it is a volume knob, not an impedance curve\n");
+                fails++;
+            }
+            if (!(top > 1.0)) {
+                printf("   <-- the voice coil rise is missing\n"); fails++;
+            }
+        }
+    }
+
     api->destroy_instance(in);
     printf("\n%s\n", fails ? "FAILED" : "PASS");
     return fails ? 1 : 0;

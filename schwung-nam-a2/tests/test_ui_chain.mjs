@@ -524,10 +524,12 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     turn(K1, +1, CAT.AMP);
     ok(writes.some(([k, v]) => k === 'b1_type' && v === '1'),
        'stack: Amp still lands on a capture, not on the stack');
+    /* EXACTLY past the two captures, not to the end: the tail holds two
+     * now, and a walk that runs off it lands on the other one. */
     writes.length = 0;
-    turn(K2, +1, 6);                                 /* past both captures */
+    turn(K2, +1, 2);
     ok(writes.some(([k, v]) => k === 'b1_fx' && v === '50'),
-       'stack: and it is at the end of the Amp list');
+       'stack: and it is after the captures in the Amp list');
     drawnAt.length = 0; repaint();
     ok(drawnAt.some(d => d[2] === 'Bass'), 'stack: its page names Bass');
     ui.onMidiMessageInternal([0xb0, K5, 1]);
@@ -535,6 +537,22 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     drawnAt.length = 0; repaint();
     ok(drawnAt.some(d => d[2] === 'Mid'), 'stack: and Mid');
     ok(drawnAt.some(d => /^Trebl/.test(d[2])), 'stack: and Treble');
+
+    /* THE POWER STAGE IS THE OTHER TAIL ENTRY. What a capture cannot
+     * have: a .nam is a static function and these are its memory. */
+    writes.length = 0;
+    turn(K2, +1, 1);
+    ok(writes.some(([k, v]) => k === 'b1_fx' && v === '51'),
+       'pa: the Power Amp is next to the Tone Stack');
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'Sag'), 'pa: its page names Sag');
+    ui.onMidiMessageInternal([0xb0, K4, 1]);
+    ui.onMidiMessageInternal([0xb0, K5, 1]);
+    drawnAt.length = 0; repaint();
+    for (const want of ['Bloom', 'Bias'])
+        ok(drawnAt.some(d => d[2] === want), 'pa: and ' + want);
+    /* Bloom is a TIME, so it reads as one. */
+    ok(drawnAt.some(d => /ms$/.test(d[2])), 'pa: Bloom reads in milliseconds');
 
     /* RE-OPENING MUST NOT GROW THE LIST. A tail entry that survived the
      * rebuild was appended again on every init, and since items[0] is
@@ -605,6 +623,10 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     drawnAt.length = 0; repaint();
     for (const want of ['Mic', 'Phase'])
         ok(drawnAt.some(d => d[2] === want), 'mic: the cab page names ' + want);
+    /* WHICH POWER STAGE IS DRIVING THE CAB, which an IR cannot carry. */
+    ui.onMidiMessageInternal([0xb0, K7, 1]);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'Damp'), 'mic: and Damp');
     ok(drawnAt.some(d => d[2] === 'Off'), 'mic: and Mic is Off by default');
     drawnAt.length = 0;
     ui.onMidiMessageInternal([0xb0, K4, 1]);

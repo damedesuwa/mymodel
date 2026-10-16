@@ -80,7 +80,7 @@ enum {
     /* Appended 1.5.0. The amp's own tone controls, which a CAPTURE cannot
      * have: a .nam is one setting of one amp and the Bass knob was turned
      * before it was taken. */
-    FX_TONESTACK,
+    FX_TONESTACK, FX_POWERAMP,
     FX_COUNT
 };
 
@@ -324,6 +324,29 @@ static const fx_pedal_t FX_PEDALS[FX_COUNT] = {
 { "Tone Stack", { K_ENUM("Amp", 4, "Fendr|Marsh|Vox|Mdrn"),
                   K_POS("Bass"), K_POS("Mid"), K_POS("Treble"),
                   K_POS("Presnc") }, -1 },
+/* --- What a capture cannot remember ---------------------------------- */
+/* A .nam IS A STATIC FUNCTION: input sample in, output sample out, with
+ * no memory of what came before. Every nonlinearity a real amp has that
+ * depends on TIME is therefore absent from it by construction - not
+ * missed by the capture, impossible for it.
+ *
+ * The two that a player feels rather than hears:
+ *
+ *  SAG    the supply rail drops as the output stage draws current, so a
+ *         hard chord ducks over a few tens of ms and swells back as the
+ *         reservoir refills. That swell is the "bloom", and it is the
+ *         single biggest reason a capture feels stiffer than the amp it
+ *         was taken from.
+ *  BIAS   on a big transient the grid conducts, the bias walks negative
+ *         and the valve cuts off for an instant - the spit on a hard
+ *         pick and the flub on a low note. Asymmetric, level dependent,
+ *         and gone again in 50 ms.
+ *
+ * Both only ever ADD to the capture. Neither duplicates anything in it,
+ * which is the test for whether a post-capture process is worth having.
+ */
+{ "Power Amp",  { K_POS("Sag"), K_LIN("Bloom", "ms", 50, 600),
+                  K_POS("Bias"), KNOB_NONE, KNOB_NONE }, -1 },
 };
 
 /* The table and the enum are one fact in two places, and a table one row
@@ -1842,6 +1865,60 @@ static void fx_tonestack(fx_block_t *f, float *a, int n) {
     }
 }
 
+/* THE POWER STAGE'S MEMORY. See the table entry for why a capture has
+ * none of it.
+ *
+ * Two envelopes, deliberately at different speeds, because the two
+ * effects are different physics at different time scales:
+ *
+ *  the RAIL follows current over tens of ms and refills over hundreds
+ *  the BIAS walks in a couple of ms and comes back in fifty
+ *
+ * One envelope driving both would make the sag spit and the bias breathe.
+ */
+static void fx_poweramp(fx_block_t *f, float *a, int n) {
+    const float sag   = f->p[0];
+    const float bias  = f->p[2];
+    if (sag < 0.001f && bias < 0.001f) return;
+
+    /* 50..600 ms of reservoir. The ATTACK is fixed at ~45 ms: how fast a
+     * rail falls is the supply's, not a knob of the player's; what they
+     * are choosing is how long it takes to come back.
+     *
+     * 45 and not the 12 it was first written with. A reservoir cap takes
+     * tens of milliseconds to discharge, and at 12 ms the droop was over
+     * before the first window of a note had finished - which measures as
+     * almost no sag at all AND is what a compressor does, not a supply. */
+    const float bloom_ms = 50.0f + f->p[1] * 550.0f;
+    const float a_up   = 1.0f - expf(-1.0f / (0.045f * SAMPLE_RATE));
+    const float a_dn   = 1.0f - expf(-1.0f / (bloom_ms * 0.001f * SAMPLE_RATE));
+    const float b_up   = 1.0f - expf(-1.0f / (0.002f * SAMPLE_RATE));
+    const float b_dn   = 1.0f - expf(-1.0f / (0.060f * SAMPLE_RATE));
+
+    const float k = sag * 3.0f;
+    for (int i = 0; i < n; i++) {
+        float x = a[i];
+        const float mag = x < 0.0f ? -x : x;
+
+        /* LEVEL DEPENDENT, which is the whole point: a quiet passage must
+         * not duck at all, or this is a compressor with an amp's name. */
+        f->env = (mag > f->env) ? f->env + (mag - f->env) * a_up
+                                : f->env + (mag - f->env) * a_dn;
+        if (k > 0.0f) x *= 1.0f / (1.0f + k * f->env);
+
+        if (bias > 0.001f) {
+            f->env2 = (mag > f->env2) ? f->env2 + (mag - f->env2) * b_up
+                                      : f->env2 + (mag - f->env2) * b_dn;
+            /* ASYMMETRIC, because the bias walks one way. A symmetric
+             * squash is just more distortion; the odd/even split is what
+             * makes it read as a valve letting go rather than as gain. */
+            const float exc = bias * f->env2 * 8.0f;
+            if (x < 0.0f) x = x / (1.0f + exc * (-x));
+        }
+        a[i] = flush_denormal(x);
+    }
+}
+
 static void fx_block_process(fx_block_t *f, float *a, float *side, int n) {
     switch (f->id) {
         case FX_TS808: case FX_TS9: case FX_SD1:
@@ -1882,6 +1959,7 @@ static void fx_block_process(fx_block_t *f, float *a, float *side, int n) {
         case FX_OCTAVE:                         fx_octave(f, a, n); break;
         case FX_RINGMOD:                        fx_ringmod(f, a, n); break;
         case FX_TONESTACK:                      fx_tonestack(f, a, n); break;
+        case FX_POWERAMP:                       fx_poweramp(f, a, n); break;
         default: break;
     }
 }
