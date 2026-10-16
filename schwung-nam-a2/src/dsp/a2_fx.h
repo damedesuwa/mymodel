@@ -77,6 +77,10 @@ enum {
      * the UI's categories put them where they belong. */
     FX_BLUESDRV, FX_PLEXI, FX_METALZONE, FX_OCTAVIA, FX_RANGEMASTER,
     FX_UNIVIBE, FX_DIMENSION, FX_GRAPHEQ, FX_PLATE, FX_REVERSE,
+    /* Appended 1.5.0. The amp's own tone controls, which a CAPTURE cannot
+     * have: a .nam is one setting of one amp and the Bass knob was turned
+     * before it was taken. */
+    FX_TONESTACK,
     FX_COUNT
 };
 
@@ -292,6 +296,34 @@ static const fx_pedal_t FX_PEDALS[FX_COUNT] = {
                   K_LIN("E.Level", "%", 0, 100), KNOB_NONE, KNOB_NONE }, -1 },
 { "Reverse",    { K_EXP("Time", "ms", 120, 1200), K_POS("F.Back"),
                   K_LIN("E.Level", "%", 0, 100), KNOB_NONE, KNOB_NONE }, -1 },
+/* --- The amp's tone controls ----------------------------------------- */
+/* A PASSIVE TONE STACK IS NOT A THREE BAND EQ, and we already have one of
+ * those (FX_EQ), so this is only worth having if it behaves like the
+ * circuit. The four things a generic EQ does not do:
+ *
+ *   - MID AT ZERO IS A NOTCH, not flat. That scoop is the sound of a
+ *     Marshall; an EQ at 0 dB is the sound of nothing.
+ *   - THE CONTROLS INTERACT. Raising Bass FILLS the mid scoop, because in
+ *     the circuit the bass pot and the mid pot share the same leg.
+ *   - IT ONLY EVER CUTS. The stack is passive and loses 10-20 dB; the
+ *     amp makes it up afterwards, which is why every setting of it has a
+ *     different level.
+ *   - THE SCOOP SITS SOMEWHERE DIFFERENT PER AMP, and that frequency is
+ *     most of what tells a Fender from a Marshall.
+ *
+ * Each of those four is a line in tests/test_fx.cpp. They were measured
+ * with numpy before a line of this was written, which is why the numbers
+ * below are the ones they are.
+ *
+ * WHAT IT CANNOT DO, and nothing after a capture can: on a real amp the
+ * stack sits BEFORE the power section, so turning Bass up changes what
+ * the valves clip on. Here the distortion is already baked into the
+ * capture. ToneX has exactly the same limit. Put it between the amp and
+ * the cab, which is where the circuit has it relative to the speaker.
+ */
+{ "Tone Stack", { K_ENUM("Amp", 4, "Fendr|Marsh|Vox|Mdrn"),
+                  K_POS("Bass"), K_POS("Mid"), K_POS("Treble"),
+                  K_POS("Presnc") }, -1 },
 };
 
 /* The table and the enum are one fact in two places, and a table one row
@@ -347,7 +379,7 @@ typedef struct fx_block {
 
     /* gain stages */
     float hp_x1, hp_y1, hp2_x1, hp2_y1, lp_y1, lp2_y1, dc_x1, dc_y1;
-    fx_bqs_t bq1, bq2, bq3;
+    fx_bqs_t bq1, bq2, bq3, bq4;   /* the tone stack needs four */
     /* dynamics */
     float env, env2, gain_s, gate_gain;
     int   hold;
@@ -1755,6 +1787,61 @@ static void fx_reverse(fx_block_t *f, float *a, int n) {
  * and carried through untouched by everything except the doubler. A pedal
  * placed AFTER the doubler therefore processes the centre only - which is
  * why the doubler belongs last, and is said so in its help. */
+/* THE PASSIVE TONE STACK. See the table entry for why it is not FX_EQ.
+ *
+ * Coefficients recomputed once per BLOCK, like every other pedal here -
+ * four biquad designs is ~2 us and the knobs are not audio.
+ *
+ * Every number below was measured with numpy before this was written, and
+ * tests/test_fx.cpp re-measures the four that matter on the real build. */
+typedef struct { float fb, fm, qm, ft, mid_min; } ts_amp_t;
+static const ts_amp_t TS_AMPS[4] = {
+    {  90.0f, 400.0f, 0.55f, 1200.0f, -20.0f },   /* Fender: low, broad   */
+    { 110.0f, 500.0f, 0.65f, 1500.0f, -17.0f },   /* Marshall             */
+    { 130.0f, 800.0f, 0.90f, 2000.0f,  -9.0f },   /* Vox: barely a notch  */
+    { 110.0f, 650.0f, 0.50f, 1800.0f, -22.0f },   /* Modern: deep scoop   */
+};
+/* The stack's own loss at noon, so (5,5,5) is unity and every other
+ * setting is quieter or louder than it the way the circuit is. */
+static const float TS_MAKEUP[4] = { 4.7f, 4.1f, 2.8f, 5.2f };
+
+#define TS_SPAN      21.0f    /* a control's full travel, in dB     */
+#define TS_MID_MAX    4.0f
+#define TS_BASS_FILL  4.0f    /* how much Bass fills the mid scoop  */
+#define TS_PRES_DB    9.0f
+
+static void fx_tonestack(fx_block_t *f, float *a, int n) {
+    int amp = (int)(f->p[0] * 3.0f + 0.5f);
+    if (amp < 0) amp = 0;
+    if (amp > 3) amp = 3;
+    const ts_amp_t *T = &TS_AMPS[amp];
+    const float b = f->p[1], m = f->p[2], t = f->p[3], pr = f->p[4];
+
+    fx_bq_t lo, mid, hi, pres;
+    fx_bq_shelf(&lo, T->fb, -TS_SPAN * 0.72f + b * TS_SPAN, 0);
+    /* BASS FILLS THE SCOOP. In the circuit the bass and mid pots share a
+     * leg, so they are not two independent bands however much the panel
+     * suggests it - and that coupling is most of why a stack does not
+     * sound like an EQ set to the same curve. */
+    fx_bq_peak(&mid, T->fm, T->qm,
+               T->mid_min * (1.0f - m) + TS_MID_MAX * m + TS_BASS_FILL * b);
+    fx_bq_shelf(&hi, T->ft, -TS_SPAN * 0.72f + t * TS_SPAN, 1);
+    const int use_pres = (pr > 0.001f);
+    /* PRESENCE IS NOT PART OF THE STACK. It lives in the power amp's
+     * feedback loop, which is why it is one-sided - a real one boosts and
+     * does not cut. */
+    if (use_pres) fx_bq_shelf(&pres, 3500.0f, pr * TS_PRES_DB, 1);
+
+    const float mk = powf(10.0f, TS_MAKEUP[amp] / 20.0f);
+    for (int i = 0; i < n; i++) {
+        float x = fx_bq_run(&lo,  &f->bq1, a[i]);
+        x = fx_bq_run(&mid, &f->bq2, x);
+        x = fx_bq_run(&hi,  &f->bq3, x);
+        if (use_pres) x = fx_bq_run(&pres, &f->bq4, x);
+        a[i] = x * mk;
+    }
+}
+
 static void fx_block_process(fx_block_t *f, float *a, float *side, int n) {
     switch (f->id) {
         case FX_TS808: case FX_TS9: case FX_SD1:
@@ -1794,6 +1881,7 @@ static void fx_block_process(fx_block_t *f, float *a, float *side, int n) {
         case FX_DETUNE:                         fx_detune(f, a, n); break;
         case FX_OCTAVE:                         fx_octave(f, a, n); break;
         case FX_RINGMOD:                        fx_ringmod(f, a, n); break;
+        case FX_TONESTACK:                      fx_tonestack(f, a, n); break;
         default: break;
     }
 }

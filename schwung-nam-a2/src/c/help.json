@@ -97,6 +97,33 @@
       ]
     },
     {
+      "title": "Tone Stack",
+      "lines": [
+        "At the END of the Amp list.",
+        "The amp's own Bass/Mid/Treble,",
+        "which a CAPTURE cannot have -",
+        "a .nam is one setting of one",
+        "amp and those knobs were",
+        "already turned when it was",
+        "taken.",
+        "Amp  Fender/Marshall/Vox/Mdrn",
+        "     - the scoop sits in a",
+        "     different place on each",
+        "Presence is the power amp, so",
+        "it only boosts.",
+        "It is the real passive circuit,",
+        "not an EQ: Mid at 0 is a NOTCH",
+        "(-10dB), and raising Bass FILLS",
+        "that notch, as the pots do.",
+        "PUT IT BETWEEN THE AMP AND THE",
+        "CAB - that is where the circuit",
+        "has it relative to the speaker.",
+        "What it cannot do: change how",
+        "the amp DISTORTS. That is baked",
+        "into the capture."
+      ]
+    },
+    {
       "title": "Mic placement (Cab)",
       "lines": [
         "An IR is ONE mic in ONE place.",

@@ -708,6 +708,130 @@ int main(int argc, char **argv) {
         }
     }
 
+
+    /* ------------------------------------------------------------------
+     * THE TONE STACK.
+     *
+     * We already have a three band EQ, so this is only worth having if it
+     * behaves like the CIRCUIT rather than like an EQ with amp labels on
+     * it. Four claims, four measurements - and each is at the frequency
+     * the claim is about, because a broadband "it got darker" would pass
+     * for any of them.
+     * ------------------------------------------------------------------ */
+    {
+        for (int b = 1; b <= 8; b++) {
+            char k[16];
+            snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0");
+            snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
+        }
+        api->set_param(in, "merge", "0");
+        api->set_param(in, "pan_a", "0.0");
+        api->set_param(in, "pan_b", "0.0");
+        api->set_param(in, "b1_type", "3");
+        api->set_param(in, "b1_fx", "50");            /* Tone Stack */
+        int16_t a[128 * 2];
+
+        auto rms_at = [&](double hz, const char *amp, const char *bass,
+                          const char *mid, const char *treb, const char *pres) {
+            api->set_param(in, "b1_p1", amp);
+            api->set_param(in, "b1_p2", bass);
+            api->set_param(in, "b1_p3", mid);
+            api->set_param(in, "b1_p4", treb);
+            api->set_param(in, "b1_p5", pres);
+            double e = 0;
+            for (int blk = 0; blk < 160; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    double t = (blk * 128.0 + i) / 44100.0;
+                    a[i * 2] = a[i * 2 + 1] =
+                        (int16_t)(0.35 * sin(2 * M_PI * hz * t) * 20000);
+                }
+                api->process_block(in, a, 128);
+                if (blk < 60) continue;
+                for (int i = 0; i < 128; i++) {
+                    double v = a[i * 2] / 32768.0;
+                    e += v * v;
+                }
+            }
+            return 20.0 * log10(sqrt(e / (100 * 128)) + 1e-12);
+        };
+        const char *MAR = "0.3333";                   /* Marshall */
+        const double noon_lo  = rms_at( 100, MAR, "0.5", "0.5", "0.5", "0.0");
+        const double noon_mid = rms_at( 500, MAR, "0.5", "0.5", "0.5", "0.0");
+        const double noon_hi  = rms_at(4000, MAR, "0.5", "0.5", "0.5", "0.0");
+
+        /* 1. MID AT ZERO IS A NOTCH, not flat - and only at the mid. */
+        const double cut_mid = rms_at( 500, MAR, "0.5", "0.0", "0.5", "0.0");
+        const double cut_lo  = rms_at( 100, MAR, "0.5", "0.0", "0.5", "0.0");
+        const double cut_hi  = rms_at(4000, MAR, "0.5", "0.0", "0.5", "0.0");
+        printf("\nstack: mid 5->0   %+.1f dB at 500Hz  (100Hz %+.1f, 4k %+.1f)\n",
+               cut_mid - noon_mid, cut_lo - noon_lo, cut_hi - noon_hi);
+        if (!(cut_mid - noon_mid < -8.0)) {
+            printf("   <-- Mid at 0 is not a notch, it is an EQ at 0 dB\n"); fails++;
+        }
+        if (fabs(cut_hi - noon_hi) > 3.0) {
+            printf("   <-- and it took the top with it\n"); fails++;
+        }
+
+        /* 2. THE CONTROLS ARE AT THEIR OWN FREQUENCIES. */
+        const double b0 = rms_at(100, MAR, "0.0", "0.5", "0.5", "0.0");
+        const double b1 = rms_at(100, MAR, "1.0", "0.5", "0.5", "0.0");
+        const double bh = rms_at(4000, MAR, "1.0", "0.5", "0.5", "0.0")
+                        - rms_at(4000, MAR, "0.0", "0.5", "0.5", "0.0");
+        const double t0 = rms_at(4000, MAR, "0.5", "0.5", "0.0", "0.0");
+        const double t1 = rms_at(4000, MAR, "0.5", "0.5", "1.0", "0.0");
+        printf("stack: bass 0->1  %+.1f dB at 100Hz (4k %+.1f)   "
+               "treb 0->1 %+.1f dB at 4k\n", b1 - b0, bh, t1 - t0);
+        if (!(b1 - b0 > 8.0) || fabs(bh) > 2.0) {
+            printf("   <-- Bass is not a bass control\n"); fails++;
+        }
+        if (!(t1 - t0 > 12.0)) {
+            printf("   <-- Treble is not a treble control\n"); fails++;
+        }
+
+        /* 3. RAISING BASS FILLS THE MID SCOOP. In the circuit the two pots
+         * share a leg; this is most of why a stack is not an EQ. */
+        const double fill = rms_at(500, MAR, "1.0", "0.0", "0.5", "0.0")
+                          - rms_at(500, MAR, "0.0", "0.0", "0.5", "0.0");
+        printf("stack: bass fills the scoop %+.1f dB at 500Hz\n", fill);
+        if (!(fill > 2.0)) {
+            printf("   <-- the controls do not interact, so it is an EQ\n"); fails++;
+        }
+
+        /* 4. THE SCOOP SITS SOMEWHERE DIFFERENT PER AMP, which is most of
+         * what tells a Fender from a Marshall. Measured where the FENDER
+         * notch is: the Fender must cut harder there than the Modern,
+         * whose scoop is higher up. */
+        const double fen = rms_at(400, "0.0", "0.5", "0.0", "0.5", "0.0")
+                         - rms_at(400, "0.0", "0.5", "0.5", "0.5", "0.0");
+        const double mdn = rms_at(400, "1.0", "0.5", "0.0", "0.5", "0.0")
+                         - rms_at(400, "1.0", "0.5", "0.5", "0.5", "0.0");
+        printf("stack: notch at 400Hz  Fender %+.1f dB  Modern %+.1f dB\n",
+               fen, mdn);
+        if (!(fen < mdn - 1.5)) {
+            printf("   <-- the four amps are the same filter\n"); fails++;
+        }
+
+        /* 5. PRESENCE IS ONE SIDED AND LIVES UP TOP. */
+        const double p_hi = rms_at(4000, MAR, "0.5", "0.5", "0.5", "1.0") - noon_hi;
+        const double p_md = rms_at( 500, MAR, "0.5", "0.5", "0.5", "1.0") - noon_mid;
+        printf("stack: presence 0->1  %+.1f dB at 4k (500Hz %+.1f)\n", p_hi, p_md);
+        if (!(p_hi > 3.0) || fabs(p_md) > 1.5) {
+            printf("   <-- Presence is not a presence control\n"); fails++;
+        }
+
+        /* 6. NOON IS UNITY. The stack is passive and loses 10-20 dB; the
+         * makeup is what the amp does after it, so a board does not drop
+         * in level the moment this block is switched in. */
+        api->set_param(in, "b1_on", "1");             /* bypass */
+        const double byp = rms_at(500, MAR, "0.5", "0.5", "0.5", "0.0");
+        api->set_param(in, "b1_on", "0");
+        const double on  = rms_at(500, MAR, "0.5", "0.5", "0.5", "0.0");
+        printf("stack: at noon  bypassed %+.1f dB  in %+.1f dB\n", byp, on);
+        if (fabs(on - byp) > 2.0) {
+            printf("   <-- switching it in at noon changes the level\n"); fails++;
+        }
+    }
+
     api->destroy_instance(in);
     printf("\n%s\n", fails ? "FAILED" : "PASS");
     return fails ? 1 : 0;

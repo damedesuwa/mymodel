@@ -182,7 +182,7 @@ const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3, TYPE_IR = 4;
 const CATS = [
     { name: 'Off',    type: TYPE_OFF, led: [0, 0] },
     { name: 'Amp',    type: TYPE_NAM, led: [1, 65],       /* red     */
-      items: [], folder: 'amps', from: 'nam' },
+      items: [], folder: 'amps', from: 'nam', tail: [50] },
     /* The Cab picker is its own knob rather than the shared item list -
      * a cabinet is not something you walk past on the way to a pedal -
      * so `from: 'cab'` only records which folder feeds it. */
@@ -277,7 +277,15 @@ function catOfBlock(b) {
 function attachNamItems() {
     const dirs = st.names.modelDir || [];
     for (const c of CATS) {
-        c.items = (c.items || []).filter(i => itemType(i) === TYPE_FX);
+        /* REBUILT FROM THE ORIGINAL LIST, not filtered out of the last
+         * one. Filtering kept whatever was already TYPE_FX, so a `tail`
+         * entry survived and was appended AGAIN - the Tone Stack grew a
+         * duplicate on every init, and since items[0] decides where the
+         * category LANDS, `Amp` stopped landing on an amp. The captures
+         * never showed it: they are not TYPE_FX, so the filter did
+         * remove them. */
+        if (!c.base) c.base = (c.items || []).slice();
+        c.items = c.base.slice();
         if (c.from === 'nam')
             for (let m = 0; m < dirs.length; m++)
                 if (dirs[m] === c.folder) c.items.push(namItem(m));
@@ -286,6 +294,12 @@ function attachNamItems() {
         if (c.from === 'ir')
             for (let i = 0; i < (st.names.ir || []).length; i++)
                 c.items.push(irItem(i));
+        /* AFTER the captures, because landing a category on its tail is
+         * landing it on the wrong thing: what you reach `Amp` for is an
+         * amp, and the Tone Stack is the knobs that go beside one. With
+         * no captures on the card it IS the list, which is the other
+         * case this has to be right about. */
+        if (c.tail) for (const i of c.tail) c.items.push(i);
     }
 }
 

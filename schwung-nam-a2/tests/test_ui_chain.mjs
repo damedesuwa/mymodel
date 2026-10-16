@@ -512,6 +512,44 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ok(!drawnAt.some(d => d[2] === 'Model'),
        'nam: and the separate Model picker is gone - one knob does both');
 
+    /* THE TONE STACK IS THE AMP'S OWN KNOBS, so it lives in Amp - but at
+     * the END of it. Landing the category on its tail would land `Amp` on
+     * something that is not an amp. */
+    board({ b1: 0 });
+    ui.init();
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    writes.length = 0;
+    turn(K1, +1, CAT.AMP);
+    ok(writes.some(([k, v]) => k === 'b1_type' && v === '1'),
+       'stack: Amp still lands on a capture, not on the stack');
+    writes.length = 0;
+    turn(K2, +1, 6);                                 /* past both captures */
+    ok(writes.some(([k, v]) => k === 'b1_fx' && v === '50'),
+       'stack: and it is at the end of the Amp list');
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'Bass'), 'stack: its page names Bass');
+    ui.onMidiMessageInternal([0xb0, K5, 1]);
+    ui.onMidiMessageInternal([0xb0, K6, 1]);
+    drawnAt.length = 0; repaint();
+    ok(drawnAt.some(d => d[2] === 'Mid'), 'stack: and Mid');
+    ok(drawnAt.some(d => /^Trebl/.test(d[2])), 'stack: and Treble');
+
+    /* RE-OPENING MUST NOT GROW THE LIST. A tail entry that survived the
+     * rebuild was appended again on every init, and since items[0] is
+     * what a category LANDS on, `Amp` stopped landing on an amp the
+     * second time the module was opened. The symptom is the assertion. */
+    board({ b1: 0 });
+    ui.init(); ui.init(); ui.init();
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    writes.length = 0;
+    turn(K1, +1, CAT.AMP);
+    ok(writes.some(([k, v]) => k === 'b1_type' && v === '1'),
+       'stack: and after three opens Amp still lands on a capture');
+
     /* A REVERB IR IS A BLOCK TYPE, and it lands in Time where the
      * modelled reverbs already are. The difference from a cab is the tap
      * count and that the dry survives. */

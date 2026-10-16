@@ -133,8 +133,13 @@ else:
         if not m:
             print("FAIL fx cats: CATS not found in ui_chain.js"); fail = 1
         else:
-            ids = [int(x) for grp in re.findall(r'items:\s*\[([^\]]*)\]', m.group(1))
-                          for x in grp.split(',') if x.strip()]
+            # `tail:` as well as `items:` - a tail entry is reachable, it
+            # just sits after the captures, and a check that only knew one
+            # of the two keys would call a shipped pedal unreachable.
+            ids = [int(x)
+                   for grp in re.findall(r'(?:items|tail):\s*\[([^\]]*)\]',
+                                         m.group(1))
+                   for x in grp.split(',') if x.strip()]
             if sorted(ids) != list(range(len(names))):
                 missing = sorted(set(range(len(names))) - set(ids))
                 dupes = sorted({i for i in ids if ids.count(i) > 1})
