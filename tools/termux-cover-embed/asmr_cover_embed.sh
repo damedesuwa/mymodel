@@ -63,6 +63,8 @@ COVER_NAMES = ["cover", "front", "folder", "jacket", "album", "albumart",
                "artwork", "ジャケット", "ジャケ", "表紙", "カバー",
                "커버", "자켓", "재킷", "표지"]
 SELFTEST_NAME = ".asmr_cover_selftest.tmp"
+# --local-dir: 휴대폰 내부 저장소처럼 일반 경로로 읽고 쓸 수 있는 폴더. 이때 "uri" 는 절대 경로다.
+LOCAL = False
 
 
 class SafError(Exception):
@@ -132,7 +134,24 @@ def saf_json(args, retries=3):
     raise SafError("%s 실패: %s" % (args[0], last))
 
 
+def _local_entry(path, name=None):
+    st = os.stat(path)
+    d = {"name": name or os.path.basename(path), "uri": path,
+         "last_modified": int(st.st_mtime * 1000)}
+    if os.path.isdir(path):
+        d["type"] = "dir"
+    else:
+        d["type"] = "file"
+        d["length"] = st.st_size
+    return d
+
+
 def saf_ls(uri):
+    if LOCAL:
+        try:
+            return [_local_entry(os.path.join(uri, n), n) for n in os.listdir(uri)]
+        except OSError as e:
+            raise SafError("폴더 읽기 실패: %s" % e)
     data = saf_json(["termux-saf-ls", uri])
     if not isinstance(data, list):
         raise SafError("termux-saf-ls 출력이 목록이 아님")
@@ -140,6 +159,11 @@ def saf_ls(uri):
 
 
 def saf_stat(uri):
+    if LOCAL:
+        try:
+            return _local_entry(uri)
+        except OSError as e:
+            raise SafError("stat 실패: %s" % e)
     data = saf_json(["termux-saf-stat", uri])
     if isinstance(data, list) and len(data) == 1:
         data = data[0]
@@ -169,10 +193,16 @@ def is_dir_entry(e):
 
 
 def saf_read_to_file(uri, path, expect_len=None):
-    with open(path, "wb") as f:
-        r = _run(["termux-saf-read", uri], timeout=3600, stdout=f)
-    if r.returncode != 0:
-        raise SafError("termux-saf-read 실패: %s" % _err_text(r))
+    if LOCAL:
+        try:
+            shutil.copyfile(uri, path)
+        except OSError as e:
+            raise SafError("읽기 실패: %s" % e)
+    else:
+        with open(path, "wb") as f:
+            r = _run(["termux-saf-read", uri], timeout=3600, stdout=f)
+        if r.returncode != 0:
+            raise SafError("termux-saf-read 실패: %s" % _err_text(r))
     size = os.path.getsize(path)
     if expect_len is not None and size != expect_len:
         raise SafError("읽은 크기 %d != SAF 크기 %d" % (size, expect_len))
@@ -182,6 +212,17 @@ def saf_read_to_file(uri, path, expect_len=None):
 
 
 def saf_write_from_file(uri, path):
+    if LOCAL:
+        # 같은 폴더의 숨김 임시 파일에 다 쓴 뒤 한 번에 교체 (중간에 끊겨도 원본은 그대로)
+        tmp = os.path.join(os.path.dirname(uri), "." + os.path.basename(uri) + ".coverembed.tmp")
+        try:
+            shutil.copyfile(path, tmp)
+            os.replace(tmp, uri)
+        except OSError as e:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise SafError("쓰기 실패: %s" % e)
+        return
     with open(path, "rb") as f:
         r = _run(["termux-saf-write", uri], timeout=3600, stdin=f)
     if r.returncode != 0:
@@ -255,30 +296,40 @@ def id3_has_picture(hdr, body):
 
 def probe_art_head(uri):
     """'yes' | 'no' | 'unknown' ; 실패 시 SafError"""
+    if LOCAL:
+        try:
+            with open(uri, "rb") as f:
+                return _probe_stream(f)
+        except OSError as e:
+            raise SafError(str(e))
     p = subprocess.Popen(["termux-saf-read", uri], stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     killer = threading.Timer(180, lambda: _kill(p))
     killer.start()
     try:
-        hdr = read_exact(p.stdout, 10)
-        if len(hdr) < 10:
-            raise SafError("파일을 읽을 수 없음(헤더 %d바이트)" % len(hdr))
-        if hdr[:3] != b"ID3" or hdr[3] not in (2, 3, 4):
-            return "no"
-        size = syncsafe(hdr[6:10])
-        if size > 64 * 1024 * 1024:
-            return "unknown"
-        body = read_exact(p.stdout, size)
-        if len(body) < size:
-            raise SafError("ID3 태그를 끝까지 읽지 못함")
-        res = id3_has_picture(hdr, body)
-        if res is None:
-            return "unknown" if (b"APIC" in body or b"PIC" in body) else "no"
-        return "yes" if res else "no"
+        return _probe_stream(p.stdout)
     finally:
         killer.cancel()
         _kill(p)
+
+
+def _probe_stream(stream):
+    hdr = read_exact(stream, 10)
+    if len(hdr) < 10:
+        raise SafError("파일을 읽을 수 없음(헤더 %d바이트)" % len(hdr))
+    if hdr[:3] != b"ID3" or hdr[3] not in (2, 3, 4):
+        return "no"
+    size = syncsafe(hdr[6:10])
+    if size > 64 * 1024 * 1024:
+        return "unknown"
+    body = read_exact(stream, size)
+    if len(body) < size:
+        raise SafError("ID3 태그를 끝까지 읽지 못함")
+    res = id3_has_picture(hdr, body)
+    if res is None:
+        return "unknown" if (b"APIC" in body or b"PIC" in body) else "no"
+    return "yes" if res else "no"
 
 
 def _kill(p):
@@ -391,7 +442,7 @@ def group(scan_data, depth, root_label, image_exts=JPG_EXTS):
         rel = d["rel"]
         if len(rel) >= depth:
             wkey = tuple(rel[:depth])
-            works.setdefault(wkey, {"name": "/".join(wkey), "mp3": [], "jpg": [], "failed_dirs": []})
+            works.setdefault(wkey, {"name": "/".join(wkey) or root_label, "mp3": [], "jpg": [], "failed_dirs": []})
             if d.get("error"):
                 works[wkey]["failed_dirs"].append("/".join(rel))
         for f in d["files"]:
@@ -417,7 +468,7 @@ def group(scan_data, depth, root_label, image_exts=JPG_EXTS):
                 outside.append(item)
                 continue
             item["in_work"] = "/".join(rel[depth:] + [name])
-            item["work"] = "/".join(rel[:depth])
+            item["work"] = "/".join(rel[:depth]) or root_label
             works[tuple(rel[:depth])][kind].append(item)
     return works, outside, stats
 
@@ -852,6 +903,8 @@ def restore_pending(pending_dir, workdir, out):
             porig = os.path.join(pdir, "orig.mp3")
             if sha256_file(porig) != meta["sha256"]:
                 raise SafError("백업 파일 해시 불일치")
+            global LOCAL
+            LOCAL = not meta["uri"].startswith("content://")
             write_and_verify(meta["uri"], porig, workdir)
             shutil.rmtree(pdir)
             out("복원 완료: %s" % meta["path"])
@@ -928,6 +981,7 @@ def main():
     ap.add_argument("--apply", action="store_true", help="실제로 SD 카드의 MP3를 수정 (없으면 DRY RUN)")
     ap.add_argument("--yes", action="store_true", help="--apply 시 확인 질문 생략")
     ap.add_argument("--root-uri", default=os.environ.get("SAF_ROOT_URI", DEFAULT_ROOT_URI))
+    ap.add_argument("--local-dir", help="SAF 대신 일반 경로의 폴더를 처리 (예: ~/storage/downloads/Moving)")
     ap.add_argument("--work-depth", type=int, default=1,
                     help="루트에서 몇 단계 아래 폴더를 '작품'으로 볼지 (기본 1: Asmr/작품). 서클/작품 구조면 2")
     ap.add_argument("--work", action="append", help="이름에 이 문자열이 들어간 작품만 처리 (여러 번 가능)")
@@ -971,6 +1025,14 @@ def main():
             return 2
         mapping = (exact, ww)
 
+    global LOCAL
+    if opts.local_dir:
+        LOCAL = True
+        opts.root_uri = os.path.realpath(os.path.expanduser(opts.local_dir))
+        if not os.path.isdir(opts.root_uri):
+            out("폴더가 없습니다: %s" % opts.root_uri)
+            out("  내부 저장소라면 먼저 termux-setup-storage 를 실행했는지 확인하세요.")
+            return 2
     root_label = urllib.parse.unquote(opts.root_uri.rstrip("/").split("/")[-1]).split(":")[-1] or "ROOT"
     try:
         root_label = saf_stat(opts.root_uri).get("name") or root_label
@@ -1099,7 +1161,10 @@ def main():
         if opts.limit > 0:
             targets = targets[:opts.limit]
         if targets:
-            mode, why = selftest_truncate(opts.root_uri)
+            if LOCAL:
+                mode, why = "truncate", "로컬 폴더: 임시 파일에 쓴 뒤 교체"
+            else:
+                mode, why = selftest_truncate(opts.root_uri)
             out("termux-saf-write 덮어쓰기 자가 시험: %s — %s" % (mode, why))
             if mode == "broken" or (mode == "no_truncate" and not opts.allow_no_truncate):
                 out("안전한 교체를 보장할 수 없어 적용을 중단합니다. (DRY RUN 결과는 위와 같음)")

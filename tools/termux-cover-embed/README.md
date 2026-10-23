@@ -19,6 +19,16 @@ bash ~/bin/asmr_cover_update.sh
 
 규칙은 `--work-cover --other-images`와 같다. 작품 안 이미지가 1장이면 그 작품의 커버 없는 곡 전부에 넣는다. 여러 장이면 후보만 보여 주고 넣지 않는다.
 
+### 휴대폰 내부 저장소 폴더 (SAF 아님)
+
+```bash
+termux-setup-storage          # 한 번만
+bash ~/bin/asmr_cover_update.sh --local-dir ~/storage/downloads/Moving
+```
+
+`--local-dir`를 쓰면 termux-saf 대신 일반 파일 경로로 읽고 쓴다. 교체는 같은 폴더의 숨김 임시 파일에 다 쓴 뒤 한 번에 바꾸는 방식이다.
+폴더 자체가 작품 하나라면 `--work-depth 0`을 붙인다.
+
 ## 설치
 
 ```bash

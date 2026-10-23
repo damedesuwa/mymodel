@@ -38,7 +38,7 @@ fi
 
 latest() { ls -t "$STATE/reports/$1"_*."$2" 2>/dev/null | head -1; }
 
-echo "[1/3] SD 카드를 스캔하고 확인하는 중입니다. 작품 수에 따라 수십 분 걸릴 수 있습니다…"
+echo "[1/3] 폴더를 스캔하고 확인하는 중입니다. 작품 수에 따라 수십 분 걸릴 수 있습니다…"
 if ! bash "$MAIN" "${RULES[@]}" "$@" > /dev/null; then
     echo "스캔 중 오류가 났습니다. 리포트: $(latest report txt)"
     exit 1
