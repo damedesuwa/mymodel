@@ -2,7 +2,7 @@
   "id": "nam-a2c",
   "name": "Nam A2c",
   "abbrev": "A2C",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Thirty-two blocks over two pages. NAM captures with the amp's tone stack and power-stage sag, cab IRs with mic placement and speaker damping, reverb IRs, a tuning pedal, and 53 modelled pedals. The library refreshes itself.",
   "author": "Nam A2 contributors (based on schwung-nam by Charles Vestal / NeuralAudio by Mike Oliphant)",
   "license": "MIT",

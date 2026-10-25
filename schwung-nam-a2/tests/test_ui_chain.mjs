@@ -83,12 +83,14 @@ const rects = [];
 const leds = {};
 const buttonLeds = {};
 let padBlock = -1;
+const claimed = [];     /* every host_claim_ccs call, in order */
 const actionsRun = [];
 
 const host = {
     host_module_get_param: (k) => { reads.push(k); return (k in params ? params[k] : null); },
     host_module_set_param: (k, v) => { params[k] = String(v); writes.push([k, String(v)]); },
     host_pad_block: (v) => { padBlock = v; },
+    host_claim_ccs: (a) => { claimed.push(Array.isArray(a) ? a.slice() : a); },
     clear_screen: () => drawn.push('<clear>'),
     print: (x, y, t) => { drawn.push(String(t)); drawnAt.push([x, y, String(t)]); },
     draw_rect: (x, y, w, h, c) => rects.push(['draw', x, y, w, h, c]),
@@ -1223,6 +1225,31 @@ for (const [what, impl] of [
     board({ b1: 3, b2: 3, b3: 3, b9: 3, b10: 3 });
     ui.init();
     repaint();
+
+    /* THE ARROWS ARE CLAIMED AT RUNTIME, EVERY TICK.
+     *
+     * capabilities.claims_ccs cannot reach a module that draws its own
+     * screen: the host reads the module id from the HIERARCHY editor's
+     * slot/component, which only resetHierarchyEditorFor() writes, and
+     * that runs only for a component that HAS a ui_hierarchy - the exact
+     * thing this module withholds so ui_chain.js loads at all. The id
+     * comes back "", the claim resolves to "", and host_claim_ccs is
+     * never called. Without the runtime claim the arrows reach MOVE and
+     * the page never moves, which is what the device reported.
+     *
+     * Restated, never memoised, for pad_block's reason: the shim clears
+     * claim_cc_bits itself when the display closes and tells JS nothing,
+     * so a mirror latches and the arrows die after the first dismiss. */
+    claimed.length = 0;
+    repaint();
+    ok(claimed.length >= 1 && claimed[0].includes(62) && claimed[0].includes(63),
+       'page: the arrows are claimed at runtime (got ' +
+       JSON.stringify(claimed[0]) + ')');
+    const before = claimed.length;
+    repaint(); repaint(); repaint();
+    ok(claimed.length >= before + 3,
+       'page: and RESTATED every tick, not edged (' + before + ' -> ' +
+       claimed.length + ')');
 
     /* A PAD ADDRESSES THE WINDOW. On page 1 pad 68 is b1; after one right
      * arrow the same pad is b9. Addressing the block instead would make

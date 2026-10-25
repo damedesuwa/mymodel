@@ -1782,6 +1782,38 @@ function tickBody() {
          * It is idempotent against the SHM, so a per-frame restate is free. */
         if (typeof host_pad_block === 'function') host_pad_block(1);
 
+        /* AND THE ARROWS ARE CLAIMED THE SAME WAY, because the STATIC
+         * declaration cannot reach us.
+         *
+         * capabilities.claims_ccs is read by the host's reconcileCcClaim(),
+         * which gets the module id from hierarchyActiveModuleIdRaw() -
+         * and that opens `if (hierEditorSlot < 0 || !hierEditorComponent)
+         * return ""`. Those two are set in ONE place,
+         * resetHierarchyEditorFor(), which runs only when a component
+         * HAS a ui_hierarchy. This module deliberately publishes none,
+         * because that is the condition for ui_chain.js loading at all
+         * (the two are exclusive and the hierarchy wins). So the id comes
+         * back "", moduleClaimedCcs("") answers "" immediately, and
+         * `claim === ccClaimed` makes the host return without ever
+         * calling host_claim_ccs. The static claim is unreachable for any
+         * module that draws its own screen - not misconfigured, but
+         * structurally out of reach, and silent about it.
+         *
+         * host_claim_ccs() is the runtime complement and is a plain JS
+         * global in the same QuickJS context this file loads into, so the
+         * module can state its own claim. Same contract as pad_block:
+         * idempotent against the SHM (the binding memcmps before it
+         * writes and logs only on a transition), so a per-frame restate
+         * costs a 16-byte compare - and it must NOT be memoised, because
+         * the shim clears claim_cc_bits itself when the shadow display
+         * closes and never tells JS.
+         *
+         * The static declaration stays in module.json: it is the honest
+         * statement of intent and it starts working the day the host asks
+         * the component rather than the hierarchy editor. */
+        if (typeof host_claim_ccs === 'function')
+            host_claim_ccs([CC_NAV_LEFT, CC_NAV_RIGHT]);
+
         rotateRead();
 
         /* A hold fires while the finger is still down - waiting for the
