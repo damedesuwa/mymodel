@@ -32,23 +32,53 @@
 
 #include "a2_common.h"
 
+/* IT IS CHROMATIC, so the range is the only thing that decides what it can
+ * tune. Nothing here knows about strings or about a tuning: the pitch goes
+ * through tuner_midi() and comes out as the nearest of all twelve, which is
+ * what makes drop D, drop C, open G, DADGAD and a 7- or 8-string all the
+ * same case rather than each needing a table.
+ *
+ *     8-string low F#   F#1   46.25 Hz
+ *     drop A (6-str)    A1    55.00 Hz
+ *     7-string low B    B1    61.74 Hz
+ *     drop C            C2    65.41 Hz
+ *     drop D            D2    73.42 Hz
+ *     6-string low E    E2    82.41 Hz
+ *     4-string bass E   E1    41.20 Hz
+ *     5-string bass B   B0    30.87 Hz
+ *     6-string bass F#  F#0   23.12 Hz
+ *
+ * The old floor was 37.8 Hz (512 / lag 146), which covered every guitar
+ * tuning in that list - and the comment beside it said it was "below a
+ * 5-string bass's low B", which is false: B0 is 30.87 and 37.8 is ABOVE
+ * it. The number was right for guitars and the sentence explaining it was
+ * wrong, which is the worse of the two problems, because a wrong comment
+ * about a measurement is what stops anyone checking it.
+ *
+ * Both windows are sized from the lowest note needing ~4 periods rather
+ * than from a round number: 23.12 Hz has a 43.2 ms period, so 186 ms gives
+ * it 4.3. No guitar needs that - it is the basses that did - but the extra
+ * lags are absorbed by slicing (see TUN_SLICES) and it stops the floor
+ * being a question anyone has to ask again. */
 #define TUN_DECIM     8
-#define TUN_WIN       512      /* 93 ms at 5512.5 Hz - 3 periods of the low B */
+#define TUN_WIN       1024     /* 186 ms at 5512.5 Hz - 4.3 periods of F#0 */
 #define TUN_LAG_MIN   13       /* 424 Hz */
-#define TUN_LAG_MAX   146      /* 37.8 Hz - below a 5-string bass's low B */
-/* 93 ms at the full rate. 2048 was half this and measurably too short at
- * the bottom: the fine correlation for an E2 got 2.8 periods to work with,
- * and a parabolic vertex on a peak that broad moved the answer several
- * cents between runs (measured: -3.0 then +4.8 for the same tone, on a
- * 5-cent gate). 4096 gives it 6.6 periods. It costs 8 KB and nothing per
- * frame, because the fine phase is sliced. */
-#define TUN_FINE_WIN  4096
+#define TUN_LAG_MAX   240      /* 23.0 Hz - just under a 6-string bass's F#0 */
+/* 186 ms at the full rate, sized the same way as the coarse window and for
+ * the same reason. 2048 was measurably too short even for a guitar: the
+ * fine correlation for an E2 got 2.8 periods, and a parabolic vertex on a
+ * peak that broad moved the answer several cents between runs of the SAME
+ * tone (measured: -3.0 then +4.8, on a 5-cent gate). At 4096 an E2 had 6.6
+ * periods but an 8-string's F#1 would have had 1.1, which is not a
+ * measurement. 8192 gives F#1 3.3 and E2 14. It costs 32 KB and nothing
+ * per frame, because the fine phase is sliced. */
+#define TUN_FINE_WIN  8192
 #define TUN_FINE_SPAN 10       /* +-10 full-rate samples around the coarse lag */
 /* Idle blocks between cycles. A CYCLE is this plus one snapshot frame plus
- * TUN_SLICES and TUN_FINE_STEPS, so 3 gives 19 frames = 55 ms = ~18
+ * TUN_SLICES and TUN_FINE_STEPS, so 2 gives 26 frames = 75 ms = ~13
  * updates a second. That is what a hardware tuner feels like, and it costs
  * nothing extra: every frame still does at most one slice. */
-#define TUN_EVERY     3
+#define TUN_EVERY     2
 /* THE COARSE SEARCH IS SLICED ACROSS FRAMES, and that is not premature.
  *
  * Measured on the build host, the whole analysis on one frame is 135 us
@@ -64,7 +94,11 @@
  * stage reads the live full-rate ring one frame later, which is sound
  * because its lag comes from the coarse answer and a note being tuned is
  * being held. */
-#define TUN_SLICES    8
+/* SIXTEEN, not eight, and that is what keeps the wider range free. The
+ * coarse search went from 134 lags over ~430 samples to 228 over ~900 -
+ * 3.5x the work - so twice the slices leaves each frame doing what it did
+ * before. Flat is the property being defended, not the total. */
+#define TUN_SLICES    16
 #define TUN_LAGS      (TUN_LAG_MAX - TUN_LAG_MIN + 1)
 #define TUN_PER_SLICE ((TUN_LAGS + TUN_SLICES - 1) / TUN_SLICES)
 /* THE FINE STAGE IS SLICED TOO, because slicing only the coarse half left

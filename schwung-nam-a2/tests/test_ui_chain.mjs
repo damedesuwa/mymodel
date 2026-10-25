@@ -1469,7 +1469,16 @@ for (const [what, impl] of [
     ok(drawn.some(t => t === 'E2'), 'tuner: it names the note');
     ok(drawn.some(t => t === '-51c'), 'tuner: and how far out');
     ok(drawn.some(t => t === '80.00 Hz'), 'tuner: and the frequency');
-    ok(drawn.some(t => t === '6 E'), 'tuner: and which string that is');
+    ok(drawn.some(t => t === 'chromatic'),
+       'tuner: it says it is chromatic');
+    /* NO STRING LABEL. It used to print the nearest of the six STANDARD
+     * open strings, which is a guitar-specific tuner's feature and is
+     * wrong as soon as the guitar is not in standard tuning: in drop C the
+     * low string is C2 and the nearest standard string is 400 cents away.
+     * A chromatic tuner's answer is the note. */
+    ok(!drawn.some(t => /^[1-6] [A-G]/.test(t)),
+       'tuner: and does not claim a string (' +
+       drawn.filter(t => /^[1-6] [A-G]/.test(t)).join(',') + ')');
     /* THE NEEDLE IS CLAMPED, NOT WRAPPED. -51 cents is past the end of a
      * +-50 scale, and a needle that wrapped would read as nearly sharp. */
     const needleX = rects.filter(r => r[0] === 'fill' && r[3] === 3 &&

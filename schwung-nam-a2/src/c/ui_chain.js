@@ -1408,24 +1408,23 @@ function drawFooter(list) {
     ptext(1, FOOT_Y, 'hold:edit  jog:merge', 1, w);
 }
 
-/* The six open strings, so the screen can say WHICH string you are near
- * rather than only which note. Named from the low E up, the way they are
- * counted on the instrument. */
-const TUNER_STRINGS = [
-    ['6 E', 82.407], ['5 A', 110.000], ['4 D', 146.832],
-    ['3 G', 195.998], ['2 B', 246.942], ['1 E', 329.628],
-];
-function nearestString(hz) {
-    let best = null, bestC = 1e9;
-    for (const [name, f] of TUNER_STRINGS) {
-        const c = Math.abs(1200 * Math.log2(hz / f));
-        if (c < bestC) { bestC = c; best = name; }
-    }
-    /* Only claim a string if it is within a semitone. Past that you are
-     * tuning to something else and a label would be a guess. */
-    return bestC <= 100 ? best : '';
-}
-
+/* NO STRING LABEL, and that is the whole of being chromatic.
+ *
+ * This read the nearest of the six standard open strings and printed it
+ * top right - which is a guitar-specific tuner's feature, not a chromatic
+ * one, and it is WRONG the moment the guitar is not in standard tuning.
+ * In drop C the low string is C2; the nearest standard string is E2, 400
+ * cents away, so the label either says nothing or - on the tunings where
+ * it lands inside a semitone of some other string - says the wrong number
+ * with confidence. A tuner that has to be told the tuning is the thing a
+ * chromatic tuner exists not to be.
+ *
+ * So the answer is the NOTE and the cents, which is what every chromatic
+ * pedal shows and what works for drop D, drop C, open G, DADGAD, a
+ * 7-string, an 8-string and a bass without any of them being a case. The
+ * octave is in the name (E2 vs E4), which is what tells you whether you
+ * are on the right string anyway.
+ */
 const TUN_BAR_Y = 28, TUN_BAR_H = 13;
 const TUN_BAR_X = 4, TUN_BAR_W = 120;      /* centre lands on 64 */
 const TUN_RANGE = 50;                      /* cents, each way */
@@ -1443,7 +1442,9 @@ function drawTuner() {
     const inTune = live && Math.abs(cents) <= TUN_IN_TUNE;
 
     ptext(1, 1, 'Tuner', 1, 60);
-    pright(126, 1, live ? (nearestString(hz) || '') : '', 1, 60);
+    /* Says what kind of tuner it is, which is the one thing a player needs
+     * to know before trusting it in a tuning that is not standard. */
+    pright(126, 1, 'chromatic', 1, 64);
     fill_rect(0, 10, 128, 1, 1);
 
     /* THE NOTE, and the in-tune answer is the BOX around it rather than a
