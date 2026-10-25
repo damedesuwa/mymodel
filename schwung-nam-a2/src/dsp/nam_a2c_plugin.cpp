@@ -102,6 +102,44 @@ static const char *block_type_name(int t) {
 }
 
 /* ======================================================================== */
+/* What is on the card                                                       */
+/* ======================================================================== */
+
+/* THE LISTS ARE DOUBLE-BUFFERED, because a file lands on the card while
+ * the module is PLAYING.
+ *
+ * Reading a directory is opendir/readdir, which is file I/O, and every
+ * entry point of this plugin is the SPI callback - so the old `rescan`
+ * param scanned seven directories on the realtime thread and the audio
+ * paid for it. That is the whole reason a refresh needed building rather
+ * than just calling: the mechanism existed and was in the wrong place.
+ *
+ * The worker owns the inactive half, fills it, and publishes with one
+ * atomic store. The callback reads `lists[lists_active]` and never
+ * touches the other one, so there is no lock, no allocation and no
+ * copy at the point of use. Two of these is ~1 MB, which buys the
+ * absence of all three.
+ *
+ * It is not an RCU: nothing is freed, the buffers live for the instance.
+ * A second flip while the callback is inside a read of the first would be
+ * the hazard, and the worker will not flip twice inside a second - ten
+ * times the 100 ms the param channel gives up after, so a read that could
+ * still be in flight has already been abandoned by its caller.
+ */
+typedef struct {
+    int  model_count;
+    char model_dir[MAX_MODELS][16];   /* the folder it came from */
+    char model_names[MAX_MODELS][MAX_NAME_LEN];
+    char model_paths[MAX_MODELS][MAX_PATH_LEN];
+    int  cab_count;
+    char cab_names[MAX_CABS][MAX_NAME_LEN];
+    char cab_paths[MAX_CABS][MAX_PATH_LEN];
+    int  ir_count;
+    char ir_names[MAX_CABS][MAX_NAME_LEN];
+    char ir_paths[MAX_CABS][MAX_PATH_LEN];
+} asset_lists_t;
+
+/* ======================================================================== */
 /* Load requests                                                             */
 /* ======================================================================== */
 
@@ -189,18 +227,15 @@ typedef struct {
     float side[FRAMES_PER_BLOCK];
     float in_gain,  out_gain;
 
-    /* Shared lists, scanned once. A model or a cab belongs to the module,
-     * not to a block - eight blocks pointing at one file is ordinary. */
-    int  model_count;
-    char model_dir[MAX_MODELS][16];   /* the folder it came from */
-    char model_names[MAX_MODELS][MAX_NAME_LEN];
-    char model_paths[MAX_MODELS][MAX_PATH_LEN];
-    int  cab_count;
-    char cab_names[MAX_CABS][MAX_NAME_LEN];
-    char cab_paths[MAX_CABS][MAX_PATH_LEN];
-    int  ir_count;
-    char ir_names[MAX_CABS][MAX_NAME_LEN];
-    char ir_paths[MAX_CABS][MAX_PATH_LEN];
+    /* WHAT IS ON THE CARD, DOUBLE-BUFFERED. See asset_lists_t. */
+    asset_lists_t         *lists[2];
+    std::atomic<int>       lists_active;
+    std::atomic<unsigned>  list_gen;
+    /* The worker's own state: nothing on the callback reads these. */
+    volatile int           rescan_req;
+    unsigned long long     dir_stamp;
+    double                 next_poll_us;
+    double                 last_flip_us;
 
     /* Scratch. Allocated once in create_instance - never per block. */
     float mono[FRAMES_PER_BLOCK];
@@ -325,6 +360,10 @@ static int start_low_prio_thread(pthread_t *tid, void *(*fn)(void *), void *arg,
     return rc == 0;
 }
 
+/* Defined below, with the rest of the refresh: the worker loop is here and
+ * the scan it drives needs the list buffers declared first. */
+static void worker_poll_assets(a2c_t *s);
+
 static void *worker_thread(void *arg) {
     a2c_t *s = (a2c_t *)arg;
     char msg[MAX_PATH_LEN + 96];
@@ -332,6 +371,10 @@ static void *worker_thread(void *arg) {
     while (!s->worker_stop) {
         load_req_t r;
         if (!req_pop(&s->reqs, &r)) {
+            /* Idle is where the card gets looked at. Behind a load it can
+             * wait: a queued .nam parse is what the user is listening for,
+             * and eight stats ahead of it would only delay that. */
+            worker_poll_assets(s);
             struct timespec ts = { 0, 20000000L };   /* 20 ms */
             nanosleep(&ts, NULL);
             continue;
@@ -541,49 +584,203 @@ static void ensure_asset_dirs(const char *module_dir) {
     }
 }
 
-static void scan_lists(a2c_t *s) {
+/* Fills a buffer the CALLER owns. Never the live one: the worker writes
+ * the inactive half and publishes it, and create_instance fills half 0
+ * before anything can read it. */
+static void scan_lists_into(const a2c_t *s, asset_lists_t *L) {
     char dir[MAX_PATH_LEN];
-    s->model_count = 0;
-    s->cab_count = 0;
-    s->ir_count = 0;
+    L->model_count = 0;
+    L->cab_count = 0;
+    L->ir_count = 0;
 
     for (int i = 0; i < ASSET_DIR_COUNT; i++) {
         snprintf(dir, sizeof(dir), "%s/%s", s->module_dir, ASSET_DIRS[i].dir);
         if (ASSET_DIRS[i].kind == BLK_NAM) {
-            const int room = MAX_MODELS - s->model_count;
+            const int room = MAX_MODELS - L->model_count;
             if (room <= 0) continue;
             const int n = scan_directory(dir,
-                                         &s->model_names[s->model_count],
-                                         &s->model_paths[s->model_count],
+                                         &L->model_names[L->model_count],
+                                         &L->model_paths[L->model_count],
                                          room, is_model_file);
             /* The DIRECTORY is what the UI matches on, not an index into
              * a copy of this table it would have to keep in step. */
             for (int k = 0; k < n; k++)
-                snprintf(s->model_dir[s->model_count + k],
-                         sizeof(s->model_dir[0]), "%s", ASSET_DIRS[i].dir);
-            s->model_count += n;
+                snprintf(L->model_dir[L->model_count + k],
+                         sizeof(L->model_dir[0]), "%s", ASSET_DIRS[i].dir);
+            L->model_count += n;
         } else if (ASSET_DIRS[i].kind == BLK_CAB) {
-            s->cab_count = scan_directory(dir, s->cab_names, s->cab_paths,
+            L->cab_count = scan_directory(dir, L->cab_names, L->cab_paths,
                                           MAX_CABS, is_cab_file);
         } else {
-            s->ir_count = scan_directory(dir, s->ir_names, s->ir_paths,
+            L->ir_count = scan_directory(dir, L->ir_names, L->ir_paths,
                                          MAX_CABS, is_cab_file);
         }
     }
 
     /* The pre-rename root, so a card whose move did not happen still
      * plays. Nothing points at it and the manager does not show it. */
-    if (s->model_count < MAX_MODELS) {
+    if (L->model_count < MAX_MODELS) {
         snprintf(dir, sizeof(dir), "%s/models", s->module_dir);
-        const int n = scan_directory(dir, &s->model_names[s->model_count],
-                                     &s->model_paths[s->model_count],
-                                     MAX_MODELS - s->model_count, is_model_file);
+        const int n = scan_directory(dir, &L->model_names[L->model_count],
+                                     &L->model_paths[L->model_count],
+                                     MAX_MODELS - L->model_count, is_model_file);
         for (int k = 0; k < n; k++)
-            snprintf(s->model_dir[s->model_count + k],
-                     sizeof(s->model_dir[0]), "%s", "amps");
-        s->model_count += n;
+            snprintf(L->model_dir[L->model_count + k],
+                     sizeof(L->model_dir[0]), "%s", "amps");
+        L->model_count += n;
     }
 }
+
+/* The half the callback may read. Acquire against the worker's release in
+ * publish_lists(), so the names and counts are visible with the pointer. */
+static inline const asset_lists_t *assets(const a2c_t *s) {
+    return s->lists[s->lists_active.load(std::memory_order_acquire)];
+}
+
+/* ---------------------------------------------------- the refresh, on the
+ * worker --------------------------------------------------------------- */
+
+/* A CHEAP "DID ANYTHING CHANGE?", so the common answer costs eight stats
+ * rather than seven readdirs.
+ *
+ * A directory's mtime moves when an entry is added, removed or renamed,
+ * which is every way a file arrives: the web manager writes a temp and
+ * renames it, and a delete is a delete. It does NOT move when a file is
+ * overwritten in place under the same name - that is the one case this
+ * misses, and the `rescan` param is the nudge for it.
+ *
+ * nsec is folded in because two uploads inside one second are ordinary and
+ * a seconds-only stamp would see the second one as no change at all.
+ */
+static unsigned long long assets_dir_stamp(const a2c_t *s) {
+    unsigned long long h = 1469598103934665603ULL;
+    char dir[MAX_PATH_LEN];
+    for (int i = 0; i <= ASSET_DIR_COUNT; i++) {
+        /* The last pass is the pre-rename `models/`, which scan_lists_into
+         * still reads - a stamp that ignored it would never notice a file
+         * landing there. */
+        snprintf(dir, sizeof(dir), "%s/%s", s->module_dir,
+                 (i == ASSET_DIR_COUNT) ? "models" : ASSET_DIRS[i].dir);
+        struct stat st;
+        if (stat(dir, &st) != 0) { h = h * 1099511628211ULL + 1u; continue; }
+        h = (h ^ (unsigned long long)st.st_mtime) * 1099511628211ULL;
+        h = (h ^ (unsigned long long)st.st_mtim.tv_nsec) * 1099511628211ULL;
+        h = (h ^ (unsigned long long)st.st_size) * 1099511628211ULL;
+    }
+    return h;
+}
+
+/* A BLOCK'S IDENTITY IS ITS FILE NAME, NOT ITS INDEX IN THE LIST.
+ *
+ * The lists are sorted, so a file dropped into amps/ shifts the index of
+ * every capture after it. Without this, a refresh would silently re-point
+ * every block past the insertion at its neighbour - and because the block
+ * keeps PLAYING the model already in memory, the screen and the sound
+ * would disagree with nothing to say why. The name is what was loaded, so
+ * the name is what the new index is resolved from.
+ *
+ * A block whose own file is GONE keeps its stale index and is logged: it
+ * is still playing that model out of memory, there is no right index for a
+ * file that no longer exists, and -1 would make the picker read as the
+ * first entry, which is a different wrong answer with no log line.
+ */
+static void rebind_blocks(a2c_t *s, asset_lists_t *L) {
+    char msg[MAX_NAME_LEN + 96];
+    for (int b = 0; b < NUM_BLOCKS; b++) {
+        nam_block_t *a = &s->amp[b];
+        if (a->name[0]) {
+            const int i = nam_find_name(L->model_names, L->model_count, a->name);
+            if (i >= 0) a->index = i;
+            else {
+                snprintf(msg, sizeof(msg),
+                         "Nam A2c: block %d capture '%s' is no longer on the "
+                         "card - still playing, picker is stale", b + 1, a->name);
+                plugin_log(msg);
+            }
+        }
+        ir_block_t *c = &s->cab[b];
+        if (c->name[0]) {
+            const int i = (s->type[b] == BLK_IR)
+                ? nam_find_name(L->ir_names, L->ir_count, c->name)
+                : nam_find_name(L->cab_names, L->cab_count, c->name);
+            if (i >= 0) c->index = i;
+            else {
+                snprintf(msg, sizeof(msg),
+                         "Nam A2c: block %d IR '%s' is no longer on the card "
+                         "- still playing, picker is stale", b + 1, c->name);
+                plugin_log(msg);
+            }
+        }
+    }
+}
+
+/* Scan the inactive half and swap to it. Worker only.
+ *
+ * `list_gen` is bumped AFTER the swap and is what the UI watches: it reads
+ * the lists once on entry (an IPC read is ~2.8 ms and they could not
+ * change while the screen was up, which is exactly the assumption this
+ * breaks), so it needs one cheap number that says "ask again". */
+static int refresh_lists(a2c_t *s) {
+    const int cur = s->lists_active.load(std::memory_order_relaxed);
+    const int nxt = cur ^ 1;
+    asset_lists_t *L = s->lists[nxt];
+    memset(L, 0, sizeof(*L));
+    scan_lists_into(s, L);
+
+    /* NOTHING CHANGED IS THE COMMON CASE, and publishing it anyway would
+     * make the UI re-read four lists every time a directory's mtime moved
+     * for an unrelated reason. Compared on the DATA, not on the stamp. */
+    const asset_lists_t *old = s->lists[cur];
+    if (L->model_count == old->model_count &&
+        L->cab_count == old->cab_count &&
+        L->ir_count == old->ir_count &&
+        memcmp(L->model_names, old->model_names,
+               sizeof(L->model_names[0]) * (size_t)L->model_count) == 0 &&
+        memcmp(L->cab_names, old->cab_names,
+               sizeof(L->cab_names[0]) * (size_t)L->cab_count) == 0 &&
+        memcmp(L->ir_names, old->ir_names,
+               sizeof(L->ir_names[0]) * (size_t)L->ir_count) == 0)
+        return 0;
+
+    s->lists_active.store(nxt, std::memory_order_release);
+    rebind_blocks(s, L);
+    s->list_gen.fetch_add(1, std::memory_order_release);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg),
+             "Nam A2c: library refreshed - %d capture(s), %d cab(s), %d IR(s)",
+             L->model_count, L->cab_count, L->ir_count);
+    plugin_log(msg);
+    return 1;
+}
+
+static double mono_us(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1e6 + (double)t.tv_nsec / 1e3;
+}
+
+/* The worker's idle errand. Every two seconds it costs eight stats; it
+ * costs seven readdirs only when one of those says something moved.
+ *
+ * A flip may not follow a flip inside a second, which is what makes the
+ * two buffers safe without an RCU - see asset_lists_t. A request that
+ * arrives inside that second stays PENDING rather than being dropped, so
+ * `rescan` cannot be swallowed by its own timing. */
+static void worker_poll_assets(a2c_t *s) {
+    const double now = mono_us();
+    const int forced = s->rescan_req;
+    if (!forced && now < s->next_poll_us) return;
+    if (now - s->last_flip_us < 1.0e6) return;
+    s->rescan_req = 0;
+    s->next_poll_us = now + 2.0e6;
+
+    const unsigned long long st = assets_dir_stamp(s);
+    if (!forced && st == s->dir_stamp) return;
+    s->dir_stamp = st;
+    if (refresh_lists(s)) s->last_flip_us = now;
+}
+
 
 /* ======================================================================== */
 /* API v2                                                                    */
@@ -600,22 +797,23 @@ typedef struct audio_fx_api_v2 {
 } audio_fx_api_v2_t;
 
 static void request_load(a2c_t *s, int block, int kind, int index) {
+    const asset_lists_t *L = assets(s);
     load_req_t r;
     r.block = block;
     r.kind = kind;
     r.index = index;
     if (kind == BLK_NAM) {
-        if (index < 0 || index >= s->model_count) return;
-        snprintf(r.path, sizeof(r.path), "%s", s->model_paths[index]);
+        if (index < 0 || index >= L->model_count) return;
+        snprintf(r.path, sizeof(r.path), "%s", L->model_paths[index]);
         s->amp[block].index = index;
         s->amp[block].loading.store(true, std::memory_order_release);
     } else if (kind == BLK_IR) {
-        if (index < 0 || index >= s->ir_count) return;
-        snprintf(r.path, sizeof(r.path), "%s", s->ir_paths[index]);
+        if (index < 0 || index >= L->ir_count) return;
+        snprintf(r.path, sizeof(r.path), "%s", L->ir_paths[index]);
         s->cab[block].index = index;
     } else {
-        if (index < 0 || index >= s->cab_count) return;
-        snprintf(r.path, sizeof(r.path), "%s", s->cab_paths[index]);
+        if (index < 0 || index >= L->cab_count) return;
+        snprintf(r.path, sizeof(r.path), "%s", L->cab_paths[index]);
         s->cab[block].index = index;
     }
     req_push(&s->reqs, &r);
@@ -718,7 +916,28 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     report_install(s);
     migrate_asset_dirs(s->module_dir);
     ensure_asset_dirs(s->module_dir);
-    scan_lists(s);
+    /* BOTH HALVES UP FRONT, so a flip never allocates and the worker never
+     * has a half to check for. ~1 MB; create_instance already reads seven
+     * directories below, so this is not the file-I/O-on-the-callback line
+     * being crossed - it is the one place where crossing it is correct,
+     * because nothing can read a list that is not there yet and the user
+     * is waiting on the load either way. */
+    s->lists[0] = (asset_lists_t *)calloc(1, sizeof(asset_lists_t));
+    s->lists[1] = (asset_lists_t *)calloc(1, sizeof(asset_lists_t));
+    if (!s->lists[0] || !s->lists[1]) {
+        plugin_log("Nam A2c: asset list buffers FAILED to allocate");
+        free(s->lists[0]); free(s->lists[1]);
+        free(s);
+        return NULL;
+    }
+    new (&s->lists_active) std::atomic<int>(0);
+    new (&s->list_gen) std::atomic<unsigned>(0);
+    /* SYNCHRONOUS, and it has to be: the host asks for chain_params and
+     * the picker lists during the load, and an empty answer there is not
+     * "no files", it is a picker that says (none) until something else
+     * makes it ask again. */
+    scan_lists_into(s, s->lists[0]);
+    s->dir_stamp = assets_dir_stamp(s);
 
     s->worker_stop = 0;
     s->worker_running = start_low_prio_thread(&s->worker_tid, worker_thread, s, 0);
@@ -755,6 +974,8 @@ static void v2_destroy_instance(void *instance) {
         ir_block_free(&s->cab[i]);
         fx_block_free(&s->fx[i]);
     }
+    free(s->lists[0]);
+    free(s->lists[1]);
     free(s);
     plugin_log("Nam A2c: instance destroyed");
 }
@@ -989,6 +1210,7 @@ static int block_key(const char *key, const char **rest) {
 
 static void v2_set_param(void *instance, const char *key, const char *val) {
     a2c_t *s = (a2c_t *)instance;
+    const asset_lists_t *L = assets(s);
     if (!s || !key || !val) return;
 
     const char *sub;
@@ -1003,12 +1225,12 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             /* A block given a type with nothing chosen yet takes the first
              * thing on the card, so selecting "Amp" makes a sound rather
              * than a silence you then have to diagnose. */
-            if (t == BLK_NAM && s->amp[b].index < 0 && s->model_count > 0)
+            if (t == BLK_NAM && s->amp[b].index < 0 && L->model_count > 0)
                 request_load(s, b, BLK_NAM, 0);
             if (t == BLK_IR) {
                 ir_rv_defaults(&s->cab[b]);
                 s->cab[b].index = -1;
-                if (s->ir_count > 0) request_load(s, b, BLK_IR, 0);
+                if (L->ir_count > 0) request_load(s, b, BLK_IR, 0);
             }
             if (t == BLK_CAB) {
                 /* AS CAPTURED is the only honest zero for a mic move, and
@@ -1020,7 +1242,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                 mic_update(&s->cab[b].mic);
                 mic_reset_state(&s->cab[b].mic);
                 s->cab[b].index = -1;
-                if (s->cab_count > 0) request_load(s, b, BLK_CAB, 0);
+                if (L->cab_count > 0) request_load(s, b, BLK_CAB, 0);
             }
             if (t == BLK_FX) fx_block_reset(&s->fx[b]);
             s->fade_in[b] = FADE_IN_SAMPLES;
@@ -1038,7 +1260,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
             nam_block_apply_quality(&s->amp[b]);
         } else if (strcmp(sub, "ir") == 0) {
             const int i = atoi(val);
-            if (i >= 0 && i < s->ir_count && i != s->cab[b].index)
+            if (i >= 0 && i < L->ir_count && i != s->cab[b].index)
                 request_load(s, b, BLK_IR, i);
         } else if (strcmp(sub, "cab") == 0) {
             int i = atoi(val);
@@ -1113,7 +1335,12 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         int i = atoi(val);
         s->sel_block = (i < 0) ? 0 : (i >= NUM_BLOCKS) ? NUM_BLOCKS - 1 : i;
     } else if (strcmp(key, "rescan") == 0) {
-        scan_lists(s);
+        /* A NUDGE, NOT A SCAN. This used to call scan_lists here, which is
+         * opendir/readdir on the SPI callback - seven directories of file
+         * I/O inside the audio frame. The worker polls for a changed card
+         * on its own anyway; this only says "look now, do not wait for the
+         * next poll". */
+        s->rescan_req = 1;
     }
 }
 
@@ -1125,7 +1352,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
  * this JSON truncate a quoted value at its first quote, so an escaped name
  * would be worse than a shortened one. */
 static int emit_options(char *buf, int buf_len,
-                        char names[][MAX_NAME_LEN], int count) {
+                        const char names[][MAX_NAME_LEN], int count) {
     int w = 0;
     w += snprintf(buf + w, buf_len - w, "[");
     int shown = (count < MAX_LISTED) ? count : MAX_LISTED;
@@ -1146,6 +1373,7 @@ static int emit_options(char *buf, int buf_len,
 
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
     a2c_t *s = (a2c_t *)instance;
+    const asset_lists_t *L = assets(s);
     if (!s || !key || !buf) return -1;
 
     const char *sub;
@@ -1280,8 +1508,19 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * show an index - "2" tells you nothing about which amp is in block 2.
      * The same names go into chain_params as enum options; both are built
      * from the one scan so they cannot disagree. */
+    /* ONE CHEAP NUMBER THAT SAYS "ASK AGAIN".
+     *
+     * The UI reads the four picker lists once, on entry, because an IPC
+     * read is ~2.8 ms against a 1.68 ms whole-page render - and because
+     * they could not change while the screen was up, which is the
+     * assumption the auto-refresh breaks. It watches this instead and
+     * re-reads only when it moves. */
+    if (strcmp(key, "list_gen") == 0)
+        return snprintf(buf, buf_len, "%u",
+                        s->list_gen.load(std::memory_order_acquire));
+
     if (strcmp(key, "model_list") == 0)
-        return emit_options(buf, buf_len, s->model_names, s->model_count);
+        return emit_options(buf, buf_len, L->model_names, L->model_count);
     /* PARALLEL TO model_list, by index, and carrying the folder NAME so
      * the UI matches on the thing the user typed rather than on an index
      * into a copy of a table. Not folded into the name: the name is what
@@ -1290,16 +1529,16 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "model_dirs") == 0) {
         int w = 0;
         w += snprintf(buf + w, buf_len - w, "[");
-        for (int i = 0; i < s->model_count && w < buf_len - 32; i++)
+        for (int i = 0; i < L->model_count && w < buf_len - 32; i++)
             w += snprintf(buf + w, buf_len - w, "%s\"%s\"", i ? "," : "",
-                          s->model_dir[i]);
+                          L->model_dir[i]);
         w += snprintf(buf + w, buf_len - w, "]");
         return w;
     }
     if (strcmp(key, "cab_list") == 0)
-        return emit_options(buf, buf_len, s->cab_names, s->cab_count);
+        return emit_options(buf, buf_len, L->cab_names, L->cab_count);
     if (strcmp(key, "ir_list") == 0)
-        return emit_options(buf, buf_len, s->ir_names, s->ir_count);
+        return emit_options(buf, buf_len, L->ir_names, L->ir_count);
     /* THE KNOB TABLE, SERVED ONCE.
      *
      * The screen has to print "480 ms" and "-6.0 dB" rather than "37", and
@@ -1355,9 +1594,9 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
 
     if (strcmp(key, "chain_params") == 0) {
         char models[4096], cabs[4096], irs[4096];
-        emit_options(models, sizeof(models), s->model_names, s->model_count);
-        emit_options(cabs, sizeof(cabs), s->cab_names, s->cab_count);
-        emit_options(irs, sizeof(irs), s->ir_names, s->ir_count);
+        emit_options(models, sizeof(models), L->model_names, L->model_count);
+        emit_options(cabs, sizeof(cabs), L->cab_names, L->cab_count);
+        emit_options(irs, sizeof(irs), L->ir_names, L->ir_count);
 
         int w = 0;
         w += snprintf(buf + w, buf_len - w,

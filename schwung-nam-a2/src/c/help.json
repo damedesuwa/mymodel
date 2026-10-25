@@ -39,7 +39,25 @@
         "button.",
         "Old installs: models/ and irs/",
         "are renamed for you on first",
-        "run - nothing to move."
+        "run - nothing to move.",
+        "",
+        "NO RELOAD NEEDED. Upload a",
+        "file and it shows up in the",
+        "picker within a couple of",
+        "seconds, while you are",
+        "playing. The scan runs off",
+        "the audio thread, so it does",
+        "not touch the sound.",
+        "A block keeps the capture it",
+        "had, by NAME - the lists are",
+        "sorted, so a new file landing",
+        "ahead of yours would",
+        "otherwise shift it onto its",
+        "neighbour.",
+        "Overwriting a file under the",
+        "SAME name is the one case it",
+        "cannot see; rename it or",
+        "leave and re-enter."
       ]
     },
     {

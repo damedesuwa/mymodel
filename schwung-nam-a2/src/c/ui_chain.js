@@ -602,10 +602,19 @@ const st = {
     specs: [],                  /* fx_specs, read once - see specKnob */
     build: '?',
     rot: 0,
+    /* The plugin's scan counter as of the last time the lists were read.
+     * null = never asked; see rotateRead. */
+    listGen: null,
 };
 
-/* The lists are read ONCE. They change only when a file lands on the card,
- * which cannot happen while this screen is up. */
+/* READ ON ENTRY, AND AGAIN WHEN `list_gen` MOVES.
+ *
+ * This used to say the lists change only when a file lands on the card,
+ * which cannot happen while this screen is up - and that was true until
+ * the card could be written from the web manager with the module playing.
+ * It is still five IPC reads (~14 ms), so it is not on the rotation: the
+ * plugin bumps one counter when it publishes a new scan, the rotation
+ * reads THAT, and this runs only on a change. */
 function loadLists() {
     try {
         const j = getp('model_dirs');
@@ -680,6 +689,22 @@ function rotateRead() {
     st.rot++;
     if (i === steps - 1) {
         st.cpu = num(getp('cpu'), st.cpu);
+        /* ONCE PER ROTATION, on the stop that is already paying for a read
+         * of its own. A new .nam does not need noticing inside 100 ms, and
+         * a read per tick for something that moves when a FILE is uploaded
+         * would be the whole read budget spent on waiting. */
+        const g = getp('list_gen');
+        if (g !== null && g !== '' && g !== st.listGen) {
+            /* FIRST ANSWER IS NOT A CHANGE. st.listGen starts null, so
+             * without this the module re-reads four lists on the first
+             * rotation after every entry - 14 ms for an answer it already
+             * has from init(). */
+            if (st.listGen !== null) {
+                loadLists();
+                attachNamItems();
+            }
+            st.listGen = g;
+        }
         return;
     }
     const b = i >> 1;
@@ -1589,6 +1614,9 @@ globalThis.chain_ui = {
         resetKnobAcc();
         loadLists();
         attachNamItems();
+        /* Stamped here, with the lists it goes with, or the first rotation
+         * reads them all again for nothing. */
+        st.listGen = getp('list_gen');
         st.build = getp('build') || '?';
         /* THE MAIN ROW'S FIRST BLOCK IS WHERE THIS OPENS. Slot 0 is the
          * top row, which on a mono board is off the path entirely - so

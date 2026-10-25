@@ -37,6 +37,8 @@ const params = {
      * exact failure the served spec exists to prevent. */
     fx_list: JSON.stringify(JSON.parse(specsRaw).map(p => p.n)),
     fx_specs: specsRaw,
+    /* The plugin's scan counter. See the list_gen block at the end. */
+    list_gen: '0',
 };
 /* TWO ROWS: `b<n>` is the bottom (main) chain, `t<n>` the top (parallel)
  * one. The top row starts EMPTY, which is what makes the board mono - the
@@ -1142,6 +1144,61 @@ for (const [what, impl] of [
     for (let i = 0; i < 8; i++) { u5.tick(); u5.onMidiMessageInternal([0xb0, 14, 1]); }
     ok(bad.length === 0, 'nothing is drawn outside 128x64' +
         (bad.length ? ' -- ' + bad.slice(0, 4).join('; ') : ''));
+}
+
+/* --- list_gen: a file landed on the card while this screen was up ------ */
+/* The lists were read once on entry, and that was sound while the card
+ * could not change underneath. It can now - the web manager writes it with
+ * the module playing - so the rotation watches one cheap counter.
+ *
+ * The first claim is why it is a counter and not an unconditional re-read:
+ * loadLists() is five IPC reads, ~14 ms, which spent every lap is most of
+ * the read budget gone on waiting for something that moves when a FILE is
+ * uploaded. `attachNamItems` rebuilding the Amp walk from a new model_list
+ * is covered above; what is new here is WHEN it is asked to. */
+{
+    const mkUi = () => new Function('globalThis', 'leds', 'buttonLeds',
+        ...names, stubs + src + '\nreturn globalThis.chain_ui;')(
+        {}, leds, buttonLeds, ...names.map(n => host[n]));
+    const LAP = 40;        /* a full rotation is NUM_BLOCKS*2+1 = 33 stops */
+
+    params.list_gen = '0';
+    params.model_list = JSON.stringify(['Recto', 'Plexi', 'My RAT', 'My Muff']);
+    params.model_dirs = JSON.stringify(['amps','amps','dist','fuzz']);
+    const u = mkUi();
+    u.init();
+
+    reads.length = 0;
+    for (let i = 0; i < LAP; i++) { advance(50); u.tick(); }
+    ok(reads.includes('list_gen'),
+       'list_gen: the rotation asks for it, once a lap');
+    ok(!reads.includes('model_list'),
+       'list_gen: unchanged -> the lists are NOT re-read');
+
+    /* A capture arrives sorting FIRST, which is what makes this more than
+     * cosmetic: every index behind it shifts, which is why the plugin
+     * rebinds its blocks by NAME rather than keeping the number. */
+    params.model_list = JSON.stringify(['Aaa New', 'Recto', 'Plexi',
+                                        'My RAT', 'My Muff']);
+    params.model_dirs = JSON.stringify(['amps','amps','amps','dist','fuzz']);
+    params.list_gen = '1';
+    reads.length = 0;
+    for (let i = 0; i < LAP; i++) { advance(50); u.tick(); }
+    ok(reads.includes('model_list'),
+       'list_gen: moved -> the lists ARE re-read');
+    ok(reads.filter(k => k === 'model_list').length === 1,
+       'list_gen: re-read ONCE, not once a tick for the rest of the lap');
+
+    /* AN OLD PLUGIN DOES NOT SERVE IT. null is not news about the card -
+     * see the tri-state rule - and must not read as "changed again". */
+    delete params.list_gen;
+    const u3 = mkUi();
+    u3.init();
+    reads.length = 0;
+    for (let i = 0; i < LAP * 2; i++) { advance(50); u3.tick(); }
+    ok(!reads.includes('model_list'),
+       'list_gen: a host that does not serve it never re-reads');
+    params.list_gen = '0';
 }
 
 console.log(fails ? 'FAILED' : 'PASS');
