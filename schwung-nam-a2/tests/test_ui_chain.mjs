@@ -170,13 +170,14 @@ ui.tick();
 ok(drawn.some(t => t === 'Remove Module'), 'jog click opens the menu with Remove Module');
 ok(drawn.some(t => t === 'Preset: (none)'), 'preset row carries its value');
 
-/* Scroll to Remove Module and run it. */
-const rows = ['Preset: (none)', 'Save As', 'Swap Module', 'Remove Module', 'Module Help', 'Close'];
-for (let i = 0; i < rows.indexOf('Remove Module'); i++)
-    ui.onMidiMessageInternal([0xb0, 14, 1]); /* jog turn, one detent CW */
-drawn.length = 0;
-ui.tick();
-ok(drawn.some(t => t === 'Remove Module'), 'cursor reaches Remove Module');
+/* Scroll to Remove Module and run it.
+ *
+ * BY LABEL, never by counting. This used to restate the row list and index
+ * into it, so adding a row anywhere above (the Tuner) moved the cursor one
+ * short and the click ran the wrong action - a copy of the menu that agrees
+ * with itself and with nothing else, which is the reason menuGoTo exists. */
+ok(menuGoTo(ui, 'Remove Module', () => { drawn.length = 0; ui.tick(); }),
+   'cursor reaches Remove Module');
 ui.onMidiMessageInternal([0xb0, 3, 127]);   /* click it */
 ok(actionsRun.includes('remove'), 'clicking Remove Module runs the host action');
 
@@ -1090,7 +1091,9 @@ for (const [what, impl] of [
     const ran = [];
     h3.host_swap_module = () => ran.push('__swap');
     const seen = [];
-    h3.print = (x, y, t) => seen.push(String(t));
+    /* Into drawnAt as well, or cursorRow() cannot see this instance at all
+     * and menuGoTo answers null for every row. */
+    h3.print = (x, y, t) => { seen.push(String(t)); drawnAt.push([x, y, String(t)]); };
     h3.clear_screen = () => {};
     const n3 = Object.keys(h3);
     const ui3 = new Function('globalThis', 'leds', 'buttonLeds', ...n3,
@@ -1100,6 +1103,11 @@ for (const [what, impl] of [
     ui3.tick();
     ok(seen.includes('Swap / Remove...'), 'old host -> Swap / Remove offered');
     ok(!seen.includes('Save As'), 'old host -> no inert rows offered');
+    /* Scrolled to, not assumed to be row 0. On an old host Swap / Remove is
+     * the only row that does anything, which made it row 0 and made this
+     * test pass on a coincidence until the Tuner row went in above it. */
+    ok(menuGoTo(ui3, 'Swap / Remove...', () => { seen.length = 0; ui3.tick(); }),
+       'old host -> the cursor reaches Swap / Remove');
     ui3.onMidiMessageInternal([0xb0, 3, 127]);
     ok(ran.includes('__swap'), 'old host -> it opens the picker');
 }
@@ -1150,6 +1158,26 @@ for (const [what, impl] of [
     u5.init();
     u5.onMidiMessageInternal([0xb0, 3, 127]);
     for (let i = 0; i < 8; i++) { u5.tick(); u5.onMidiMessageInternal([0xb0, 14, 1]); }
+
+    /* AND THE TUNER SCREEN, at both ends of its needle and with the widest
+     * note it can print. It is drawn from arithmetic on a reading, which is
+     * exactly the shape that put text off the panel before. */
+    const u6 = mk();
+    u6.init();
+    u6.onMidiMessageInternal([0xb0, 3, 127]);     /* menu; Tuner is row 0 */
+    u6.tick();
+    u6.onMidiMessageInternal([0xb0, 3, 127]);     /* open it */
+    for (const rep of ['{"hz":0,"lvl":0,"conf":0}',
+                       '{"hz":0,"lvl":0.02,"conf":0.1}',
+                       '{"hz":82.41,"note":"E","oct":2,"cents":0,"conf":1,"lvl":0.2}',
+                       '{"hz":80.0,"note":"E","oct":2,"cents":-99,"conf":1,"lvl":0.2}',
+                       '{"hz":340.0,"note":"F","oct":4,"cents":99,"conf":1,"lvl":0.9}',
+                       '{"hz":4978.03,"note":"D#","oct":8,"cents":-49.9,"conf":1,"lvl":0.5}',
+                       '{"hz":12543.85,"note":"G","oct":9,"cents":49.9,"conf":1,"lvl":1}']) {
+        params.tuner = rep;
+        for (let i = 0; i < 4; i++) { advance(50); u6.tick(); }
+    }
+    delete params.tuner;
     ok(bad.length === 0, 'nothing is drawn outside 128x64' +
         (bad.length ? ' -- ' + bad.slice(0, 4).join('; ') : ''));
 }
@@ -1391,6 +1419,117 @@ for (const [what, impl] of [
        'split x page: both lanes run across page 2 (got ' +
        laneRuns.length + ')');
     params['merge'] = '0';
+}
+
+/* --- the tuner screen -------------------------------------------------- */
+{
+    const mkUi = () => new Function('globalThis', 'leds', 'buttonLeds',
+        ...names, stubs + src + '\nreturn globalThis.chain_ui;')(
+        {}, leds, buttonLeds, ...names.map(n => host[n]));
+    const click = (u) => u.onMidiMessageInternal([0xb0, 3, 127]);
+    const rp = (u) => { advance(50); u.tick(); };
+
+    board({ b1: 3 });
+    params.tuner = '{"hz":0,"lvl":0.0001,"conf":0}';
+    const u = mkUi();
+    u.init();
+
+    /* It is the FIRST menu row, because reaching it with a guitar in your
+     * hands is the one interaction here that has to be short. */
+    drawn.length = 0;
+    click(u); rp(u);
+    ok(cursorRow(u, () => { drawnAt.length = 0; rects.length = 0; advance(50); u.tick(); })
+       === 'Tuner', 'tuner: it is the first menu row');
+
+    /* Open it. */
+    click(u);
+    drawn.length = 0; rp(u);
+    ok(drawn.some(t => t === 'Tuner'), 'tuner: the screen opens');
+    ok(drawn.some(t => t === 'play a string'),
+       'tuner: silence says WHY there is no reading');
+    ok(drawn.some(t => t === '--'), 'tuner: and shows no note');
+
+    /* A LEVEL BUT NO PITCH is a different sentence from silence. Both are
+     * hz 0, which is why the plugin reports the level beside it. */
+    params.tuner = '{"hz":0,"lvl":0.02,"conf":0.1}';
+    drawn.length = 0; rp(u); rp(u); rp(u);
+    ok(drawn.some(t => t === 'too quiet'),
+       'tuner: something inaudible is not the same as nothing');
+
+    /* A note, well out of tune. */
+    params.tuner = '{"hz":80.0,"note":"E","oct":2,"cents":-51.4,' +
+                   '"conf":0.97,"lvl":0.2}';
+    /* Three repaints to let the value land, then ONE more with the rect log
+     * cleared: counting rects across repaints counts the same box three
+     * times, which is how the clamp assertion below first read as three
+     * needles. */
+    rp(u); rp(u); rp(u);
+    drawn.length = 0; rects.length = 0;
+    advance(50); u.tick();
+    ok(drawn.some(t => t === 'E2'), 'tuner: it names the note');
+    ok(drawn.some(t => t === '-51c'), 'tuner: and how far out');
+    ok(drawn.some(t => t === '80.00 Hz'), 'tuner: and the frequency');
+    ok(drawn.some(t => t === '6 E'), 'tuner: and which string that is');
+    /* THE NEEDLE IS CLAMPED, NOT WRAPPED. -51 cents is past the end of a
+     * +-50 scale, and a needle that wrapped would read as nearly sharp. */
+    const needleX = rects.filter(r => r[0] === 'fill' && r[3] === 3 &&
+                                      r[4] === 13).map(r => r[1]);
+    ok(needleX.length === 1 && needleX[0] <= 4,
+       'tuner: the needle clamps at the flat end (x=' + needleX.join(',') + ')');
+
+    /* IN TUNE IS A FILLED BOX, not a word - readable from the distance a
+     * guitar puts between you and the screen. */
+    params.tuner = '{"hz":82.41,"note":"E","oct":2,"cents":0.4,' +
+                   '"conf":0.99,"lvl":0.2}';
+    rp(u); rp(u); rp(u);
+    rects.length = 0; drawn.length = 0;
+    advance(50); u.tick();
+    const box = rects.filter(r => r[0] === 'fill' && r[2] === 13 && r[5] === 1 &&
+                                  r[4] === 11);
+    ok(box.length === 1, 'tuner: in tune fills the note box');
+    ok(drawn.some(t => t === 'E2'), 'tuner: and still names the note');
+
+    /* Three cents out is NOT in tune, or the box means nothing. */
+    params.tuner = '{"hz":82.0,"note":"E","oct":2,"cents":-8.6,' +
+                   '"conf":0.99,"lvl":0.2}';
+    rp(u); rp(u); rp(u);
+    rects.length = 0;
+    advance(50); u.tick();
+    ok(rects.filter(r => r[0] === 'fill' && r[2] === 13 && r[4] === 11).length === 0,
+       'tuner: 8 cents out does not fill it');
+
+    /* THE BOARD IS NOT DRAWN, and its reads stop: the rotation keeps the
+     * board's picture current and the board is not on screen, so those
+     * ~2.8 ms reads would pay for a picture nobody is looking at. */
+    reads.length = 0;
+    rp(u); rp(u); rp(u); rp(u);
+    ok(reads.every(k => k === 'tuner'),
+       'tuner: nothing but the tuner is read (' +
+       [...new Set(reads)].join(',') + ')');
+    /* And not every tick, because the detector only publishes at 21 Hz. */
+    ok(reads.length <= 2,
+       'tuner: asked every other tick, not every one (' + reads.length + ')');
+
+    /* NOTHING FALLS THROUGH TO THE BOARD. A pad press behind this screen
+     * would stomp a block you cannot see. */
+    writes.length = 0;
+    u.onMidiMessageInternal([0x90, 68, 127]);
+    u.onMidiMessageInternal([0x80, 68, 0]);
+    u.onMidiMessageInternal([0xb0, 71, 1]);
+    u.onMidiMessageInternal([0xb0, 62, 127]);
+    rp(u);
+    ok(writes.length === 0,
+       'tuner: pads, knobs and arrows are swallowed (' +
+       writes.map(w => w[0]).join(',') + ')');
+
+    /* The jog click closes it - not Back, which the host takes before this
+     * file is called at all and which leaves the module entirely. */
+    click(u);
+    drawn.length = 0; rp(u);
+    ok(!drawn.some(t => t === 'jog: close'), 'tuner: the jog click closes it');
+    ok(drawn.some(t => t === 'B1') || drawn.some(t => t === 'A2C') ||
+       rects.length > 0, 'tuner: and the board is back');
+    delete params.tuner;
 }
 
 console.log(fails ? 'FAILED' : 'PASS');

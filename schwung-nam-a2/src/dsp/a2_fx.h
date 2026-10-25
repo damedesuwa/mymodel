@@ -355,8 +355,14 @@ static const fx_pedal_t FX_PEDALS[FX_COUNT] = {
  * them, and ordered by pitch so the encoder walks down to C and up to F#
  * instead of jumping about. E is index 0 rather than the middle, which is
  * why this pedal needs fx_block_apply_defaults. */
+/* NO MIX KNOB. A retune is not a blend: at anything below 100 the old
+ * tuning is still sounding under the new one, which is a detune wearing a
+ * tuning's name - and Detune is two rows up for exactly that. The knob
+ * only had a wrong setting and a right one, so it is the right one. p3 is
+ * a HOLE at its own index rather than a compaction, because the wire key
+ * is the index. */
 { "Tuning",     { K_ENUM("Tune", 7, "E|Eb|D|C#|C|F|F#"),
-                  K_LIN("Fine", "", -50, 50), K_POS("Mix"),
+                  K_LIN("Fine", "", -50, 50), KNOB_NONE,
                   KNOB_NONE, KNOB_NONE }, -1 },
 };
 
@@ -1587,7 +1593,6 @@ static void fx_tuning(fx_block_t *f, float *a, int n) {
     int sel = (int)(fx_v(f, 0) + 0.5f);
     if (sel < 0) sel = 0;
     if (sel > 6) sel = 6;
-    const float mix = fx_v(f, 2) * 0.01f;
     const float semis = (float)TUNE_SEMI[sel] + fx_v(f, 1) * 0.01f;
 
     /* E standard with no fine offset is a BYPASS - but the line has to keep
@@ -1640,7 +1645,8 @@ static void fx_tuning(fx_block_t *f, float *a, int n) {
         const float y = fx_tap(f, d0) * sinf(ang)
                       + fx_tap(f, d1) * fabsf(cosf(ang));
         f->w = (f->w + 1 >= f->line_len) ? 0 : f->w + 1;
-        a[i] = sanitize_sample(x * (1.0f - mix) + y * mix);
+        /* FULLY WET, always. See the table entry. */
+        a[i] = sanitize_sample(y);
     }
 }
 

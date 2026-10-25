@@ -380,6 +380,23 @@ static void fx_bq_peak(fx_bq_t *c, float hz, float q, float db) {
     c->a2 = (1.0f - alpha / A) / a0;
 }
 
+/* A plain 2-pole lowpass (RBJ). The peak and the shelf above are both
+ * relative to unity and cannot do this: an anti-alias filter has to REMOVE
+ * what is above the corner, not tilt it. Two of these in series at the same
+ * corner with Q 0.54 and 1.31 make a 4-pole Butterworth, which is what the
+ * tuner decimates behind. */
+static void fx_bq_lowpass(fx_bq_t *c, float hz, float q) {
+    float w = 2.0f * (float)M_PI * hz / SAMPLE_RATE;
+    float sn = sinf(w), cs = cosf(w);
+    float alpha = sn / (2.0f * q);
+    float a0 = 1.0f + alpha;
+    c->b0 = ((1.0f - cs) * 0.5f) / a0;
+    c->b1 = (1.0f - cs) / a0;
+    c->b2 = c->b0;
+    c->a1 = (-2.0f * cs) / a0;
+    c->a2 = (1.0f - alpha) / a0;
+}
+
 static void fx_bq_shelf(fx_bq_t *c, float hz, float db, int high) {
     float A = powf(10.0f, db / 40.0f);
     float w = 2.0f * (float)M_PI * hz / SAMPLE_RATE;

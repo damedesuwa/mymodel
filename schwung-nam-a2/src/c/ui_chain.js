@@ -520,6 +520,15 @@ let sel = NUM_COLS;              /* main row, column 1 - see init */
  * this case (shadow_ui.js:6763), with the slot and component already
  * applied. */
 let menuOpen = false;
+/* THE TUNER IS ITS OWN SCREEN, not a widget on the board.
+ *
+ * A needle wants the width and a note name wants the height, and neither
+ * fits in a 14 px column beside seven others. It is also the one screen
+ * here where the pedalboard is not what you are looking at, which is what
+ * lets it have the whole read budget - see tickBody. */
+let tunerOpen = false;
+let tunerVal = null;      /* the last parsed report, or null */
+let tunerAsk = 0;         /* tick counter: the detector only moves at 21 Hz */
 let menuRows = [];
 let menuCursor = 0;
 let menuTop = 0;
@@ -782,6 +791,7 @@ const FALLBACK_ROWS = [
 ];
 
 const SWAP_ROW = '\u0000swap';   /* handled here, not by the host */
+const TUNER_ROW = '\u0000tuner'; /* likewise - it is our own screen */
 
 function openMenu() {
     menuRows = [];
@@ -822,6 +832,11 @@ function openMenu() {
      * mid-take; In is set once against the guitar and then wants to be
      * somewhere it cannot be nudged. The jog edits it in place - no click,
      * no sub-screen - so it is still two gestures away. */
+    /* FIRST, because it is the thing you want before you want anything
+     * else on this screen, and because scrolling to it with a guitar in
+     * your hands is the one interaction here that has to be short. */
+    menuRows.unshift({ label: 'Tuner', action: TUNER_ROW });
+
     menuRows.push({ label: 'Input', action: null, edit: 'in_level' });
     menuRows.push({ label: 'Output', action: null, edit: 'out_level' });
     /* NO SPLIT ROW. The fork is wherever the top row starts, so setting
@@ -873,6 +888,13 @@ function runMenuRow() {
     menuOpen = false;
     lastPaint = 0;
     if (!row || !row.action) return false;
+    if (row.action === TUNER_ROW) {
+        tunerOpen = true;
+        tunerVal = null;
+        tunerAsk = 0;
+        lastPaint = 0;
+        return true;
+    }
     if (row.action === SWAP_ROW) {
         /* Opens the component picker. Its first row is None, which is how
          * a module is removed on this host. */
@@ -1386,7 +1408,95 @@ function drawFooter(list) {
     ptext(1, FOOT_Y, 'hold:edit  jog:merge', 1, w);
 }
 
+/* The six open strings, so the screen can say WHICH string you are near
+ * rather than only which note. Named from the low E up, the way they are
+ * counted on the instrument. */
+const TUNER_STRINGS = [
+    ['6 E', 82.407], ['5 A', 110.000], ['4 D', 146.832],
+    ['3 G', 195.998], ['2 B', 246.942], ['1 E', 329.628],
+];
+function nearestString(hz) {
+    let best = null, bestC = 1e9;
+    for (const [name, f] of TUNER_STRINGS) {
+        const c = Math.abs(1200 * Math.log2(hz / f));
+        if (c < bestC) { bestC = c; best = name; }
+    }
+    /* Only claim a string if it is within a semitone. Past that you are
+     * tuning to something else and a label would be a guess. */
+    return bestC <= 100 ? best : '';
+}
+
+const TUN_BAR_Y = 28, TUN_BAR_H = 13;
+const TUN_BAR_X = 4, TUN_BAR_W = 120;      /* centre lands on 64 */
+const TUN_RANGE = 50;                      /* cents, each way */
+/* How close counts as in tune. Three cents is below what anyone hears on a
+ * guitar and inside what the detector is good for (the two-stage search
+ * measures to under 3 cents across the range), so it is honest both ways. */
+const TUN_IN_TUNE = 3;
+
+function drawTuner() {
+    clear_screen();
+    const v = tunerVal;
+    const hz = (v && Number.isFinite(v.hz)) ? v.hz : 0;
+    const live = hz > 0;
+    const cents = live && Number.isFinite(v.cents) ? v.cents : 0;
+    const inTune = live && Math.abs(cents) <= TUN_IN_TUNE;
+
+    ptext(1, 1, 'Tuner', 1, 60);
+    pright(126, 1, live ? (nearestString(hz) || '') : '', 1, 60);
+    fill_rect(0, 10, 128, 1, 1);
+
+    /* THE NOTE, and the in-tune answer is the BOX around it rather than a
+     * word. A needle says how far and a word would say the same thing
+     * again; the fill is readable from further away than either, which is
+     * the distance a guitar puts between you and the screen. */
+    const note = live ? (v.note + String(v.oct)) : '--';
+    const nw = text_width(note) + 6;
+    const nx = 64 - (nw >> 1);
+    if (inTune) {
+        fill_rect(nx, 13, nw, 11, 1);
+        pcenter(nx, nw, 15, note, 0);
+    } else {
+        pcenter(nx, nw, 15, note, 1);
+    }
+    if (live) {
+        pright(126, 15, (cents > 0 ? '+' : '') + cents.toFixed(0) + 'c', 1, 40);
+    }
+
+    /* The scale. Ticks every 10 cents, a taller one at the centre, so the
+     * needle has something to be read against - a bare moving block says
+     * how far but not how far out of what. */
+    fill_rect(TUN_BAR_X, TUN_BAR_Y + TUN_BAR_H, TUN_BAR_W + 1, 1, 1);
+    for (let c = -TUN_RANGE; c <= TUN_RANGE; c += 10) {
+        const x = 64 + Math.round(c * (TUN_BAR_W / 2) / TUN_RANGE);
+        const h = (c === 0) ? TUN_BAR_H : 3;
+        fill_rect(x, TUN_BAR_Y + TUN_BAR_H - h, 1, h, 1);
+    }
+
+    if (live) {
+        /* CLAMPED, NOT WRAPPED. Past the ends the needle sits ON the end:
+         * the note name has already changed by then, so the bar's job is
+         * only to say "a long way, that direction". */
+        let c = cents;
+        if (c < -TUN_RANGE) c = -TUN_RANGE;
+        if (c > TUN_RANGE) c = TUN_RANGE;
+        const x = 64 + Math.round(c * (TUN_BAR_W / 2) / TUN_RANGE);
+        fill_rect(x - 1, TUN_BAR_Y, 3, TUN_BAR_H, 1);
+        pcenter(0, 128, 44, hz.toFixed(2) + ' Hz', 1);
+    } else {
+        /* WHY there is no reading, which is a different sentence from a
+         * blank screen. The plugin answers with hz 0 and a level, so the
+         * two silences can be told apart: nothing played, or something
+         * played too quietly to measure. */
+        const lvl = (v && Number.isFinite(v.lvl)) ? v.lvl : 0;
+        pcenter(0, 128, 44, lvl > 0.0005 ? 'too quiet' : 'play a string', 1);
+    }
+
+    ptext(1, FOOT_Y, 'jog: close', 1, 126);
+}
+
 function draw() {
+    if (tunerOpen) { drawTuner(); return; }
     if (menuOpen) { drawMenu(); return; }
     clear_screen();
     drawHeader();
@@ -1814,6 +1924,37 @@ function tickBody() {
         if (typeof host_claim_ccs === 'function')
             host_claim_ccs([CC_NAV_LEFT, CC_NAV_RIGHT]);
 
+        /* THE TUNER TAKES THE WHOLE READ BUDGET, and the rotation stops.
+         *
+         * An IPC read is ~2.8 ms. The rotation exists to keep the BOARD's
+         * picture current, and the board is not on screen - so spending
+         * those reads on it would be paying for a picture nobody is
+         * looking at and then not being able to afford the one they are.
+         *
+         * Asked every OTHER tick, because the detector only publishes at
+         * 21 Hz (one analysis every 16 blocks) and reading faster than the
+         * producer buys nothing but IPC. */
+        if (tunerOpen) {
+            /* ITS OWN CLOCK READ. `now` below is declared after this point
+             * with `const`, so reading it here is a temporal dead zone -
+             * which throws, and a throw inside tick() is swallowed by the
+             * host, so the screen simply never painted while every other
+             * assertion about this branch passed. */
+            const tnow = Date.now();
+            if ((tunerAsk++ & 1) === 0) {
+                const j = getp('tuner');
+                /* null is the read not completing, which is news about the
+                 * CHANNEL - keep the last reading rather than blanking the
+                 * screen on one slow frame. "" would be served-and-empty,
+                 * which this key never answers: no note is hz 0. */
+                if (j !== null && j !== '') {
+                    try { tunerVal = JSON.parse(j); } catch (e) { }
+                }
+            }
+            if (tnow - lastPaint >= 33) { lastPaint = tnow; draw(); }
+            return;
+        }
+
         rotateRead();
 
         /* A hold fires while the finger is still down - waiting for the
@@ -1843,6 +1984,27 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
          * ignored, so it cannot fall through to a branch that reads CC
          * numbers it does not own. */
         if (status === 0xb0 && d1 === CC_SHIFT) return;
+
+        /* WHILE THE TUNER IS UP IT IS THE WHOLE SCREEN.
+         *
+         * Everything is swallowed and the jog click closes it. NOT Back:
+         * the host handles Back itself before we are called at all
+         * (shadow_ui.js routes everything except Back to a loaded module),
+         * so Back leaves the module entirely - which is the right thing
+         * for Back to do and the wrong thing for closing a sub-screen.
+         * The jog click is the only button this file can be sure of, and
+         * it is what opens the menu on the way in.
+         *
+         * Swallowed rather than ignored, so a pad press cannot fall
+         * through to the board and stomp a block you cannot see. */
+        if (tunerOpen) {
+            if (status === 0xb0 && d1 === CC_JOG_CLICK && d2 > 0) {
+                tunerOpen = false;
+                tunerVal = null;
+                lastPaint = 0;
+            }
+            return;
+        }
 
         /* THE ARROWS MOVE THE WINDOW, and only on the PRESS.
          *

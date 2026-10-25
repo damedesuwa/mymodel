@@ -8,6 +8,8 @@
 #include <cstring>
 #include <cmath>
 #include <ctime>
+#include <cstdlib>
+#include <string>
 #include "plugin_api_v1.h"
 
 typedef struct audio_fx_api_v2 {
@@ -1138,14 +1140,29 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* Mix is a CROSSFADE, not a send: at 0 the shifted note is gone
-         * entirely, which is what separates a retune from a detune. */
+        /* THERE IS NO MIX. A retune is not a blend: below 100 the old
+         * tuning is still sounding underneath, which is a detune wearing a
+         * tuning's name - and Detune is a separate pedal for exactly that.
+         * p3 is a HOLE at its own index (the wire key is the index, so it
+         * cannot be compacted away), and the DSP must not read it. Driven
+         * to both ends, because a knob that has merely been hidden from
+         * the screen still moves the audio. */
+        /* Measured as a PITCH, not as a level. A first version compared
+         * the energy at 196 Hz between the two ends of p3 and read a 24%
+         * difference as p3 still working - it is the grain wrap, which
+         * modulates the amplitude depending on where in its cycle the
+         * window happens to land. The centroid does not care: if any dry
+         * survived, it would pull toward 220. */
         run("0.3333", "0.5", "0.0", 220.0);
-        {
-            const double dry = bin(220.0), wet = bin(196.00);
-            printf("tuning: Mix 0  220Hz %.4f  196Hz %.4f\n", dry, wet);
-            if (!(dry > wet * 20.0)) {
-                printf("   <-- Mix 0 still passes the shifted note\n");
+        const double hole_lo = centroid(150.0, 300.0);
+        run("0.3333", "0.5", "1.0", 220.0);
+        const double hole_hi = centroid(150.0, 300.0);
+        printf("tuning: p3 at 0 -> %.2f Hz   at 1 -> %.2f Hz  (want 196.00 "
+               "both)\n", hole_lo, hole_hi);
+        for (int e = 0; e < 2; e++) {
+            const double got = e ? hole_hi : hole_lo;
+            if (fabs(1200.0 * log2(got / 196.00)) > 20.0) {
+                printf("   <-- p3 at %d still mixes the old pitch back in\n", e);
                 fails++;
             }
         }
@@ -1209,6 +1226,152 @@ int main(int argc, char **argv) {
             fails++;
         }
         api->set_param(in, "b1_type", "0");
+    }
+
+    /* ----------------------------------------------------------- tuner */
+    /* A SINE WOULD PROVE NOTHING. The failure a tuner has is the OCTAVE
+     * ERROR: a plucked low E has a second harmonic that is often louder
+     * than its fundamental, so a detector taking the biggest correlation
+     * peak answers E3 for an E2 with full confidence and a centred needle.
+     * So every case below is a harmonic stack with the fundamental
+     * DELIBERATELY WEAKER than its partials, which is the shape that
+     * breaks the naive version. */
+    {
+        for (int b = 1; b <= 16; b++) {
+            char k[16];
+            snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0");
+            snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
+        }
+        api->set_param(in, "merge", "0");
+        int16_t a[128 * 2];
+        char q[256];
+
+        /* Plays `f0` for `blocks` blocks with the given partial weights and
+         * returns what the tuner says. The result is READ every block,
+         * because the read is what arms it. */
+        auto hear = [&](double f0, const double *amp, int nh, int blocks) {
+            double ph = 0.0;
+            for (int blk = 0; blk < blocks; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    double v = 0.0;
+                    for (int h = 1; h <= nh; h++) v += amp[h - 1] * sin(ph * h);
+                    ph += 2.0 * M_PI * f0 / 44100.0;
+                    const double c = v * 0.22;
+                    const int16_t sv = (int16_t)((c > 0.98 ? 0.98 :
+                                                  c < -0.98 ? -0.98 : c) * 32767.0);
+                    a[i * 2] = a[i * 2 + 1] = sv;
+                }
+                api->process_block(in, a, 128);
+                q[0] = 0;
+                api->get_param(in, "tuner", q, sizeof(q));
+            }
+            return std::string(q);
+        };
+        auto field = [](const std::string &j, const char *key) {
+            const std::string k = std::string("\"") + key + "\":";
+            const size_t at = j.find(k);
+            if (at == std::string::npos) return 0.0;
+            return atof(j.c_str() + at + k.size());
+        };
+        auto name = [](const std::string &j) {
+            const size_t at = j.find("\"note\":\"");
+            if (at == std::string::npos) return std::string("-");
+            const size_t b2 = at + 8, e = j.find('"', b2);
+            return j.substr(b2, e - b2);
+        };
+
+        /* The fundamental at a THIRD of the second harmonic. */
+        const double weak[6] = { 0.33, 1.00, 0.55, 0.40, 0.22, 0.14 };
+        struct { double hz; const char *note; int oct; } open6[] = {
+            {  82.41, "E", 2 }, { 110.00, "A", 2 }, { 146.83, "D", 3 },
+            { 196.00, "G", 3 }, { 246.94, "B", 3 }, { 329.63, "E", 4 },
+        };
+        printf("\ntuner: six open strings, fundamental 10 dB UNDER the 2nd\n");
+        for (int c = 0; c < 6; c++) {
+            const std::string j = hear(open6[c].hz, weak, 6, 90);
+            const double hz = field(j, "hz");
+            const double cents = field(j, "cents");
+            const double conf = field(j, "conf");
+            const std::string nm = name(j);
+            printf("   %6.2f Hz -> %6.2f Hz  %-2s%d  %+5.1f c  conf %.2f\n",
+                   open6[c].hz, hz, nm.c_str(), (int)field(j, "oct"),
+                   cents, conf);
+            if (hz <= 0.0) { printf("      <-- no note found\n"); fails++; continue; }
+            /* THE OCTAVE IS THE TEST. A ratio near 2 or 0.5 is the failure
+             * this whole two-stage design exists to avoid, and it would
+             * otherwise pass a cents check with flying colours. */
+            const double ratio = hz / open6[c].hz;
+            if (ratio > 1.5 || ratio < 0.67) {
+                printf("      <-- OCTAVE ERROR (ratio %.3f)\n", ratio); fails++;
+                continue;
+            }
+            if (nm != open6[c].note || (int)field(j, "oct") != open6[c].oct) {
+                printf("      <-- named the wrong note\n"); fails++;
+            }
+            /* Two stages and a parabolic vertex are here to buy this. One
+             * decimated sample is 21 cents at the top of the range, so a
+             * gate this tight is what says the fine stage ran.
+             *
+             * TWO cents, not five. It measures to under one, and slack a
+             * test does not need is slack the next change eats in silence
+             * - this gate already caught the fine window being too short
+             * at the bottom (2.8 periods for an E2 moved the answer from
+             * -3.0 to +4.8 cents between two runs of the same tone). */
+            if (fabs(1200.0 * log2(hz / open6[c].hz)) > 2.0) {
+                printf("      <-- off by more than 2 cents\n"); fails++;
+            }
+        }
+
+        /* A STRING THAT IS OUT must read out, with the right sign. */
+        printf("tuner: an A2 pulled 30 cents flat and 30 sharp\n");
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            const double want = 30.0 * sgn;
+            const double f = 110.0 * pow(2.0, want / 1200.0);
+            const std::string j = hear(f, weak, 6, 90);
+            const double cents = field(j, "cents");
+            printf("   %+3.0f c -> %+5.1f c  (%s)\n", want, cents,
+                   name(j).c_str());
+            if (fabs(cents - want) > 2.0) {
+                printf("      <-- the needle disagrees with the input\n");
+                fails++;
+            }
+        }
+
+        /* SILENCE IS NOT A NOTE. The gate has to hold, or the needle
+         * wanders while nothing is playing and the screen looks broken. */
+        for (int blk = 0; blk < 120; blk++) {
+            memset(a, 0, sizeof(a));
+            api->process_block(in, a, 128);
+            q[0] = 0;
+            api->get_param(in, "tuner", q, sizeof(q));
+        }
+        printf("tuner: silence -> %s\n", q);
+        if (field(std::string(q), "hz") != 0.0) {
+            printf("   <-- a note was reported with no input\n"); fails++;
+        }
+
+        /* IT COSTS NOTHING WHEN NOBODY IS LOOKING. The arm is the read, so
+         * a run of blocks with no read must leave the result where it was
+         * rather than keep analysing. */
+        const std::string before = hear(110.0, weak, 6, 90);
+        double ph = 0.0;
+        for (int blk = 0; blk < 300; blk++) {       /* no get_param */
+            for (int i = 0; i < 128; i++) {
+                const double v = 0.3 * sin(ph);
+                ph += 2.0 * M_PI * 440.0 / 44100.0;
+                a[i * 2] = a[i * 2 + 1] = (int16_t)(v * 32767.0);
+            }
+            api->process_block(in, a, 128);
+        }
+        q[0] = 0;
+        api->get_param(in, "tuner", q, sizeof(q));
+        printf("tuner: 300 unread blocks of 440 Hz -> %.2f Hz "
+               "(was %.2f, still A2's)\n", field(std::string(q), "hz"),
+               field(before, "hz"));
+        if (fabs(field(std::string(q), "hz") - field(before, "hz")) > 1.0) {
+            printf("   <-- it kept analysing with nothing reading it\n");
+            fails++;
+        }
     }
 
     api->destroy_instance(in);

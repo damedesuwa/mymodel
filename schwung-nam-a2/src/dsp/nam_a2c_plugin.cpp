@@ -32,8 +32,9 @@
 
 #include "a2_common.h"
 #include "a2_fx.h"
+#include "a2_tuner.h"
 
-#define NAM_A2C_BUILD_ID "claim"
+#define NAM_A2C_BUILD_ID "tuner"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -237,6 +238,13 @@ typedef struct {
      * doubler on it is bit-identical to before and costs one memset. */
     float side[FRAMES_PER_BLOCK];
     float in_gain,  out_gain;
+
+    /* THE TUNER LISTENS TO THE INPUT, ahead of every block: tuning through
+     * a fuzz tunes the fuzz's idea of the note, and a gate or a tremolo
+     * earlier in the chain would chop the 93 ms window the detector needs.
+     * It arms itself on being READ - see a2_tuner.h - so there is no flag
+     * here that can be left switched on. */
+    tuner_t tuner;
 
     /* WHAT IS ON THE CARD, DOUBLE-BUFFERED. See asset_lists_t. */
     asset_lists_t         *lists[2];
@@ -954,6 +962,7 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
      * the picker lists during the load, and an empty answer there is not
      * "no files", it is a picker that says (none) until something else
      * makes it ask again. */
+    tuner_init(&s->tuner);
     scan_lists_into(s, s->lists[0]);
     s->dir_stamp = assets_dir_stamp(s);
 
@@ -1092,6 +1101,10 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
         s->mono[i] = l * ig;
         s->side[i] = 0.0f;
     }
+
+    /* The raw input, at unity - see tuner_feed. Costs nothing while
+     * nothing is reading the result. */
+    tuner_feed(&s->tuner, audio_inout, n);
 
     /* Tempo for the delays' Note mode, read ONCE per block rather than per
      * pedal: get_bpm walks a fallback chain (MIDI clock -> set tempo ->
@@ -1541,6 +1554,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * they could not change while the screen was up, which is the
      * assumption the auto-refresh breaks. It watches this instead and
      * re-reads only when it moves. */
+    /* THE READ IS THE ARM. Zeroing the idle counter here is what starts
+     * the detector; process_block counts back up and stops feeding it
+     * about half a second after the last read. So there is no switch to
+     * leave on, and a UI that dies with the tuner open costs nothing. */
+    if (strcmp(key, "tuner") == 0) {
+        s->tuner.idle = 0;
+        return tuner_report(&s->tuner, buf, buf_len);
+    }
+
     if (strcmp(key, "list_gen") == 0)
         return snprintf(buf, buf_len, "%u",
                         s->list_gen.load(std::memory_order_acquire));
