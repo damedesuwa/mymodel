@@ -151,6 +151,40 @@
       ]
     },
     {
+      "title": "Tuning",
+      "lines": [
+        "Pitch > Tuning. Put it in b1,",
+        "BEFORE the drive and the amp,",
+        "or the amp answers the pitch",
+        "you played and not the one",
+        "you hear.",
+        "1 Tune  named from the LOW",
+        "        string. E is no",
+        "        shift; Eb is one",
+        "        semitone down, D is",
+        "        two, C# three, C",
+        "        four. F and F# go up.",
+        "2 Fine  cents, -50..+50, to",
+        "        match a record that",
+        "        is not at concert.",
+        "3 Mix   100 = the new tuning",
+        "        alone. Lower it and",
+        "        you hear BOTH, which",
+        "        is a detune, not a",
+        "        tuning.",
+        "It costs 12ms of latency and",
+        "that is inherent, not a bug:",
+        "a read pointer running at a",
+        "different rate has to start",
+        "behind the write pointer.",
+        "12ms is standing 4m from a",
+        "cabinet.",
+        "Big shifts warble. One or two",
+        "semitones is what this is",
+        "for; at four it is an effect."
+      ]
+    },
+    {
       "title": "Mic placement (Cab)",
       "lines": [
         "An IR is ONE mic in ONE place.",

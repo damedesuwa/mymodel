@@ -1018,6 +1018,199 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* ---------------------------------------------------- Tuning (52) */
+    {
+        for (int b = 1; b <= 8; b++) {
+            char k[16];
+            snprintf(k, 16, "b%d_type", b); api->set_param(in, k, "0");
+            snprintf(k, 16, "t%d_type", b); api->set_param(in, k, "0");
+        }
+        api->set_param(in, "merge", "0");
+        api->set_param(in, "pan_a", "0.0");
+        api->set_param(in, "pan_b", "0.0");
+        api->set_param(in, "b1_type", "3");
+
+        /* THE DEFAULT IS E, and it is read before anything is written. An
+         * enum of seven tunings is created at 0.5 like every other knob,
+         * and 0.5 of seven is index 3 = C# standard - so without
+         * fx_block_apply_defaults a Tuning block retunes the guitar three
+         * semitones just by being dropped on the board. */
+        api->set_param(in, "b1_fx", "52");
+        char dflt[32] = {0};
+        api->get_param(in, "b1_p1", dflt, sizeof(dflt));
+        printf("\ntuning: default p1 = %s (E standard is 0.0)\n", dflt);
+        if (atof(dflt) > 0.0005) {
+            printf("   <-- a new Tuning block arrives already shifted\n");
+            fails++;
+        }
+
+        /* 0.87 s of output. The window has to span at least one full wrap
+         * of the 50 ms grain for every tuning offered: the fastest is C
+         * standard, which wraps every 0.24 s, and a window shorter than
+         * that leaves the modulation sidebands asymmetric. */
+        static double rec[38400];
+        int rec_n = 0;
+        int16_t a[128 * 2];
+
+        auto run = [&](const char *tune, const char *fine, const char *mix,
+                       double fin) {
+            api->set_param(in, "b1_p1", tune);
+            api->set_param(in, "b1_p2", fine);
+            api->set_param(in, "b1_p3", mix);
+            rec_n = 0;
+            double ph = 0.0;
+            const double inc = 2.0 * M_PI * fin / 44100.0;
+            for (int blk = 0; blk < 400; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    const double v = 0.5 * sin(ph);
+                    ph += inc;
+                    a[i * 2] = a[i * 2 + 1] = (int16_t)(v * 32767.0);
+                }
+                api->process_block(in, a, 128);
+                /* The first 100 blocks go in the bin: the read pointer
+                 * starts 12 ms behind the write and the fade-in is 30 ms,
+                 * so what comes out before that is the onset. */
+                if (blk >= 100)
+                    for (int i = 0; i < 128; i++)
+                        rec[rec_n++] = a[i * 2] / 32768.0;
+            }
+        };
+        /* One DFT bin, in dB. */
+        auto bin = [&](double f) {
+            double re = 0.0, im = 0.0;
+            const double w = 2.0 * M_PI * f / 44100.0;
+            for (int i = 0; i < rec_n; i++) {
+                re += rec[i] * cos(w * i);
+                im += rec[i] * sin(w * i);
+            }
+            return sqrt(re * re + im * im) / rec_n;
+        };
+        /* WHERE THE NOTE IS, as the energy CENTROID of the band.
+         *
+         * Asking bin(expected) vs bin(original) passed a shifter running
+         * the wrong DIRECTION - the wrong answer sat nearer the expected
+         * bin than the original did. Scanning for the PEAK then reported
+         * every large shift off by exactly one grain-wrap sideband,
+         * because in a short window a sideband can out-rank the carrier.
+         * The sidebands are symmetric about the carrier, so the centroid
+         * is immune to both mistakes. */
+        auto centroid = [&](double lo, double hi) {
+            double num = 0.0, den = 0.0;
+            for (double f = lo; f <= hi; f += 0.5) {
+                const double amp = bin(f);
+                const double pw = amp * amp;
+                num += pw * f;
+                den += pw;
+            }
+            return den > 0.0 ? num / den : 0.0;
+        };
+
+        struct { const char *p1; const char *name; double semi; } cases[] = {
+            { "0.0000", "E ", 0.0 }, { "0.1667", "Eb", -1.0 },
+            { "0.3333", "D ", -2.0 }, { "0.5000", "C#", -3.0 },
+            { "0.6667", "C ", -4.0 }, { "0.8333", "F ", +1.0 },
+            { "1.0000", "F#", +2.0 },
+        };
+        printf("tuning: A3 220Hz in, Mix 100, centroid of 150-300Hz --\n");
+        for (int c = 0; c < 7; c++) {
+            run(cases[c].p1, "0.5", "1.0", 220.0);
+            const double want = 220.0 * pow(2.0, cases[c].semi / 12.0);
+            const double got = centroid(150.0, 300.0);
+            const double cents = 1200.0 * log2(got / want);
+            printf("   %s  want %6.2f Hz   got %6.2f Hz   %+5.0f cents\n",
+                   cases[c].name, want, got, cents);
+            if (fabs(cents) > 20.0) {
+                printf("      <-- not this tuning\n"); fails++;
+            }
+        }
+
+        /* Fine is CENTS: -50 at Eb lands a quarter-tone below it, which is
+         * twice the gate above, so it cannot pass by accident. */
+        run("0.1667", "0.0", "1.0", 220.0);
+        {
+            const double want = 220.0 * pow(2.0, (-1.0 - 0.5) / 12.0);
+            const double got = centroid(150.0, 300.0);
+            const double cents = 1200.0 * log2(got / want);
+            printf("tuning: Eb with Fine -50  want %.2f Hz  got %.2f Hz "
+                   "(%+.0f cents)\n", want, got, cents);
+            if (fabs(cents) > 20.0) {
+                printf("   <-- Fine does not move the pitch\n"); fails++;
+            }
+        }
+
+        /* Mix is a CROSSFADE, not a send: at 0 the shifted note is gone
+         * entirely, which is what separates a retune from a detune. */
+        run("0.3333", "0.5", "0.0", 220.0);
+        {
+            const double dry = bin(220.0), wet = bin(196.00);
+            printf("tuning: Mix 0  220Hz %.4f  196Hz %.4f\n", dry, wet);
+            if (!(dry > wet * 20.0)) {
+                printf("   <-- Mix 0 still passes the shifted note\n");
+                fails++;
+            }
+        }
+
+        /* E STANDARD IS A BYPASS, measured against the block being OFF
+         * rather than against the raw input - in_level and out_level are
+         * applied either way, so comparing to the input would fail on a
+         * perfect bypass and tells you nothing about this pedal. */
+        static double off_rec[12800];
+        int off_n = 0;
+        auto record_into = [&](double *dst, int *n, int limit) {
+            *n = 0;
+            double ph = 0.0;
+            for (int blk = 0; blk < 200; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    const double v = 0.5 * sin(ph);
+                    ph += 2.0 * M_PI * 220.0 / 44100.0;
+                    a[i * 2] = a[i * 2 + 1] = (int16_t)(v * 32767.0);
+                }
+                api->process_block(in, a, 128);
+                if (blk >= 100)
+                    for (int i = 0; i < 128 && *n < limit; i++)
+                        dst[(*n)++] = a[i * 2];
+            }
+        };
+        api->set_param(in, "b1_type", "0");
+        record_into(off_rec, &off_n, 12800);
+        api->set_param(in, "b1_type", "3");
+        api->set_param(in, "b1_fx", "52");
+        api->set_param(in, "b1_p1", "0.0");
+        api->set_param(in, "b1_p3", "1.0");
+        rec_n = 0;
+        record_into(rec, &rec_n, 12800);
+        int diff = 0;
+        for (int i = 0; i < off_n && i < rec_n; i++)
+            if (off_rec[i] != rec[i]) diff++;
+        printf("tuning: E standard vs block OFF  %d of %d samples differ\n",
+               diff, off_n);
+        if (diff != 0) {
+            printf("   <-- E standard is not a bypass\n"); fails++;
+        }
+
+        /* And the line KEPT RUNNING through that bypass, so leaving E does
+         * not replay the 60 ms that were in it when the knob last passed.
+         * (fx_block_reset zeroes the line, but only on a PEDAL change.) */
+        api->set_param(in, "b1_p1", "0.3333");
+        double worst = 0.0, ph2 = 0.0;
+        for (int i = 0; i < 128; i++) {
+            const double v = 0.5 * sin(ph2);
+            ph2 += 2.0 * M_PI * 220.0 / 44100.0;
+            a[i * 2] = a[i * 2 + 1] = (int16_t)(v * 32767.0);
+        }
+        api->process_block(in, a, 128);
+        for (int i = 0; i < 128; i++) {
+            const double d = fabs(a[i * 2] / 32768.0);
+            if (d > worst) worst = d;
+        }
+        printf("tuning: first block after leaving E  peak %.3f\n", worst);
+        if (!(worst > 0.05)) {
+            printf("   <-- the line was empty: E returned without priming\n");
+            fails++;
+        }
+        api->set_param(in, "b1_type", "0");
+    }
+
     api->destroy_instance(in);
     printf("\n%s\n", fails ? "FAILED" : "PASS");
     return fails ? 1 : 0;

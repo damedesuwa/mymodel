@@ -1052,6 +1052,9 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                 /* Or the previous pedal's tail rings on through the new
                  * one's filters. */
                 fx_block_reset(&s->fx[b]);
+                /* And the new pedal's knobs mean nothing yet. Only Tuning
+                 * is not neutral at 0.5 - see fx_block_apply_defaults. */
+                fx_block_apply_defaults(&s->fx[b]);
             }
         } else if (strcmp(sub, "lane") == 0) {
             /* A SLOT'S LANE IS ITS ROW NOW. Accepted and dropped rather

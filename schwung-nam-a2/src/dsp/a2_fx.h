@@ -81,6 +81,9 @@ enum {
      * have: a .nam is one setting of one amp and the Bass knob was turned
      * before it was taken. */
     FX_TONESTACK, FX_POWERAMP,
+    /* Appended 1.7.0. A RETUNE, which is not a detune with a bigger
+     * number - see fx_tuning. */
+    FX_TUNING,
     FX_COUNT
 };
 
@@ -347,6 +350,14 @@ static const fx_pedal_t FX_PEDALS[FX_COUNT] = {
  */
 { "Power Amp",  { K_POS("Sag"), K_LIN("Bloom", "ms", 50, 600),
                   K_POS("Bias"), KNOB_NONE, KNOB_NONE }, -1 },
+
+/* The tunings are named from the LOW string, the way a guitarist names
+ * them, and ordered by pitch so the encoder walks down to C and up to F#
+ * instead of jumping about. E is index 0 rather than the middle, which is
+ * why this pedal needs fx_block_apply_defaults. */
+{ "Tuning",     { K_ENUM("Tune", 7, "E|Eb|D|C#|C|F|F#"),
+                  K_LIN("Fine", "", -50, 50), K_POS("Mix"),
+                  KNOB_NONE, KNOB_NONE }, -1 },
 };
 
 /* The table and the enum are one fact in two places, and a table one row
@@ -495,6 +506,24 @@ static void fx_block_reset(fx_block_t *f) {
     if (!f->rng) f->rng = 22695477u;
     if (f->line) memset(f->line, 0, (size_t)f->line_len * sizeof(float));
     if (f->rv)   memset(f->rv, 0, (size_t)f->rv_len * sizeof(float));
+}
+
+/* A PEDAL WHOSE NEUTRAL POSITION IS NOT THE MIDDLE OF ITS RANGE.
+ *
+ * Every knob in this table is created at 0.5 and that is right for all but
+ * one of them, because the middle is what a Depth, a Mix or a Drive means
+ * with nothing asked for. An enum that names TUNINGS is the exception:
+ * index 3 of seven is C# standard, so a Tuning block would retune the
+ * guitar by three semitones the moment it was dropped on the board.
+ *
+ * The default is the PEDAL'S, so it lives beside the pedal rather than at
+ * the call site - the same reason ir_rv_defaults() exists. Called on an id
+ * CHANGE only: the knobs of a pedal that did not change still mean what
+ * they meant, and a state load writes its saved values after this runs.
+ */
+static void fx_block_apply_defaults(fx_block_t *f) {
+    for (int k = 0; k < FX_PARAMS; k++) f->p[k] = 0.5f;
+    if (f->id == FX_TUNING) f->p[0] = 0.0f;   /* E standard - no shift */
 }
 
 static inline float fx_tap(fx_block_t *f, float delay_samples) {
@@ -1533,6 +1562,88 @@ static void fx_detune(fx_block_t *f, float *a, int n) {
     }
 }
 
+/* THE TUNING PEDAL, and why it is not Detune with a bigger number.
+ *
+ * Detune ADDS a shifted copy to the dry (`x + y*mix`) because the beating
+ * between the two IS the effect. A retune must REPLACE: Eb standard means
+ * the Eb, and Eb sounding together with the E it came from is a minor
+ * second, which reads as a mistake rather than as a tuning. So the only
+ * structural difference below is the last line - a crossfade where Detune
+ * has a sum.
+ *
+ * The engine is the same two-tap crossfaded delay line, and its LATENCY IS
+ * INHERENT rather than a shortcoming. A read pointer moving at a different
+ * rate than the write pointer must start behind it, and the window it can
+ * travel before it has to jump back is what sets both the base delay and
+ * the warble period. 12 ms is about standing four metres from a cabinet.
+ *
+ * Put this FIRST in the chain, ahead of the drive and the capture, or the
+ * amp is responding to the pitch you played instead of the one you hear.
+ */
+static const signed char TUNE_SEMI[7] = { 0, -1, -2, -3, -4, +1, +2 };
+/*                                        E  Eb   D  C#   C  F   F#   */
+
+static void fx_tuning(fx_block_t *f, float *a, int n) {
+    int sel = (int)(fx_v(f, 0) + 0.5f);
+    if (sel < 0) sel = 0;
+    if (sel > 6) sel = 6;
+    const float mix = fx_v(f, 2) * 0.01f;
+    const float semis = (float)TUNE_SEMI[sel] + fx_v(f, 1) * 0.01f;
+
+    /* E standard with no fine offset is a BYPASS - but the line has to keep
+     * running through it. Returning outright leaves whatever was in the
+     * line when the knob last passed E, and switching back plays those
+     * 60 ms of the past as a blip. (fx_block_reset zeroes the line, but it
+     * only runs when the PEDAL changes, not when this knob moves.) */
+    if (semis > -0.0005f && semis < 0.0005f) {
+        for (int i = 0; i < n; i++) {
+            f->line[f->w] = flush_denormal(a[i]);
+            f->w = (f->w + 1 >= f->line_len) ? 0 : f->w + 1;
+        }
+        f->rd = 0.0f;
+        return;
+    }
+
+    const float ratio = powf(2.0f, semis / 12.0f);
+    const float win = 0.050f * SAMPLE_RATE;
+    const float base = 0.012f * SAMPLE_RATE;
+    for (int i = 0; i < n; i++) {
+        const float x = a[i];
+        f->line[f->w] = flush_denormal(x);
+        /* THE DELAY GROWS TO SHIFT DOWN. The read position advances at
+         * `ratio` while the write advances at 1, so the gap between them
+         * opens at (1 - ratio) a sample - positive for a downshift. The
+         * other sign is a shift UP, and fx_detune has it: a detune sounds
+         * the same either way, which is how that survived being read. */
+        f->rd += (1.0f - ratio);
+        while (f->rd >= win) f->rd -= win;
+        while (f->rd < 0.0f)  f->rd += win;
+        float d0 = base + f->rd;
+        float d1 = d0 + win * 0.5f;
+        if (d1 >= base + win) d1 -= win;
+        /* A CROSSFADE NEEDS TWO DIFFERENT WEIGHTS, and the obvious pair
+         * is not one: sin(PI*(1-t)) IS sin(PI*t) - the same function, so
+         * writing the second that way applies ONE weight to both taps and
+         * the result is a fixed sum of two reads half a window apart, i.e.
+         * a comb. On A3 (220 Hz) win/2 is 5.5 periods, which puts the taps
+         * exactly out of phase and cancels the note to silence.
+         *
+         * sin / |cos| is the pair. Each is zero at its OWN tap's jump
+         * (tap0 wraps at t=0, tap1 at t=0.5, which is where d1 crosses
+         * base+win), the squares sum to 1 at every t, and neither is ever
+         * negative. fx_detune carries the wrong pair and is left alone on
+         * purpose: it ADDS a few cents to the dry, so there the comb is
+         * mild amplitude modulation that people have already dialled in
+         * around, not a null. */
+        const float t = f->rd / win;
+        const float ang = (float)M_PI * t;
+        const float y = fx_tap(f, d0) * sinf(ang)
+                      + fx_tap(f, d1) * fabsf(cosf(ang));
+        f->w = (f->w + 1 >= f->line_len) ? 0 : f->w + 1;
+        a[i] = sanitize_sample(x * (1.0f - mix) + y * mix);
+    }
+}
+
 static void fx_octave(fx_block_t *f, float *a, int n) {
     /* A DIVIDER, not a pitch shifter. Lowpass hard, watch for a rising
      * zero crossing, flip a sign on each one: the flip-flop runs at half
@@ -1959,6 +2070,7 @@ static void fx_block_process(fx_block_t *f, float *a, float *side, int n) {
         case FX_OCTAVE:                         fx_octave(f, a, n); break;
         case FX_RINGMOD:                        fx_ringmod(f, a, n); break;
         case FX_TONESTACK:                      fx_tonestack(f, a, n); break;
+        case FX_TUNING:                         fx_tuning(f, a, n); break;
         case FX_POWERAMP:                       fx_poweramp(f, a, n); break;
         default: break;
     }

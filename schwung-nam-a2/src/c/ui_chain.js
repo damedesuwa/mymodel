@@ -210,8 +210,10 @@ const CATS = [
       items: [30, 31, 32, 33] },
     { name: 'Reverb', type: TYPE_FX,  led: [17, 97],      /* blue    */
       items: [34, 48, 35, 49], folder: 'reverbs', from: 'ir' },
+    /* Tuning leads the list because it is the one here you reach for on
+     * purpose rather than as an effect, and it wants to be in b1. */
     { name: 'Pitch',  type: TYPE_FX,  led: [23, 109],     /* pink    */
-      items: [36, 37, 38, 39] },
+      items: [52, 36, 37, 38, 39] },
 ];
 
 /* AN ITEM IS A PEDAL, A CAPTURE *OR* AN IR, and a band of the integer
