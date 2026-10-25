@@ -64,3 +64,25 @@ tools/param-pages/assets.local.json
 !tests/fixtures/*.bin
 !tests/fixtures/*.syx
 !tests/fixtures/*.wav
+
+# ...and so are a module's BUNDLED assets, for the same reason one step
+# further on. The rules above are aimed at payload nobody may redistribute;
+# these are the two captures and the one cab IR that ship INSIDE the module
+# tarball, so build.sh stages them from here and the module is useless
+# without them.
+#
+# They were not covered, and the cost was invisible: one of the three had
+# been force-added once, the other two were uploaded into a working
+# container and bundled straight out of it. They lasted exactly as long as
+# that container, and the next build on a fresh one would have shipped a
+# module with one capture and no cabinet, reporting success. The only
+# surviving copy was the release tarball, which is committed for an
+# unrelated reason. An asset the build stages belongs in the tree the build
+# is made from.
+!schwung-nam-a2/src/amps/*.nam
+!schwung-nam-a2/src/od/*.nam
+!schwung-nam-a2/src/dist/*.nam
+!schwung-nam-a2/src/fuzz/*.nam
+!schwung-nam-a2/src/boost/*.nam
+!schwung-nam-a2/src/cabs/*.wav
+!schwung-nam-a2/src/reverbs/*.wav
