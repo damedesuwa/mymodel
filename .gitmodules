@@ -1,3 +1,6 @@
 [submodule "libs/link"]
 	path = libs/link
 	url = https://github.com/Ableton/link.git
+[submodule "schwung-nam-a2/deps/NeuralAudio"]
+	path = schwung-nam-a2/deps/NeuralAudio
+	url = https://github.com/mikeoliphant/NeuralAudio.git

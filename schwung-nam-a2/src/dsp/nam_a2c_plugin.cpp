@@ -33,7 +33,7 @@
 #include "a2_common.h"
 #include "a2_fx.h"
 
-#define NAM_A2C_BUILD_ID "sag"
+#define NAM_A2C_BUILD_ID "pages"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -51,7 +51,18 @@
  * a top-row block, so putting a pedal up there IS the split gesture and
  * taking the last one off rejoins the board. One less thing to set, one
  * less thing that can disagree with the picture. */
-#define NUM_COLS   8
+/* TWO PAGES OF EIGHT, because the pads are eight wide and the board has no
+ * reason to be. Move gives eight pads a row, so eight is what you can
+ * reach and what fits across 128 px at a legible column width; the chain
+ * itself is not limited by either. The nav arrows (CC 62/63) move the
+ * window over it.
+ *
+ * PAGE_COLS is the VIEW - pads, LEDs, boxes. NUM_COLS is the BOARD. They
+ * were one number and every use of it read the same, so they are named
+ * apart here rather than argued about at each of the forty call sites. */
+#define PAGE_COLS  8
+#define NUM_PAGES  2
+#define NUM_COLS   (PAGE_COLS * NUM_PAGES)
 #define NUM_ROWS   2
 #define ROW_BR     0              /* top pad row - the parallel branch */
 #define ROW_MAIN   1              /* bottom pad row - the main chain   */
@@ -477,7 +488,12 @@ static void *diag_thread(void *arg) {
          * why a report of "the merge does not work" could not be checked
          * against a log that was otherwise complete. A routing fact with
          * no printed form is a routing fact nobody can diagnose. */
-        char chain[440]; int w = 0;
+        /* SIXTEEN COLUMNS A ROW NOW, so both buffers grew with the board
+         * rather than being left at a size that happened to fit eight.
+         * `;` is the PAGE break - the window the pads are on - and it is a
+         * fifth character because `/` `\` `|` and `-` already mean the
+         * fork, the join, the row and an empty slot. */
+        char chain[1024]; int w = 0;
         const int dfork = fork_col(s);
         const int djoin = join_col(s);
         for (int r = 0; r < NUM_ROWS; r++) {
@@ -491,10 +507,12 @@ static void *diag_thread(void *arg) {
                               (s->on[i] ? block_type_name(s->type[i]) : "("),
                               s->type[i] == BLK_OFF ? 0.0 : s->us_peak[i],
                               (djoin == c) ? "\\" : "");
+                if (c + 1 < NUM_COLS && (c + 1) % PAGE_COLS == 0)
+                    w += snprintf(chain + w, sizeof(chain) - w, " ;");
             }
         }
 
-        char msg[512];
+        char msg[1280];
         snprintf(msg, sizeof(msg),
             "Nam A2c diag: blocks/s=%.0f (expect 344) | total_us=%.0f | %s | "
             "in pkL=%.4f pkR=%.4f | out pk=%.4f nan=%lu",
@@ -1202,10 +1220,18 @@ static int block_key(const char *key, const char **rest) {
     if      (key[0] == 'b') row = ROW_MAIN;
     else if (key[0] == 't') row = ROW_BR;
     else return -1;
-    if (key[1] < '1' || key[1] > '0' + NUM_COLS) return -1;
-    if (key[2] != '_') return -1;
-    *rest = key + 3;
-    return SLOT(row, key[1] - '1');
+    /* TWO DIGITS. The old test was `key[1] > '0' + NUM_COLS`, which reads
+     * as a range check and stops being one the moment NUM_COLS passes 9:
+     * at 16 it accepts 'b:_' and 'b;_' as columns 10 and 11, because ':'
+     * and ';' are what follow '9' in ASCII. */
+    if (key[1] < '0' || key[1] > '9') return -1;
+    int col = key[1] - '0';
+    const char *p = key + 2;
+    if (*p >= '0' && *p <= '9') { col = col * 10 + (*p - '0'); p++; }
+    if (*p != '_') return -1;
+    if (col < 1 || col > NUM_COLS) return -1;
+    *rest = p + 1;
+    return SLOT(row, col - 1);
 }
 
 static void v2_set_param(void *instance, const char *key, const char *val) {
@@ -1593,11 +1619,6 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
 
     if (strcmp(key, "chain_params") == 0) {
-        char models[4096], cabs[4096], irs[4096];
-        emit_options(models, sizeof(models), L->model_names, L->model_count);
-        emit_options(cabs, sizeof(cabs), L->cab_names, L->cab_count);
-        emit_options(irs, sizeof(irs), L->ir_names, L->ir_count);
-
         int w = 0;
         w += snprintf(buf + w, buf_len - w,
             "[{\"key\":\"in_level\",\"name\":\"Input\",\"type\":\"float\","
@@ -1620,55 +1641,62 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
               "\"min\":-1.0,\"max\":1.0,\"default\":1.0,\"step\":0.02}",
              NUM_BLOCKS - 1, NUM_COLS, NUM_COLS);
 
-        char fxopts[1024]; int fw = 0;
-        fw += snprintf(fxopts + fw, sizeof(fxopts) - fw, "[");
-        for (int i = 0; i < FX_COUNT; i++)
-            fw += snprintf(fxopts + fw, sizeof(fxopts) - fw, "%s\"%s\"",
-                           i ? "," : "", fx_name(i));
-        snprintf(fxopts + fw, sizeof(fxopts) - fw, "]");
+        /* WHAT THIS DECLARES IS WHAT THE HOST CAN MODULATE, and with two
+         * pages of blocks that is the whole job.
+         *
+         * It used to emit thirteen keys a block, the three asset pickers
+         * among them, each carrying its full option list - up to 4 KB
+         * apiece. At sixteen blocks a full card could write over 100 KB,
+         * and the loop carried a `w + per_block < buf_len` guard that
+         * stopped it at a block boundary, so the tail of the board
+         * silently got no metadata at all. Thirty-two blocks would have
+         * made that the normal case rather than the bad one.
+         *
+         * Both ceilings are in the chain host and both TRUNCATE without a
+         * word: MAX_CHAIN_PARAMS is 256 entries
+         * (parse_chain_params_array_json stops at max_params and returns
+         * the short count) and SHADOW_PARAM_VALUE_LEN is 131072 bytes.
+         * Thirteen keys by thirty-two blocks is 416 - a hundred and sixty
+         * past the cap - and every block behind the cut falls through to
+         * an invented `float 0..1 step 0.01` knob.
+         *
+         * So only what an LFO or the screen reader can use is declared:
+         * the bypass, the CPU readout, the five pedal knobs. "Which
+         * capture is in block 6" is not a modulation target, and the
+         * picker that answers it is the module's own screen reading
+         * model_list - never this. Dropping those keys takes the per-block
+         * cost from kilobytes to ~770 bytes, which is the second ceiling
+         * dealt with by the same stroke.
+         *
+         * CP_* and the assert below are the enforcement: the failure they
+         * prevent is silent in both directions, so it cannot be left to
+         * whoever next adds a key. */
+#define CP_GLOBAL_KEYS     8
+#define CP_KEYS_PER_BLOCK  (2 + FX_PARAMS)
+        static_assert(CP_GLOBAL_KEYS + NUM_BLOCKS * CP_KEYS_PER_BLOCK <= 256,
+                      "chain_params would pass MAX_CHAIN_PARAMS; the host "
+                      "truncates silently and the blocks past the cut get "
+                      "invented metadata");
 
-        /* The per-block cost is two option lists plus the pedal list plus
-         * the fixed text, so the headroom to check is MEASURED rather than
-         * guessed at. It was a flat 3072 while one iteration can write over
-         * 8 KB with a full card - snprintf truncates safely, but a truncated
-         * array is invalid JSON, which is silently rejected and falls back
-         * to module.json, which is how `access` and `live` went missing for
-         * four builds. */
-        const int per_block = (int)(strlen(models) + strlen(cabs) +
-                                    strlen(irs) + strlen(fxopts) + 1024);
         /* BOTH ROWS, AND THE ROW LETTER IS A PARAMETER. Emitting only
          * `b` left every top-row key undeclared, which is not an error
          * anywhere - the write lands, the read answers, and the host's
          * own metadata simply has nothing for it. */
         for (int r = 0; r < NUM_ROWS; r++) {
         const char rl = (r == ROW_BR) ? 't' : 'b';
-        for (int i = 1; i <= NUM_COLS && w + per_block < buf_len; i++) {
+        for (int i = 1; i <= NUM_COLS; i++) {
             w += snprintf(buf + w, buf_len - w,
-                ",{\"key\":\"%c%d_type\",\"name\":\"Type\",\"type\":\"enum\","
-                  "\"options\":[\"Off\",\"NAM\",\"Cab\",\"FX\",\"IR\"],\"default\":0}"
                 ",{\"key\":\"%c%d_on\",\"name\":\"On\",\"type\":\"enum\","
                   "\"options\":[\"On\",\"Bypass\"],\"default\":0}"
-                ",{\"key\":\"%c%d_model\",\"name\":\"Model\",\"type\":\"enum\","
-                  "\"options\":%s,\"default\":0}"
-                ",{\"key\":\"%c%d_quality\",\"name\":\"Qual\",\"type\":\"enum\","
-                  "\"options\":[\"Full\",\"Slim\",\"Lite\"],\"default\":0}"
-                ",{\"key\":\"%c%d_cab\",\"name\":\"Cab\",\"type\":\"enum\","
-                  "\"options\":%s,\"default\":0}"
-                ",{\"key\":\"%c%d_ir\",\"name\":\"IR\",\"type\":\"enum\","
-                  "\"options\":%s,\"default\":0}"
-                ",{\"key\":\"%c%d_fx\",\"name\":\"Pedal\",\"type\":\"enum\","
-                  "\"options\":%s,\"default\":0}",
-                rl, i, rl, i, rl, i, models, rl, i, rl, i, cabs, rl, i, irs,
-                rl, i, fxopts);
+                ",{\"key\":\"%c%d_cpu\",\"name\":\"CPU\",\"type\":\"int\","
+                  "\"min\":0,\"max\":100,\"default\":0,\"step\":1,\"unit\":\"%%\","
+                  "\"access\":\"read\",\"live\":true}",
+                rl, i, rl, i);
             for (int k = 1; k <= FX_PARAMS; k++)
                 w += snprintf(buf + w, buf_len - w,
                     ",{\"key\":\"%c%d_p%d\",\"name\":\"P%d\",\"type\":\"float\","
                       "\"min\":0.0,\"max\":1.0,\"default\":0.5,\"step\":0.01}",
                     rl, i, k, k);
-            w += snprintf(buf + w, buf_len - w,
-                ",{\"key\":\"%c%d_cpu\",\"name\":\"CPU\",\"type\":\"int\","
-                  "\"min\":0,\"max\":100,\"default\":0,\"step\":1,\"unit\":\"%%\","
-                  "\"access\":\"read\",\"live\":true}", rl, i);
         }
         }
         w += snprintf(buf + w, buf_len - w, "]");

@@ -22,7 +22,10 @@ catch (e) {
 }
 
 const params = {
-    sel_block: '8', cpu: '41', build: 'test',   /* main row, column 1 */
+    /* THE BOARD IS SIXTEEN COLUMNS NOW, so the main row starts at 16,
+     * not 8 - slotOf(ROW_MAIN, 0) is row*NUM_COLS. At 8 this named the
+     * TOP row's ninth column, which is off the path on a mono board. */
+    sel_block: '16', cpu: '41', build: 'test',  /* main row, column 1 */
     split: '0', pan_a: '-1.0', pan_b: '1.0',
     /* Two in models/ (Amp) and two in a category folder, which is what
      * the plugin's scan produces: root first, then each folder. */
@@ -43,7 +46,7 @@ const params = {
 /* TWO ROWS: `b<n>` is the bottom (main) chain, `t<n>` the top (parallel)
  * one. The top row starts EMPTY, which is what makes the board mono - the
  * fork is derived from it, not stored. */
-for (const r of ['b', 't']) for (let b = 1; b <= 8; b++) {
+for (const r of ['b', 't']) for (let b = 1; b <= 16; b++) {
     params[`${r}${b}_type`] = (r === 'b') ? (b <= 2 ? '1' : (b === 3 ? '2' : '0')) : '0';
     params[`${r}${b}_on`] = '0';              /* 0 = On */
     params[`${r}${b}_model`] = '0';
@@ -58,7 +61,7 @@ for (const r of ['b', 't']) for (let b = 1; b <= 8; b++) {
  * above it - which is exactly how the lane assertions used to pass for
  * the wrong reason. */
 const board = (spec) => {
-    for (const r of ['b', 't']) for (let b = 1; b <= 8; b++) {
+    for (const r of ['b', 't']) for (let b = 1; b <= 16; b++) {
         params[`${r}${b}_type`] = '0';
         params[`${r}${b}_on`] = '0';
     }
@@ -152,7 +155,10 @@ writes.length = 0;
 ui.onMidiMessageInternal([0x90, 70, 127]);
 advance(1000);                              /* past HOLD_MS */
 ui.tick();
-ok(writes.some(([k, v]) => k === 'sel_block' && v === '10'), 'pad hold selects the block');
+/* Pad 70 is the main row's third column, and the main row starts at
+ * NUM_COLS. Sixteen columns makes that 18, where eight made it 10 - the
+ * slot number is row*NUM_COLS + col and both halves moved. */
+ok(writes.some(([k, v]) => k === 'sel_block' && v === '18'), 'pad hold selects the block');
 ui.onMidiMessageInternal([0x80, 70, 0]);
 
 /* THE MENU. */
@@ -195,7 +201,7 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ui.onMidiMessageInternal([0x90, 71, 127]);       /* hold pad 4 */
     advance(1000); ui.tick();
     ui.onMidiMessageInternal([0x80, 71, 0]);
-    ok(writes.some(([k, v]) => k === 'sel_block' && v === '11'), 'tree: pad 4 selected');
+    ok(writes.some(([k, v]) => k === 'sel_block' && v === '19'), 'tree: pad 4 selected');
 
     /* ONE STEP IS THREE DETENTS on every discrete control - the encoders
      * are not detented and the shim coalesces, so a message carries
@@ -705,7 +711,7 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     ui.onMidiMessageInternal([0x90, 74, 127]);
     advance(1000); ui.tick();
     ui.onMidiMessageInternal([0x80, 74, 0]);
-    ok(writes.some(([k, v]) => k === 'sel_block' && v === '14'),
+    ok(writes.some(([k, v]) => k === 'sel_block' && v === '22'),
        'blocks: a hold still selects it for editing');
 
     /* AND THE SCREEN SAYS WHAT JUST HAPPENED, naming the ROW. `B4` and
@@ -1160,7 +1166,7 @@ for (const [what, impl] of [
     const mkUi = () => new Function('globalThis', 'leds', 'buttonLeds',
         ...names, stubs + src + '\nreturn globalThis.chain_ui;')(
         {}, leds, buttonLeds, ...names.map(n => host[n]));
-    const LAP = 40;        /* a full rotation is NUM_BLOCKS*2+1 = 33 stops */
+    const LAP = 70;        /* a full rotation is NUM_BLOCKS*2+1 = 65 stops */
 
     params.list_gen = '0';
     params.model_list = JSON.stringify(['Recto', 'Plexi', 'My RAT', 'My Muff']);
@@ -1199,6 +1205,165 @@ for (const [what, impl] of [
     ok(!reads.includes('model_list'),
        'list_gen: a host that does not serve it never re-reads');
     params.list_gen = '0';
+}
+
+/* --- two pages of eight, moved by the nav arrows ----------------------- */
+/* The board is sixteen columns and the pads are eight, so the page is a
+ * WINDOW. What has to hold is that nothing except the view knows it
+ * exists: the pads address the window, the signal path does not. */
+{
+    const CC_L = 62, CC_R = 63;
+    const CW = 14;
+    const colX = (c) => 4 + c * (CW + 1);
+    const tap = (cc) => { ui.onMidiMessageInternal([0xb0, cc, 127]);
+                          ui.onMidiMessageInternal([0xb0, cc, 0]); };
+    const repaint = () => { advance(50); ui.tick(); };
+
+    /* Page 1 columns 1-3 full, page 2 columns 9-10 full. */
+    board({ b1: 3, b2: 3, b3: 3, b9: 3, b10: 3 });
+    ui.init();
+    repaint();
+
+    /* A PAD ADDRESSES THE WINDOW. On page 1 pad 68 is b1; after one right
+     * arrow the same pad is b9. Addressing the block instead would make
+     * the second page unreachable and the first page's pads wrong. */
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    ok(writes.some(([k]) => k === 'b1_on'),
+       'page: on page 1 the first pad is b1');
+
+    tap(CC_R);
+    repaint();
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    ok(writes.some(([k]) => k === 'b9_on'),
+       'page: after one right arrow the same pad is b9');
+    ok(!writes.some(([k]) => k === 'b1_on'),
+       'page: and no longer b1');
+
+    /* ONE TAP, ONE PAGE. Acting on the release too would page twice, and
+     * with two pages that reads as the arrow doing nothing. */
+    tap(CC_R);
+    repaint();
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    ok(writes.some(([k]) => k === 'b9_on'),
+       'page: right at the last page is a no-op, not a wrap');
+
+    tap(CC_L);
+    repaint();
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    ok(writes.some(([k]) => k === 'b1_on'), 'page: left comes back');
+    tap(CC_L);
+    repaint();
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    ok(writes.some(([k]) => k === 'b1_on'),
+       'page: left at page 1 is a no-op, not a wrap');
+
+    /* THE TOP ROW PAGES WITH IT. One rule for both rows, or the parallel
+     * lane is only editable on the first half of the board. */
+    board({ b1: 3, b9: 3, t9: 3, t10: 3 });
+    ui.init();
+    tap(CC_R);
+    repaint();
+    writes.length = 0;
+    ui.onMidiMessageInternal([0x90, 76, 127]);
+    ui.onMidiMessageInternal([0x80, 76, 0]);
+    ok(writes.some(([k]) => k === 't9_on'),
+       'page: the top row pages too - pad 76 is t9 on page 2');
+
+    /* THE LEDS ARE THE WINDOW. A block off the page has no pad, and
+     * colOf() would address the row ABOVE: note 76+8 is 84, which is
+     * Move's THIRD pad row and belongs to nobody here. */
+    board({ b1: 3, b2: 3, b9: 3 });
+    ui.init();
+    repaint();
+    ok(leds[68] !== 0 && leds[69] !== 0,
+       'page: page 1 lights its own two blocks');
+    const stray = Object.keys(leds).filter(n => Number(n) >= 84 &&
+                                                Number(n) <= 99 &&
+                                                leds[n] !== 0);
+    ok(stray.length === 0,
+       'page: nothing is written to a third pad row' +
+       (stray.length ? ' -- ' + stray.join(',') : ''));
+    tap(CC_R);
+    repaint();
+    ok(leds[68] !== 0, 'page: page 2 lights b9 on the first pad');
+    ok(leds[69] === 0, 'page: and leaves the empty b10 dark');
+
+    /* THE SELECTION COMES WITH THE WINDOW, or the knobs edit a block that
+     * is not on screen and the blinking pad is on neither page. */
+    board({ b1: 3, b9: 3 });
+    ui.init();
+    ui.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); ui.tick();
+    ui.onMidiMessageInternal([0x80, 68, 0]);
+    writes.length = 0;
+    tap(CC_R);
+    repaint();
+    const selW = writes.filter(([k]) => k === 'sel_block').map(([, v]) => v);
+    ok(selW.length > 0 && Number(selW[selW.length - 1]) >= 16 + 8,
+       'page: the selection follows onto page 2 (got ' + selW.join(',') + ')');
+
+    /* NOTHING IS DRAWN OFF-SCREEN ON THE SECOND PAGE. The boxes are placed
+     * from the VIEW column, so a board whose blocks sit at columns 9-16
+     * must land in the same eight slots as 1-8 - using the board column
+     * would put them at x=139 and off the panel with no error. */
+    board({ b9: 3, b10: 1, b11: 2, b12: 3, b16: 3, t10: 3, t11: 3 });
+    ui.init();
+    tap(CC_R);
+    rects.length = 0;
+    repaint();
+    const offRight = rects.filter(r => r[1] + r[3] > 128);
+    ok(offRight.length === 0,
+       'page: page 2 draws inside the panel' +
+       (offRight.length ? ' -- ' + JSON.stringify(offRight.slice(0, 3)) : ''));
+    ok(rects.some(r => r[1] === colX(0)),
+       'page: and b9 is drawn in the FIRST column, not the ninth');
+
+    /* A FORK THAT CROSSES THE PAGE BOUNDARY, which is the branch the
+     * window exists to get right and the one that cannot be reasoned
+     * about from one page.
+     *
+     * Fork at column 3 (page 1), merge at 12 (page 2). Page 1 parts and
+     * runs off the right edge still parted; page 2 arrives already parted
+     * and joins in its fourth column. The edge where nothing happens must
+     * carry NO VERTICAL - one drawn there claims a fork that is on the
+     * other page. */
+    board({ b1: 3, b2: 3, b3: 3, t3: 3, t4: 3, t11: 3, b12: 3, b13: 3 });
+    params['merge'] = '12';
+    ui.init();
+    rects.length = 0;
+    repaint();
+    const vline = (x) => rects.some(
+        r => r[0] === 'fill' && r[1] === x && r[3] === 1 && r[4] > 4);
+    /* Page 1: a vertical AT the fork (column 3 -> view 2), and none at the
+     * right edge, because the merge is not on this page. */
+    ok(vline(colX(2) - 1), 'split x page: page 1 draws the fork vertical');
+    ok(!vline(128 - 3), 'split x page: and none at its right edge');
+
+    tap(CC_R);
+    rects.length = 0;
+    repaint();
+    /* Page 2: a vertical at the merge (column 12 -> view 3), and none at
+     * the LEFT edge, where the two rails simply continue in. */
+    ok(vline(colX(3) + CW), 'split x page: page 2 draws the merge vertical');
+    ok(!vline(4), 'split x page: and none at its left edge');
+    /* Both lanes still reach across the page, or a block on the top row
+     * of page 2 is sitting on nothing. */
+    const laneRuns = rects.filter(
+        r => r[0] === 'fill' && r[3] > 40 && r[4] === 1);
+    ok(laneRuns.length >= 2,
+       'split x page: both lanes run across page 2 (got ' +
+       laneRuns.length + ')');
+    params['merge'] = '0';
 }
 
 console.log(fails ? 'FAILED' : 'PASS');

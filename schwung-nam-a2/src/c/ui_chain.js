@@ -47,7 +47,18 @@ import { setLED, setButtonLED, decodeDelta, invalidateLedCache } from '/data/Use
  * A block in the main row BEFORE the fork feeds both lanes, which is the
  * amp-into-two-cabs shape without paying for a second amp.
  */
-const NUM_COLS = 8;
+/* TWO PAGES OF EIGHT. Move has eight pads a row, so eight is what a hand
+ * can reach and what fits across 128 px at a legible column width - the
+ * chain is not limited by either, so the board is sixteen wide and the
+ * nav arrows move the window over it.
+ *
+ * PAGE_COLS is the VIEW: pads, LEDs, boxes, the eight columns on screen.
+ * NUM_COLS is the BOARD. Every use of the old single NUM_COLS read the
+ * same and meant one or the other, which is why they are named apart here
+ * instead of being worked out again at each call site. */
+const PAGE_COLS = 8;
+const NUM_PAGES = 2;
+const NUM_COLS = PAGE_COLS * NUM_PAGES;
 const NUM_ROWS = 2;
 const NUM_BLOCKS = NUM_COLS * NUM_ROWS;      /* slots, not columns */
 const ROW_BR = 0;               /* top pad row - the parallel branch */
@@ -58,6 +69,26 @@ const TOP_BASE = 76;            /* top row,    notes 76..83 */
 function slotOf(row, col) { return row * NUM_COLS + col; }
 function rowOf(b) { return (b / NUM_COLS) | 0; }
 function colOf(b) { return b % NUM_COLS; }
+
+/* WHICH EIGHT OF THE SIXTEEN ARE UNDER YOUR HANDS. The page is a property
+ * of the VIEW only - nothing in the signal path, the fork, the merge or
+ * the state knows it exists, which is what keeps a block on page 2 an
+ * ordinary block rather than a second kind of one. */
+let page = 0;
+function pageBase() { return page * PAGE_COLS; }
+function onPage(b) {
+    const c = colOf(b);
+    return c >= pageBase() && c < pageBase() + PAGE_COLS;
+}
+function viewCol(b) { return colOf(b) - pageBase(); }
+
+/* IS THERE ANYTHING ON A PAGE OTHER THAN THIS ONE? What decides whether
+ * the window is worth mentioning at all. */
+function anyBlockBeyondPage() {
+    for (let b = 0; b < NUM_BLOCKS; b++)
+        if (!onPage(b) && st.type[b] !== TYPE_OFF) return true;
+    return false;
+}
 /* THE ROW IS A LETTER IN THE KEY, so the column stays one digit: `b1..b8`
  * is the main row and `t1..t8` the branch. A flat b1..b16 would have made
  * every parse two-digit, and the parse that gets it wrong reads b16 as
@@ -128,6 +159,13 @@ const HOLD_MS = 350;
 const CC_KNOB_BASE = 71;        /* knobs 1..8 are CC 71..78 */
 const CC_JOG_TURN = 14;
 const CC_JOG_CLICK = 3;
+/* The two arrows under the jog. NOT up and down (55/54): those are Move's
+ * OCTAVE PAIR, and claiming half of a pair is how a splittable synth ends
+ * up able to shift up and never come back - see the bus-list note in
+ * docs/SHADOW_UI.md. Left and right are free, and the shim withholds them
+ * from Move only while this screen is up (capabilities.claims_ccs). */
+const CC_NAV_LEFT = 62;
+const CC_NAV_RIGHT = 63;
 const CC_SHIFT = 49;
 
 const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3, TYPE_IR = 4;
@@ -1095,6 +1133,20 @@ function drawHeader() {
 }
 
 /* Where a block's box sits, and where its wire runs through the column. */
+/* IS ANY COLUMN OF THIS PAGE INSIDE THE PARALLEL SECTION?
+ *
+ * A mono block's height depends on whether the board is split, because an
+ * unsplit board gives it the full 16 px and a split one has to leave room
+ * for two 9 px lanes. Asking the BOARD would draw page 2 short for a fork
+ * and join that both happened on page 1 - correct arithmetic, wrong
+ * question. */
+function pageForked() {
+    const split = forkCol();
+    if (split < 0) return false;
+    const join = joinCol();
+    return join >= pageBase() && split < pageBase() + PAGE_COLS;
+}
+
 function blockGeom(b) {
     const split = forkCol(), join = joinCol();
     const col = colOf(b), row = rowOf(b);
@@ -1106,13 +1158,14 @@ function blockGeom(b) {
      * need no arrows to explain them. */
     const y = !forked ? GRID_Y
             : (row === ROW_BR ? GRID_Y : GRID_Y + LANE_H + LANE_GAP);
-    const h = forked ? LANE_H : (split >= 0 ? BAND_H : GRID_H);
-    return { x: colX(col), y: y, h: h, wire: y + (h >> 1), forked: forked };
+    const h = forked ? LANE_H : (pageForked() ? BAND_H : GRID_H);
+    return { x: colX(viewCol(b)), y: y, h: h, wire: y + (h >> 1),
+             forked: forked };
 }
 
 function drawBoxes() {
     const split = forkCol(), join = joinCol();
-    const bandH = split >= 0 ? BAND_H : GRID_H;
+    const bandH = pageForked() ? BAND_H : GRID_H;
     const midWire = GRID_Y + (bandH >> 1);
     const laneWire = [GRID_Y + (LANE_H >> 1),
                       GRID_Y + LANE_H + LANE_GAP + (LANE_H >> 1)];
@@ -1135,17 +1188,35 @@ function drawBoxes() {
      * two rails - because it is the same event read the other way round.
      * Drawing the parting and leaving the meeting implied was the shape
      * that made "where does this come back together" a question at all. */
-    const fx = colX(split) - 1;                  /* the gap before the fork */
-    const jx = colX(join) + COL_W;               /* the gap after the join  */
-    if (split < 0) {
+    /* THE PAGE IS A WINDOW, AND THE FORK CAN BE OUTSIDE IT.
+     *
+     * In view columns the fork and the join can land left of 0 or right of
+     * PAGE_COLS-1, which means the page is ALREADY parted when it begins or
+     * STILL parted when it ends. Those edges carry no vertical - there is
+     * nothing happening there, the rails simply continue off-screen - and
+     * drawing one would claim a fork that is on the other page.
+     *
+     * Clamping the x and keeping the vertical is the whole difference
+     * between a window and a second board. */
+    const vs = split - pageBase();
+    const vj = join - pageBase();
+    const forkHere = vs >= 0 && vs < PAGE_COLS;
+    const joinHere = vj >= 0 && vj < PAGE_COLS;
+    const fx = forkHere ? colX(vs) - 1 : IO_W;               /* left edge  */
+    const jx = joinHere ? colX(vj) + COL_W : 128 - IO_W - 1; /* right edge */
+    if (!pageForked()) {
         fill_rect(IO_W, midWire, 128 - IO_W * 2, 1, 1);
     } else {
-        fill_rect(IO_W, midWire, fx - IO_W + 1, 1, 1);
-        fill_rect(fx, laneWire[0], 1, laneWire[1] - laneWire[0] + 1, 1);
-        fill_rect(jx, laneWire[0], 1, laneWire[1] - laneWire[0] + 1, 1);
+        if (forkHere) {
+            fill_rect(IO_W, midWire, fx - IO_W + 1, 1, 1);
+            fill_rect(fx, laneWire[0], 1, laneWire[1] - laneWire[0] + 1, 1);
+        }
+        if (joinHere) {
+            fill_rect(jx, laneWire[0], 1, laneWire[1] - laneWire[0] + 1, 1);
+            fill_rect(jx, midWire, 128 - IO_W - jx, 1, 1);
+        }
         for (let r = 0; r < 2; r++)
             fill_rect(fx, laneWire[r], jx - fx + 1, 1, 1);
-        fill_rect(jx, midWire, 128 - IO_W - jx, 1, 1);
     }
 
     for (let b = 0; b < NUM_BLOCKS; b++) {
@@ -1153,6 +1224,7 @@ function drawBoxes() {
          * The branch row before the fork is empty by construction - it is
          * what DEFINES the fork - so there is no wire there and a box
          * would be sitting on nothing. */
+        if (!onPage(b)) continue;
         if (!inPath(b)) continue;
         const t = st.type[b];
         const g = blockGeom(b);
@@ -1273,6 +1345,20 @@ function drawFooter(list) {
         right = text_width(txt) + 3;
         pright(126, FOOT_Y, txt, 1, right);
     }
+    /* WHICH EIGHT OF THE SIXTEEN YOU ARE LOOKING AT. Left of the merge
+     * number, because that one is about the board and this is about the
+     * screen, and the merge was there first.
+     *
+     * Only drawn when the OTHER page has something on it. A board that
+     * fits on one page has no second page to be on, and a permanent "1/2"
+     * would be a line of chrome saying nothing - the same reason the merge
+     * number is absent while the board is mono. */
+    if (page > 0 || anyBlockBeyondPage()) {
+        const ptxt = 'P' + (page + 1);
+        const pw = text_width(ptxt) + 3;
+        pright(126 - right, FOOT_Y, ptxt, 1, pw);
+        right += pw;
+    }
     const w = 126 - right;
 
     /* A CAPTURE GETS THE SAME LINE A PEDAL DOES, because it is in the
@@ -1389,7 +1475,12 @@ function paintLeds() {
      * its own block's category, dim when bypassed, dark when empty. */
     const pathFork = forkCol();
     for (let b = 0; b < NUM_BLOCKS; b++) {
-        const note = (rowOf(b) === ROW_BR ? TOP_BASE : PAD_BASE) + colOf(b);
+        /* THE PADS ARE THE PAGE. Sixteen columns over eight pads means a
+         * block off the window has no pad to light, and colOf() would
+         * address the row above - note 76+8 is 84, which is Move's THIRD
+         * pad row. */
+        if (!onPage(b)) continue;
+        const note = (rowOf(b) === ROW_BR ? TOP_BASE : PAD_BASE) + viewCol(b);
         /* Selection BLINKS rather than taking a colour of its own, because
          * "which one am I editing" and "what is this block" are different
          * questions and one colour cannot answer both - and now that the
@@ -1459,6 +1550,31 @@ function stomp(b) {
     /* Written through rather than waiting for the rotation to notice: the
      * pad has to answer under the finger. */
     setp(keyOf(b, 'on'), st.on[b] ? 0 : 1);
+}
+
+/* MOVE THE WINDOW. The arrows are the only thing that writes `page`.
+ *
+ * The SELECTION COMES WITH IT. Leaving it behind would leave the knobs
+ * editing a block that is not on screen - eight cells describing something
+ * you cannot see, and the blinking pad on neither page - which is the same
+ * class of fault as a lane nothing writes: correct state, no way to read
+ * it. */
+function setPage(p) {
+    const np = p < 0 ? 0 : (p > NUM_PAGES - 1 ? NUM_PAGES - 1 : p);
+    if (np === page) return;
+    page = np;
+    if (!onPage(sel)) {
+        sel = slotOf(rowOf(sel), pageBase());
+        /* A top-row slot off the path is not a place to land: it draws no
+         * box, lights no pad and refuses the knobs. Step down to the main
+         * row, which is always in circuit. */
+        if (!inPath(sel)) sel = slotOf(ROW_MAIN, colOf(sel));
+        setp('sel_block', sel);
+        readSelected();
+    }
+    resetKnobAcc();
+    invalidateLedCache();
+    flash('PAGE ' + (page + 1) + '/' + NUM_PAGES);
 }
 
 function select(b) {
@@ -1603,10 +1719,12 @@ function onKnob(idx, ccValue) {
 
 globalThis.chain_ui = {
     init() {
-        for (let i = 0; i < NUM_COLS; i++) {
+        /* EIGHT, because these are indexed by PAD, not by block. */
+        for (let i = 0; i < PAGE_COLS; i++) {
             padDownAt[i] = 0; padHandled[i] = false;
             topDownAt[i] = 0; topHandled[i] = false;
         }
+        page = 0;
         /* The shim replays Move's own LED state on the way in, so what the
          * cache believes is stale. Re-emit everything once. */
         invalidateLedCache();
@@ -1669,14 +1787,14 @@ function tickBody() {
         /* A hold fires while the finger is still down - waiting for the
          * release would make selecting feel like a slow tap. */
         const now = Date.now();
-        for (let b = 0; b < NUM_COLS; b++) {
+        for (let b = 0; b < PAGE_COLS; b++) {
             if (padDownAt[b] && !padHandled[b] && now - padDownAt[b] >= HOLD_MS) {
                 padHandled[b] = true;
-                select(slotOf(ROW_MAIN, b));
+                select(slotOf(ROW_MAIN, pageBase() + b));
             }
             if (topDownAt[b] && !topHandled[b] && now - topDownAt[b] >= HOLD_MS) {
                 topHandled[b] = true;
-                select(slotOf(ROW_BR, b));
+                select(slotOf(ROW_BR, pageBase() + b));
             }
         }
 
@@ -1693,6 +1811,22 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
          * ignored, so it cannot fall through to a branch that reads CC
          * numbers it does not own. */
         if (status === 0xb0 && d1 === CC_SHIFT) return;
+
+        /* THE ARROWS MOVE THE WINDOW, and only on the PRESS.
+         *
+         * Acting on the release as well would page twice per tap. The
+         * release still has to be consumed rather than fallen through,
+         * because below this are branches that read CC numbers they do
+         * not own.
+         *
+         * The shim withholds both edges from Move while this screen is up
+         * - that is what capabilities.claims_ccs buys, and it is latched
+         * there, so Move never sees a lone button-up for a key it never
+         * saw go down. Nothing here needs to help with that. */
+        if (status === 0xb0 && (d1 === CC_NAV_LEFT || d1 === CC_NAV_RIGHT)) {
+            if (d2 > 0) setPage(page + (d1 === CC_NAV_RIGHT ? 1 : -1));
+            return;
+        }
 
         /* Jog: click opens the menu, turn scrolls it. The jog is free here -
          * the host's own COMPONENT_EDIT jog handler never runs, because MIDI
@@ -1793,20 +1927,21 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
 
         /* THE TOP ROW IS BLOCKS, AND IT TAKES THE SAME TWO GESTURES.
          * One rule for sixteen pads: tap stomps, hold edits. */
-        if (d1 >= TOP_BASE && d1 < TOP_BASE + NUM_COLS) {
+        if (d1 >= TOP_BASE && d1 < TOP_BASE + PAGE_COLS) {
             const r = d1 - TOP_BASE;
             if (status === 0x90 && d2 > 0) {
                 topDownAt[r] = Date.now();
                 topHandled[r] = false;
             } else if (status === 0x80 || (status === 0x90 && d2 === 0)) {
-                if (topDownAt[r] && !topHandled[r]) stomp(slotOf(ROW_BR, r));
+                if (topDownAt[r] && !topHandled[r])
+                    stomp(slotOf(ROW_BR, pageBase() + r));
                 topDownAt[r] = 0;
                 topHandled[r] = false;
             }
             return;
         }
 
-        if (d1 < PAD_BASE || d1 >= PAD_BASE + NUM_COLS) return;
+        if (d1 < PAD_BASE || d1 >= PAD_BASE + PAGE_COLS) return;
         const b = d1 - PAD_BASE;
 
         if (status === 0x90 && d2 > 0) {
@@ -1817,7 +1952,8 @@ globalThis.chain_ui.onMidiMessageInternal = function(data) {
              * between lanes here as well, which was one gesture doing two
              * jobs - and a lane is the ROW a pad is in now, so there is
              * nothing left for it to mean. */
-            if (padDownAt[b] && !padHandled[b]) stomp(slotOf(ROW_MAIN, b));
+            if (padDownAt[b] && !padHandled[b])
+                stomp(slotOf(ROW_MAIN, pageBase() + b));
             padDownAt[b] = 0;
             padHandled[b] = false;
         }

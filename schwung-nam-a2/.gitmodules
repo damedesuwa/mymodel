@@ -1,3 +1,15 @@
+# INERT IN THIS REPOSITORY, and that is why the submodule was never
+# actually registered. schwung-nam-a2/ is a SUBDIRECTORY of the schwung
+# repo, not its own, so git reads the .gitmodules at the REPO ROOT and
+# never this one - `git submodule status` listed only libs/link and
+# `git submodule update --init deps/NeuralAudio` answered "did not match
+# any file(s) known to git". The mapping that works lives in
+# ../.gitmodules under the path schwung-nam-a2/deps/NeuralAudio, and the
+# commit is pinned there as a gitlink.
+#
+# Kept because this file is the one that would be correct if this
+# directory is ever split out into a repository of its own, and because
+# its presence here is exactly what made the dependency look handled.
 [submodule "deps/NeuralAudio"]
 	path = deps/NeuralAudio
 	url = https://github.com/mikeoliphant/NeuralAudio.git

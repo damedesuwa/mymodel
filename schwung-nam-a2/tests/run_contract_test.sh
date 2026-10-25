@@ -89,14 +89,51 @@ if section('ui_hierarchy') not in (None, '(unserved)'):
     fail = 1
 print("ok   no hierarchy (pads reachable)")
 
-# Every key the UI drives must have metadata, or the chain line and the LFO
-# picker invent a float 0..1 knob for it.
-for b in range(1, 9):
-    for k in ('type', 'on', 'model', 'quality', 'cab', 'fx', 'cpu',
-              'p1', 'p2', 'p3', 'p4', 'p5'):
-        wk = 'b%d_%s' % (b, k)
-        if wk not in keys:
-            print("FAIL chain_params: no metadata for %s" % wk); fail = 1
+# WHAT chain_params IS FOR, AND WHAT IT IS NOT.
+#
+# It used to be checked as "every key the UI drives must be declared", and
+# that was the wrong rule in a way that only showed up at thirty-two blocks:
+# the UI does not read chain_params at all - it reads fx_specs and the
+# picker lists - and the host's consumers of it are the LFO target picker,
+# the chain line and the screen reader. Declaring the asset pickers meant
+# shipping their whole option list per block, up to 4 KB each, which at 16
+# blocks could already pass 100 KB and be truncated mid-array.
+#
+# So the rule is now stated the way it actually works: the MODULABLE keys
+# are declared for every block on both rows, and the pickers deliberately
+# are not.
+BLOCK_COLS = 16         # NUM_COLS in nam_a2c_plugin.cpp
+DECLARED    = ('on', 'cpu', 'p1', 'p2', 'p3', 'p4', 'p5')
+WITHHELD    = ('type', 'model', 'quality', 'cab', 'ir', 'fx')
+for row in ('b', 't'):
+    for b in range(1, BLOCK_COLS + 1):
+        for k in DECLARED:
+            wk = '%s%d_%s' % (row, b, k)
+            if wk not in keys:
+                print("FAIL chain_params: no metadata for %s" % wk); fail = 1
+for k in WITHHELD:
+    wk = 'b1_%s' % k
+    if wk in keys:
+        print("FAIL chain_params: %s is declared; its option list is "
+              "kilobytes a block and nothing reads it from here" % wk)
+        fail = 1
+print("ok   chain_params: %d modulable keys a block, pickers withheld"
+      % len(DECLARED))
+
+# THE HOST'S CAP, WHICH TRUNCATES IN SILENCE. MAX_CHAIN_PARAMS is 256 in
+# src/modules/chain/dsp/chain_internal.h, and parse_chain_params_array_json
+# stops at max_params and returns the short count - no error anywhere, and
+# every block past the cut falls through to an invented float 0..1 knob.
+# The C side has a static_assert; this is the same fact measured on what
+# the binary actually emitted.
+if len(cp) > 256:
+    print("FAIL chain_params: %d entries, past the host's 256 - the tail is "
+          "dropped silently" % len(cp)); fail = 1
+elif len(cp) > 248:
+    print("FAIL chain_params: %d entries, within 8 of the 256 cap - one more "
+          "per-block key is 32 more and does not fit" % len(cp)); fail = 1
+else:
+    print("ok   chain_params: %d entries, under the host's 256 cap" % len(cp))
 
 # The pedal list the UI's tree groups. Its INDEX is the wire value, so a
 # reorder silently re-points every saved board.
@@ -194,11 +231,16 @@ for k in ('cpu', 'b1_cpu'):
         print("FAIL %s: must carry access=read and live=true" % k); fail = 1
 print("ok   read-only live meters declared")
 
-# The bundled files must reach the picker, or a fresh install offers nothing.
-mods = next(x for x in cp if x['key'] == 'b1_model')['options']
-cabs = next(x for x in cp if x['key'] == 'b1_cab')['options']
-if mods == ['(none)'] or cabs == ['(none)']:
-    print("FAIL: bundled models/cabs did not reach the pickers"); fail = 1
+# The bundled files must reach the picker, or a fresh install offers
+# nothing. Read from the LISTS the UI actually loads: this used to take
+# b1_model's enum options out of chain_params, which was a second route to
+# the same names and is no longer declared there - the pickers are the
+# module's own screen reading model_list, and that is the path to check.
+mods = json.loads(section('model_list'))
+cabs = json.loads(section('cab_list'))
+if not mods or not cabs:
+    print("FAIL: bundled models/cabs did not reach the pickers "
+          "(%d model(s), %d cab(s))" % (len(mods), len(cabs))); fail = 1
 else:
     print("ok   pickers: %d model(s), %d cab(s)" % (len(mods), len(cabs)))
 
@@ -242,7 +284,7 @@ if not fail:
 
 # Served per model, parallel to the names, so the UI can slice the list.
 cats = section("model_dirs")
-names = next(x for x in cp if x["key"] == "b1_model")["options"]
+names = json.loads(section("model_list"))
 if cats is None:
     print("FAIL: model_cats is not served"); fail = 1
 else:
