@@ -1246,9 +1246,21 @@ int main(int argc, char **argv) {
         int16_t a[128 * 2];
         char q[256];
 
-        /* Plays `f0` for `blocks` blocks with the given partial weights and
-         * returns what the tuner says. The result is READ every block,
-         * because the read is what arms it. */
+        /* READ AT THE RATE THE DEVICE READS, which is the whole reason this
+         * harness exists in the shape it does.
+         *
+         * It used to call get_param after EVERY process_block. The read is
+         * what arms the detector, so that kept it armed on every single
+         * block - and hid a bug that made the tuner completely dead on
+         * hardware: the arm window was written as `TUN_EVERY * 64`, which
+         * at TUN_EVERY 2 is 128 samples against `idle += 128` a block, so
+         * the detector fed two blocks after a read and then stopped. The
+         * UI reads ~22 times a second against 344 blocks, so 2 blocks in
+         * 15 reached the ring and the window correlated to nothing.
+         *
+         * 15 blocks between reads is that ratio. A test that polls faster
+         * than the thing it is testing is not testing the thing. */
+        const int READ_EVERY = 15;
         auto hear = [&](double f0, const double *amp, int nh, int blocks) {
             double ph = 0.0;
             for (int blk = 0; blk < blocks; blk++) {
@@ -1262,9 +1274,15 @@ int main(int argc, char **argv) {
                     a[i * 2] = a[i * 2 + 1] = sv;
                 }
                 api->process_block(in, a, 128);
-                q[0] = 0;
-                api->get_param(in, "tuner", q, sizeof(q));
+                if (blk % READ_EVERY == 0) {
+                    q[0] = 0;
+                    api->get_param(in, "tuner", q, sizeof(q));
+                }
             }
+            /* One last read, so what is returned is the current answer
+             * rather than whatever the last multiple of 15 happened to be. */
+            q[0] = 0;
+            api->get_param(in, "tuner", q, sizeof(q));
             return std::string(q);
         };
         auto field = [](const std::string &j, const char *key) {
@@ -1403,38 +1421,75 @@ int main(int argc, char **argv) {
 
         /* SILENCE IS NOT A NOTE. The gate has to hold, or the needle
          * wanders while nothing is playing and the screen looks broken. */
-        for (int blk = 0; blk < 120; blk++) {
+        for (int blk = 0; blk < 300; blk++) {
             memset(a, 0, sizeof(a));
             api->process_block(in, a, 128);
-            q[0] = 0;
-            api->get_param(in, "tuner", q, sizeof(q));
+            if (blk % READ_EVERY == 0) {
+                q[0] = 0;
+                api->get_param(in, "tuner", q, sizeof(q));
+            }
         }
+        q[0] = 0;
+        api->get_param(in, "tuner", q, sizeof(q));
         printf("tuner: silence -> %s\n", q);
         if (field(std::string(q), "hz") != 0.0) {
             printf("   <-- a note was reported with no input\n"); fails++;
         }
 
-        /* IT COSTS NOTHING WHEN NOBODY IS LOOKING. The arm is the read, so
-         * a run of blocks with no read must leave the result where it was
-         * rather than keep analysing. */
-        const std::string before = hear(110.0, weak, 6, 260);
-        double ph = 0.0;
-        for (int blk = 0; blk < 300; blk++) {       /* no get_param */
-            for (int i = 0; i < 128; i++) {
-                const double v = 0.3 * sin(ph);
-                ph += 2.0 * M_PI * 440.0 / 44100.0;
-                a[i * 2] = a[i * 2 + 1] = (int16_t)(v * 32767.0);
+        /* IT COSTS NOTHING WHEN NOBODY IS LOOKING, and the claim is that
+         * it stops about half a second after the last read - not that it
+         * stops instantly.
+         *
+         * A first version played 440 Hz for 600 unread blocks and expected
+         * the answer not to move. It moved to 220, and the code was right:
+         * the first ~172 of those blocks are inside the grace window, 440
+         * is above the 424 Hz ceiling, and 220 is its first in-range
+         * subharmonic. The test was asserting a contract nobody wrote.
+         *
+         * So: let the grace EXPIRE on silence, then play loudly with
+         * nothing reading. If the detector were still running it would
+         * find that tone - the paragraph above is the evidence it can. */
+        {
+            double ph2 = 0.0;
+            /* 400 blocks = 1.16 s, so the 0.5 s window is well past. The
+             * first ~172 are fed and are silent, which takes the answer to
+             * hz 0 through the level gate. */
+            for (int blk = 0; blk < 400; blk++) {
+                memset(a, 0, sizeof(a));
+                api->process_block(in, a, 128);
             }
-            api->process_block(in, a, 128);
+            /* Now something it could certainly measure, still unread. */
+            for (int blk = 0; blk < 400; blk++) {
+                for (int i = 0; i < 128; i++) {
+                    const double v = 0.4 * (sin(ph2) + 0.5 * sin(2.0 * ph2));
+                    ph2 += 2.0 * M_PI * 196.0 / 44100.0;
+                    a[i * 2] = a[i * 2 + 1] = (int16_t)(v * 24000.0);
+                }
+                api->process_block(in, a, 128);
+            }
+            /* This read re-arms it, but it returns the result computed
+             * BEFORE it ran, which is what is being asked about. */
+            q[0] = 0;
+            api->get_param(in, "tuner", q, sizeof(q));
+            const double hz = field(std::string(q), "hz");
+            printf("tuner: 400 unread blocks of G3 after the grace -> "
+                   "%.2f Hz (0 = it had stopped)\n", hz);
+            if (hz != 0.0) {
+                printf("   <-- it kept analysing with nothing reading it\n");
+                fails++;
+            }
         }
-        q[0] = 0;
-        api->get_param(in, "tuner", q, sizeof(q));
-        printf("tuner: 300 unread blocks of 440 Hz -> %.2f Hz "
-               "(was %.2f, still A2's)\n", field(std::string(q), "hz"),
-               field(before, "hz"));
-        if (fabs(field(std::string(q), "hz") - field(before, "hz")) > 1.0) {
-            printf("   <-- it kept analysing with nothing reading it\n");
-            fails++;
+
+        /* AND IT COMES BACK. A detector that goes quiet and stays quiet is
+         * worse than one that never slept: the screen would be dead on the
+         * second visit with nothing to say why. */
+        {
+            const std::string j = hear(196.00, weak, 6, 260);
+            const double hz = field(j, "hz");
+            printf("tuner: and reading again wakes it -> %.2f Hz\n", hz);
+            if (fabs(1200.0 * log2(hz / 196.00)) > 3.0) {
+                printf("   <-- it did not wake up\n"); fails++;
+            }
         }
     }
 

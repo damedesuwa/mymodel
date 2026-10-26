@@ -124,6 +124,24 @@
  * 0.85 is the value that paper settles on and it measures correctly here. */
 #define TUN_PEAK_FRAC  0.85f
 
+/* HOW LONG THE DETECTOR KEEPS RUNNING AFTER THE LAST READ, IN SAMPLES, and
+ * it must be written as a TIME rather than in terms of anything else.
+ *
+ * This was `TUN_EVERY * 64`, which is an analysis period standing in for a
+ * UI's polling interval - two numbers with nothing to do with each other.
+ * TUN_EVERY then went 16 -> 8 -> 3 -> 2 for reasons about the analysis
+ * rate, shrinking this 8x on the way, and at 2 the threshold was 128
+ * samples against `idle += 128` a block: the detector fed TWO BLOCKS after
+ * each read and then stopped. The UI reads about 22 times a second against
+ * 344 blocks, so 2 blocks in every 15 reached the ring - 13% of the audio,
+ * in fragments - and the window correlated to nothing. On the device that
+ * is a tuner that says "play a string" however hard you play.
+ *
+ * Half a second is ten times the UI's polling interval, so the feed is
+ * continuous between reads with room for a slow frame, and the detector
+ * still goes quiet promptly once the screen is shut. */
+#define TUN_IDLE_SAMPLES 22050   /* 0.5 s at 44100 */
+
 typedef struct {
     /* 4 poles at ~700 Hz before decimating by 8. Guitar fundamentals all sit
      * below that, so this is both the anti-alias filter and the thing that
@@ -157,7 +175,7 @@ typedef struct {
     float hz;                   /* 0 = nothing confident */
     float conf;
     float level;
-    int   idle;                 /* frames since the last read - see the top */
+    int   idle;                 /* SAMPLES since the last read - see the top */
 } tuner_t;
 
 static void tuner_init(tuner_t *t) {
@@ -209,10 +227,14 @@ static inline float tun_f(const tuner_t *t, int i) {
  * slices below cannot disagree about what they are looking at. */
 static int tuner_snapshot(tuner_t *t) {
     /* PEAK, not RMS - see TUN_LEVEL_GATE. */
+    {
+        const int tail = TUN_WIN - t->dw;
+        memcpy(t->snap, t->d + t->dw, (size_t)tail * sizeof(float));
+        memcpy(t->snap + tail, t->d, (size_t)t->dw * sizeof(float));
+    }
     float pk = 0.0f;
     for (int i = 0; i < TUN_WIN; i++) {
-        const float v = tun_d(t, i);
-        t->snap[i] = v;
+        const float v = t->snap[i];
         const float a = v < 0.0f ? -v : v;
         if (a > pk) pk = a;
     }
@@ -284,7 +306,20 @@ static int tuner_pick(tuner_t *t) {
         return 0;
     }
     t->fine_n = TUN_FINE_WIN - t->fine_hi - 1;
-    for (int i = 0; i < TUN_FINE_WIN; i++) t->fsnap[i] = tun_f(t, i);
+    /* Two memcpys: the window is contiguous in memory in two runs, fw to
+     * the end and then the start back to fw.
+     *
+     * NOT A SPEEDUP, and the first version of this comment claimed it was.
+     * The guess was that walking 8192 samples through the wrap test was
+     * the biggest chunk left in any one frame; measured over 6400 frames
+     * it moved nothing at all (p50 19 us and p99 57 either way - the
+     * compiler was already handling the walk). Kept because a snapshot is
+     * a copy and this says so, not for the performance it does not buy. */
+    {
+        const int tail = TUN_FINE_WIN - t->fw;
+        memcpy(t->fsnap, t->f + t->fw, (size_t)tail * sizeof(float));
+        memcpy(t->fsnap + tail, t->f, (size_t)t->fw * sizeof(float));
+    }
     t->fine_i = 0;
     return 1;
 }
@@ -328,7 +363,7 @@ static void tuner_fine_done(tuner_t *t) {
  * would look for - and it would need a second scratch buffer to survive
  * the chain writing over it. Pitch does not care about gain. */
 static void tuner_feed(tuner_t *t, const int16_t *lr, int n) {
-    if (t->idle > TUN_EVERY * 64) {      /* nobody is looking */
+    if (t->idle > TUN_IDLE_SAMPLES) {    /* nobody is looking */
         t->idle += n;
         return;
     }

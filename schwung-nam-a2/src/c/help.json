@@ -294,12 +294,13 @@
         "It costs nothing when the",
         "screen is shut - the read is",
         "what turns it on. Open, it is",
-        "about 10us a frame of 2370,",
-        "and FLAT: the search is cut",
-        "into slices, one a frame, so",
-        "no frame spikes. A spike here",
-        "is a click in the audio you",
-        "are listening to."
+        "about 20us a frame of 2370",
+        "(60us at worst), and FLAT:",
+        "the search is cut into",
+        "slices, one a frame, so no",
+        "frame does the lot. A spike",
+        "here is a click in the audio",
+        "you are listening to."
       ]
     },
     {
