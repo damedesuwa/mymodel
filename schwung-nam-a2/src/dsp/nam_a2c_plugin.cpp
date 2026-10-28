@@ -34,7 +34,7 @@
 #include "a2_fx.h"
 #include "a2_tuner.h"
 
-#define NAM_A2C_BUILD_ID "rack"
+#define NAM_A2C_BUILD_ID "swap"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -457,10 +457,11 @@ static void *worker_thread(void *arg) {
              * it is a knob on a reverb because it is a CPU knob wearing a
              * time label - ~0.09 us a tap against a 2370 us frame. */
             b->run_cap = (r.kind == BLK_IR) ? ir_rv_taps(b) : IR_RUN_TAPS;
-            /* The placement filters keep their SETTING across a cab swap -
-             * "the mic is where I put it" - but not their STATE, or the
-             * old cabinet's tails ring on through the new one. */
-            mic_reset_state(&b->mic);
+            /* The mic state is reset by the CALLBACK, at adopt - see
+             * ir_block_adopt_pending. Clearing it here raced with
+             * mic_process reading the same biquad states, and cleared
+             * them when the load STARTED rather than when the new
+             * cabinet went live. */
             int n = ir_block_load(b, r.path);
             if (n > 0)
                 snprintf(msg, sizeof(msg),
@@ -927,6 +928,14 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
         new (&s->amp[i].loading) std::atomic<bool>(false);
         s->cab[i].index = -1;
         s->cab[i].run_cap = IR_RUN_TAPS;
+        /* Constructed, not left to calloc, for the same reason the amp's
+         * two above are: a zeroed std::atomic is a valid null pointer in
+         * practice and not by the standard, and the house pattern here is
+         * to say so rather than to rely on it. */
+        s->cab[i].live = nullptr;
+        new (&s->cab[i].pending) std::atomic<ir_taps_t *>(nullptr);
+        new (&s->cab[i].ret_w) std::atomic<unsigned>(0);
+        new (&s->cab[i].ret_r) std::atomic<unsigned>(0);
         mic_defaults(&s->cab[i].mic);
         mic_update(&s->cab[i].mic);
         s->fx[i].id = FX_TS808;
@@ -1026,6 +1035,12 @@ static void run_block(a2c_t *s, int b, float *buf, int n, float bpm) {
      * should not then wait for a model that has been ready for a
      * minute. */
     if (t == BLK_NAM && nam_block_adopt_pending(&s->amp[b]))
+        s->fade_in[b] = FADE_IN_SAMPLES;
+    /* AND THE CAB, which had no adopt step at all: the worker wrote the
+     * taps straight into the live block and freed the old ones under the
+     * callback. Same handover as the amp above, and the same fade - an IR
+     * that changes between one sample and the next is a click. */
+    if ((t == BLK_CAB || t == BLK_IR) && ir_block_adopt_pending(&s->cab[b]))
         s->fade_in[b] = FADE_IN_SAMPLES;
 
     if (!s->on[b]) { s->us_peak[b] *= CPU_PEAK_DECAY; return; }
@@ -1321,6 +1336,25 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
                 /* And the new pedal's knobs mean nothing yet. Only Tuning
                  * is not neutral at 0.5 - see fx_block_apply_defaults. */
                 fx_block_apply_defaults(&s->fx[b]);
+                /* NO FADE HERE, AND THAT WAS TRIED AND MEASURED.
+                 *
+                 * The theory was that fx_block_reset clearing the filters
+                 * mid-block must step the output, so this armed
+                 * FADE_IN_SAMPLES the way the type change does. It bought
+                 * nothing. With a clean 220 Hz tone at an amplitude that
+                 * does not clip, and the peak envelope taken over whole
+                 * periods, the worst jump at a pedal change EQUALS the
+                 * settled level difference between the two pedals -
+                 * 0.1597 against 0.1597 for 1176 -> Limiter. So what
+                 * moves is the LEVEL, which is what two different pedals
+                 * at default knobs legitimately do, and there is no
+                 * transient on top of it to smooth away.
+                 *
+                 * And this fade is a ramp from SILENCE, so where it does
+                 * reach it adds a dip to whatever it is covering. It
+                 * belongs on the type change and the bypass release
+                 * because those start from a block that was producing
+                 * nothing; a pedal change is not that. */
             }
         } else if (strcmp(sub, "lane") == 0) {
             /* A SLOT'S LANE IS ITS ROW NOW. Accepted and dropped rather

@@ -676,11 +676,51 @@ static void mic_process(mic_t *m, float *audio, int n) {
         for (int i = 0; i < n; i++) audio[i] *= m->gain;
 }
 
+/* THE THREE FIELDS THE CONVOLUTION NEEDS TOGETHER, AS ONE OBJECT.
+ *
+ * They were three loose members and the loader swapped them with three
+ * plain stores on the WORKER thread while the SPI callback was reading
+ * them, then freed what it had replaced. Three faults in five lines:
+ *
+ *   - a TORN read. The callback could take the new `ir` with the old
+ *     `len`, or the new `len` with the old `history` - and history is
+ *     sized `len-1 + FRAMES_PER_BLOCK`, so a mismatch is an out-of-bounds
+ *     WRITE, not merely wrong audio.
+ *   - USE AFTER FREE. `free(old_ir)` ran while the callback could still be
+ *     mid-convolution over it. Garbage audio at best, SIGSEGV on the SPI
+ *     callback at worst, which takes MoveOriginal down with it.
+ *   - and no fade, so even a clean swap clicked.
+ *
+ * One pointer makes the first two impossible: the callback reads `live`
+ * once and the three are consistent by construction. The worker publishes
+ * through `pending` and the callback ADOPTS, which is the pattern
+ * nam_block_t has used all along two hundred lines further down - the cab
+ * path simply never got it.
+ *
+ * The metadata (name, peak, sum, norm_db, index) stays on the block: it is
+ * read by get_param and the diag line, where a value one frame stale is
+ * nothing, and moving it would put a NULL check on every one of those. */
 typedef struct {
     float *ir;           /* resampled, trimmed, normalised taps */
-    int    len;          /* how many of them the convolution runs */
-    int    run_cap;      /* the ceiling a file is trimmed to */
     float *history;      /* [len-1 carried][FRAMES_PER_BLOCK new] */
+    int    len;          /* how many of them the convolution runs */
+} ir_taps_t;
+
+/* How many retired tap-sets the callback may hand back before the worker
+ * has drained them. RT NEVER FREES - that is the whole point - so an
+ * overflow drops the pointer and leaks one IR rather than calling free()
+ * on the audio thread. Eight is more than can be in flight: the worker
+ * frees on its next pass and a load takes longer than eight blocks. */
+#define IR_RETIRE 8
+
+typedef struct {
+    ir_taps_t *live;                    /* the callback reads ONLY this */
+    std::atomic<ir_taps_t *> pending;   /* worker publishes here        */
+    /* RT pushes what it replaced, the worker frees it. SPSC. */
+    ir_taps_t *retire[IR_RETIRE];
+    std::atomic<unsigned> ret_w, ret_r;
+
+    int    run_cap;      /* the ceiling a file is trimmed to */
     float  norm_db;      /* what normalisation cost, for the load line */
     float  peak;         /* diagnostics */
     float  sum;
@@ -735,12 +775,62 @@ static int ir_rv_taps(const ir_block_t *b) {
  * the touched window is 4.6 KB and stays in L1 for the block. Measured 3.3x
  * faster on x86 and ~20x on the device once the run length came down.
  */
-static void ir_block_process(ir_block_t *b, float *audio, int frames) {
-    if (!b->ir || b->len <= 0 || !b->history) return;
+/* RT hands a retired tap-set back; the worker frees it. Never the reverse:
+ * free() on the SPI callback is the thing this whole structure avoids. */
+static void ir_retire_push(ir_block_t *b, ir_taps_t *t) {
+    if (!t) return;
+    const unsigned w = b->ret_w.load(std::memory_order_relaxed);
+    const unsigned r = b->ret_r.load(std::memory_order_acquire);
+    if (w - r >= IR_RETIRE) return;    /* leak one rather than free here */
+    b->retire[w % IR_RETIRE] = t;
+    b->ret_w.store(w + 1, std::memory_order_release);
+}
 
-    const float *ir = b->ir;
-    const int L = b->len;
-    float *hist = b->history;
+/* Worker side. Returns 0 when there is nothing left to free. */
+static int ir_retire_drain(ir_block_t *b) {
+    const unsigned r = b->ret_r.load(std::memory_order_relaxed);
+    const unsigned w = b->ret_w.load(std::memory_order_acquire);
+    if (r == w) return 0;
+    ir_taps_t *t = b->retire[r % IR_RETIRE];
+    b->retire[r % IR_RETIRE] = nullptr;
+    b->ret_r.store(r + 1, std::memory_order_release);
+    if (t) { free(t->ir); free(t->history); free(t); }
+    return 1;
+}
+
+/* Take a finished load. Callback side, and the ONLY writer of `live`.
+ * Returns 1 when something was adopted, which is what arms the fade - an
+ * IR that swaps instantaneously clicks however clean the handover is. */
+static int ir_block_adopt_pending(ir_block_t *b) {
+    ir_taps_t *fresh = b->pending.exchange(nullptr, std::memory_order_acq_rel);
+    if (!fresh) return 0;
+    ir_retire_push(b, b->live);
+    b->live = fresh;
+    /* AND THE MIC STATE, HERE, because this is the instant the cabinet
+     * changes. The loader used to memset these on the WORKER - the same
+     * fault as the taps and found by the same ThreadSanitizer run, since
+     * mic_process is reading exactly these biquad states and this delay
+     * line on the callback while the worker clears them.
+     *
+     * The placement filters keep their SETTING across a swap ("the mic is
+     * where I put it") but not their STATE, or the old cabinet's tails
+     * ring on through the new one. Doing it at adopt is also when that is
+     * actually true: before, the state was cleared when the LOAD started,
+     * which is up to a few hundred milliseconds before the new IR went
+     * live. Only memsets, so it costs nothing on the callback. */
+    mic_reset_state(&b->mic);
+    return 1;
+}
+
+static void ir_block_process(ir_block_t *b, float *audio, int frames) {
+    /* ONE read. The three used to be read separately and could not be
+     * read consistently - see ir_taps_t. */
+    const ir_taps_t *T = b->live;
+    if (!T || !T->ir || T->len <= 0 || !T->history) return;
+
+    const float *ir = T->ir;
+    const int L = T->len;
+    float *hist = T->history;
     const int n = frames;
 
     memmove(hist, hist + n, (size_t)(L - 1) * sizeof(float));
@@ -772,7 +862,8 @@ static void ir_block_process(ir_block_t *b, float *audio, int frames) {
  * quiet, which is also what makes it safe to drop into a live chain.
  */
 static void ir_reverb_process(ir_block_t *b, float *audio, float *wet, int n) {
-    if (!b->ir || b->len <= 0 || !b->history) return;
+    if (!b->live || !b->live->ir || b->live->len <= 0 ||
+        !b->live->history) return;
 
     const int   pre = (int)(b->rv[IR_RV_PRE] * (float)(IR_PRE_MAX - 1));
     const float mix = b->rv[IR_RV_MIX] * 1.5f;
@@ -809,9 +900,12 @@ static void ir_reverb_process(ir_block_t *b, float *audio, float *wet, int n) {
 }
 
 static void ir_block_free(ir_block_t *b) {
-    free(b->ir);      b->ir = nullptr;
-    free(b->history); b->history = nullptr;
-    b->len = 0;
+    /* Destroy path: nothing is running, so everything can go here. */
+    if (b->live) { free(b->live->ir); free(b->live->history); free(b->live); }
+    b->live = nullptr;
+    ir_taps_t *p = b->pending.exchange(nullptr, std::memory_order_acq_rel);
+    if (p) { free(p->ir); free(p->history); free(p); }
+    while (ir_retire_drain(b)) { }
     b->name[0] = '\0';
     b->index = -1;
 }
@@ -907,15 +1001,27 @@ static int ir_block_load(ir_block_t *b, const char *path) {
     float *new_hist = (float *)calloc((size_t)(want - 1) + FRAMES_PER_BLOCK, sizeof(float));
     if (!new_hist) { free(new_ir); return -1; }
 
-    float *old_ir = b->ir, *old_hist = b->history;
-    b->ir = new_ir;
-    b->len = want;
-    b->history = new_hist;
+    /* PUBLISH, DO NOT OVERWRITE. This was three plain stores into the live
+     * block followed by free() of what they replaced - on the worker,
+     * while the callback was convolving. See ir_taps_t for what that cost.
+     *
+     * One allocation carries all three so one store hands them over, and
+     * the exchange's return value is a tap-set the callback never adopted
+     * (it was superseded by this one), which is therefore ours to free. */
+    ir_taps_t *fresh = (ir_taps_t *)calloc(1, sizeof(ir_taps_t));
+    if (!fresh) { free(new_ir); free(new_hist); return -1; }
+    fresh->ir = new_ir;
+    fresh->history = new_hist;
+    fresh->len = want;
+
     b->peak = pk;
     b->sum = (float)sum;
     path_to_name(path, b->name, MAX_NAME_LEN);
-    free(old_ir);
-    free(old_hist);
+
+    ir_taps_t *stale = b->pending.exchange(fresh, std::memory_order_acq_rel);
+    if (stale) { free(stale->ir); free(stale->history); free(stale); }
+    /* And clear anything the callback has handed back by now. */
+    while (ir_retire_drain(b)) { }
     return want;
 }
 
