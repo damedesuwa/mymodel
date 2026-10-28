@@ -220,7 +220,18 @@ const TYPE_OFF = 0, TYPE_NAM = 1, TYPE_CAB = 2, TYPE_FX = 3, TYPE_IR = 4;
 const CATS = [
     { name: 'Off',    type: TYPE_OFF, led: [0, 0] },
     { name: 'Amp',    type: TYPE_NAM, led: [1, 65],       /* red     */
-      items: [], folder: 'amps', from: 'nam', tail: [50, 51] },
+      items: [], folder: 'amps', from: 'nam' },
+    /* THE TWO AMP STAGES A CAPTURE CANNOT HAVE, in a category of their
+     * own. They were the Amp list's `tail`, sitting past the captures -
+     * so walking Amp looking for an amp went through every capture and
+     * then two things that are not amps, which was reported as confusing
+     * and is. They belong together and they belong next to Amp, which is
+     * what the name says: more amp, after the capture.
+     *
+     * Moving them changes nothing that is saved - a board stores the
+     * PEDAL id, and a category only decides which list you walk. */
+    { name: 'Amp+',   type: TYPE_FX,  led: [7, 77],       /* v.yellow */
+      items: [50, 51] },
     /* The Cab picker is its own knob rather than the shared item list -
      * a cabinet is not something you walk past on the way to a pedal -
      * so `from: 'cab'` only records which folder feeds it. */
@@ -310,17 +321,37 @@ function setItem(b, item) {
     setp(keyOf(b, 'type'), t);
 }
 
+/* A CATEGORY BY NAME, NEVER BY COUNTING.
+ *
+ * catOfBlock used to carry the indices as literals - Cab 2, Reverb 11, OD
+ * 3 - which is a copy of the CATS order sitting inside the function that
+ * reads it. Inserting Amp+ at index 2 moved every one of them one
+ * category to the left, and the symptom was a SWALLOWED STEP rather than
+ * anything that looked like a wrong number: the walk lands on Cab, this
+ * answers 2, the next step computes 2+1 = Cab again, and the `c ===
+ * catOfBlock(sel)` guard returns before moving. Four steps up the list
+ * went three.
+ *
+ * The name is what the code means and it does not shift. */
+function catNamed(n) {
+    for (let c = 0; c < CATS.length; c++) if (CATS[c].name === n) return c;
+    return 1;
+}
+
 function catOfBlock(b) {
     const t = st.type[b];
     if (t === TYPE_OFF) return 0;
-    if (t === TYPE_CAB) return 2;
+    if (t === TYPE_CAB) return catNamed('Cab');
     const it = itemOfBlock(b);
     for (let c = 1; c < CATS.length; c++)
         if ((CATS[c].items || []).indexOf(it) >= 0) return c;
     /* A capture in no folder we know, or an id from a newer build: Amp
-     * for a capture, the first pedal family for anything else. Never a
-     * category whose TYPE disagrees with the block's. */
-    return (t === TYPE_NAM) ? 1 : (t === TYPE_IR) ? 11 : 3;
+     * for a capture, Reverb for an IR, the first pedal family for
+     * anything else. Never a category whose TYPE disagrees with the
+     * block's. */
+    if (t === TYPE_NAM) return catNamed('Amp');
+    if (t === TYPE_IR)  return catNamed('Reverb');
+    return catNamed('OD');
 }
 
 /* Rebuilt whenever the model list is read, which is once. A category's
@@ -1007,7 +1038,51 @@ function clipTo(t, w) {
     while (str.length > 1 && text_width(str) > w) str = str.slice(0, -1);
     return str;
 }
+/* A NAME TOO LONG TO FIT SCROLLS, rather than being cut.
+ *
+ * A capture is named by its file and a file name is as long as whoever
+ * made it felt like: "Recto Modern - G8 Tube Spongy - DI" is 34
+ * characters against a footer that fits about 21. Cutting it hides the
+ * END, which is exactly the half that tells two captures of the same amp
+ * apart - "...- DI" and "...- FAT CAB" clip to the same five words.
+ *
+ * PING-PONG WITH A PAUSE AT EACH END, not a wrap. On 128 pixels a
+ * wrapping marquee never holds the start still long enough to read it,
+ * and the start is what you look at first. The pause at the left is
+ * longer than the one at the right for the same reason.
+ *
+ * STATELESS, driven off the clock. A per-call-site offset would need a
+ * key, and the two places this is used (the header and the footer) scroll
+ * different strings at the same time - so a shared offset would make a
+ * short name on one line drag a long one on the other. Deriving it from
+ * the time and the string's own travel gives each line its own cycle for
+ * free. */
+const MQ_HOLD_L = 1500, MQ_HOLD_R = 900, MQ_STEP = 160;
+function marqueeTo(t, w, nowMs) {
+    const full = String(t === undefined || t === null ? '' : t);
+    if (text_width(full) <= w) return full;
+    /* The least offset at which the REMAINDER fits, measured rather than
+     * counted in characters: the font is proportional, so "WWW" and
+     * "iii" are not the same number of pixels. */
+    let span = 0;
+    while (span < full.length - 1 && text_width(full.slice(span)) > w) span++;
+    if (span <= 0) return clipTo(full, w);
+    const travel = span * MQ_STEP;
+    const cycle = MQ_HOLD_L + travel + MQ_HOLD_R + travel;
+    let at = ((nowMs % cycle) + cycle) % cycle;
+    let off;
+    if (at < MQ_HOLD_L) off = 0;
+    else if ((at -= MQ_HOLD_L) < travel) off = Math.floor(at / MQ_STEP);
+    else if ((at -= travel) < MQ_HOLD_R) off = span;
+    else off = span - Math.floor((at - MQ_HOLD_R) / MQ_STEP);
+    if (off < 0) off = 0;
+    if (off > span) off = span;
+    return clipTo(full.slice(off), w);
+}
+
 function ptext(x, y, t, ink, w) { print(x, y, clipTo(t, w), ink); }
+/* Same as ptext, for a line whose whole job is carrying a NAME. */
+function pmarq(x, y, t, ink, w) { print(x, y, marqueeTo(t, w, Date.now()), ink); }
 function pcenter(x, w, y, t, ink) {
     const str = clipTo(t, w);
     print(x + Math.max(0, (w - text_width(str)) >> 1), y, str, ink);
@@ -1166,8 +1241,14 @@ function drawHeader() {
     const f = forkCol();
     const side = (f >= 0 && colOf(sel) >= f && colOf(sel) <= joinCol())
                  ? (rowOf(sel) === ROW_BR ? ' L' : ' R') : '';
-    ptext(1, 1, blockName(sel) + side + (what ? ' ' + what : ' --'),
-          1, MET_X - 3);
+    /* THE POSITION IS PINNED AND ONLY THE NAME TRAVELS. `B5` is two
+     * characters and is what tells you which box the knobs are on, so
+     * scrolling the whole line would push the one part you need off the
+     * left edge to make room for the part that is already clipped. */
+    const pre = blockName(sel) + side + ' ';
+    const pw0 = text_width(pre);
+    ptext(1, 1, pre, 1, MET_X - 3);
+    pmarq(1 + pw0, 1, what || '--', 1, MET_X - 3 - pw0);
     fill_rect(0, 10, 128, 1, 1);
 }
 
@@ -1410,15 +1491,23 @@ function drawFooter(list) {
         const c = catOfBlock(sel);
         const items = CATS[c].items || [it];
         const at = items.indexOf(it);
-        ptext(1, FOOT_Y, itemName(it) + '  ' +
-              CATS[c].name + ' ' + (at + 1) + '/' + items.length, 1, w);
+        /* THE COUNTER IS CHROME AND STAYS STILL; the name scrolls.
+         * `Dist 3/26` is where you are in the list and is read at a
+         * glance - carrying it along on a marquee would make the one
+         * stable fact on the line the moving one, and it is short enough
+         * to always fit. So it is right-aligned and the name gets
+         * whatever is left. */
+        const cnt = CATS[c].name + ' ' + (at + 1) + '/' + items.length;
+        const cw = text_width(cnt) + 4;
+        pright(126 - right, FOOT_Y, cnt, 1, cw);
+        pmarq(1, FOOT_Y, itemName(it), 1, w - cw);
         return;
     }
     const full = list.find(k => k.kind === 'list');
     if (full) {
         const v = st.val[fullKey(full)];
         if (v !== undefined) {
-            ptext(1, FOOT_Y, listNameFor(full.key, v), 1, w);
+            pmarq(1, FOOT_Y, listNameFor(full.key, v), 1, w);
             return;
         }
     }
@@ -1513,9 +1602,152 @@ function drawTuner() {
     ptext(1, FOOT_Y, 'jog: close', 1, 126);
 }
 
+/* ------------------------------------------------------- the mic diagram */
+
+/*
+ * WHERE THE MIC IS, AS A PICTURE.
+ *
+ * Five numbers on five 31-pixel cells, and from the device: "cab 에
+ * distance 랑 옵션들이 너무 헷갈려". They are confusing for a reason the
+ * cells cannot fix - every one of them is a POSITION, and a position
+ * printed as a percentage has no zero you can see. Worse, `Dist` is
+ * SIGNED against a reference nothing on screen mentions: -8cm is eight
+ * centimetres nearer than the place the IR was recorded from, and
+ * nobody can be expected to read that off the word "Dist".
+ *
+ * So: one peek, raised by touching any of the cab's five knobs, showing
+ * the cone from the side with the mic where the knobs put it, the
+ * capture point drawn as the zero it is, and the five values spelled out
+ * beside it in full rather than clipped to five characters.
+ *
+ * NO ANGLE, which is what was asked about and is the one thing that
+ * cannot be drawn honestly. An off-axis angle needs a distance from the
+ * CONE, and `Dist` is measured from the capture point - a distance the
+ * IR does not record and the file does not carry. Every angle this could
+ * print would be computed from a number we invented. What IS known is
+ * drawn: how far across the cone (Pos), how far from the capture point
+ * (Dist), and the line between the two, which is the angle without a
+ * number attached to it.
+ */
+const MIC_PEEK_MS = 1600;
+const MIC_CAP_X = 44;          /* where the IR was mic'd = the drawn zero */
+const MIC_SPAN  = 22;          /* +-40 cm maps onto +-this many pixels    */
+const MIC_AXIS_Y = 30;
+let micPeekUntil = 0;
+
+/* A ONE-PIXEL LINE, because the host draws rectangles and text and
+ * nothing else. Bresenham, clamped to the panel - a diagram that can
+ * compute a coordinate off-screen has to be the thing that refuses it,
+ * since fill_rect will happily take one. */
+function pline(x0, y0, x1, y1, ink) {
+    let x = x0 | 0, y = y0 | 0;
+    const xe = x1 | 0, ye = y1 | 0;
+    const dx = Math.abs(xe - x), dy = -Math.abs(ye - y);
+    const sx = x < xe ? 1 : -1, sy = y < ye ? 1 : -1;
+    let err = dx + dy;
+    for (let guard = 0; guard < 400; guard++) {
+        if (x >= 0 && x < 128 && y >= 0 && y < 64) fill_rect(x, y, 1, 1, ink);
+        if (x === xe && y === ye) break;
+        const e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x += sx; }
+        if (e2 <= dx) { err += dx; y += sy; }
+    }
+}
+/* Dotted, for the things that are REFERENCES rather than objects: the
+ * axis and the capture point are where the mic is measured from, not
+ * parts of the cabinet, and a solid line would read as more hardware. */
+function pdots(x0, y0, x1, y1, ink) {
+    if (y0 === y1) {
+        for (let x = x0; x <= x1; x += 2)
+            if (x >= 0 && x < 128) fill_rect(x, y0, 1, 1, ink);
+    } else {
+        for (let y = y0; y <= y1; y += 2)
+            if (y >= 0 && y < 64) fill_rect(x0, y, 1, 1, ink);
+    }
+}
+
+function micSpecOf(key) {
+    for (const k of knobsFor(TYPE_CAB, 0)) if (k.key === key) return k;
+    return null;
+}
+/* The number the CELL would print, by the same path the cell prints it.
+ * Formatting it a second time here is how the diagram and the cells come
+ * to disagree about the same knob. */
+function micShown(key) {
+    const sp = micSpecOf(key);
+    if (!sp) return '-';
+    const v = st.val[selKey(key)];
+    return (v === undefined || !Number.isFinite(v)) ? '-' : specText(sp.kn, v);
+}
+/* THROUGH selKey, not a spelled-out `b<n>_`. The same cab on the top
+ * rail is `t3_p2`, and a hand-built key would have made this diagram
+ * read the bottom row's cab while you turned the top row's. */
+function micRaw(key, dflt) {
+    const v = st.val[selKey(key)];
+    return (v === undefined || !Number.isFinite(v)) ? dflt : v;
+}
+
+function drawMicView() {
+    clear_screen();
+    ptext(1, 1, 'Mic', 1, 24);
+    /* Which cabinet this is the mic on - the diagram is about placement
+     * and placement on WHAT is the other half of the sentence. */
+    pmarq(26, 1, listNameFor('cab', micRaw('cab', 0)) || '-', 1, 100);
+    fill_rect(0, 10, 128, 1, 1);
+
+    const pos  = Math.max(0, Math.min(1, micRaw('p1', 0)));
+    const dist = Math.max(0, Math.min(1, micRaw('p2', 0.5)));
+    const cm   = (dist * 2 - 1) * 40;
+
+    /* ---- the cabinet, side on. Baffle, cone, dust cap. ---- */
+    fill_rect(8, 16, 2, 29, 1);                 /* the baffle            */
+    pline(10, 16, 19, MIC_AXIS_Y, 1);           /* cone, upper half      */
+    pline(10, 44, 19, MIC_AXIS_Y, 1);           /* cone, lower half      */
+    fill_rect(18, MIC_AXIS_Y - 1, 3, 3, 1);     /* the dust cap          */
+
+    /* ---- the two references ---- */
+    pdots(22, MIC_AXIS_Y, 70, MIC_AXIS_Y, 1);   /* on-axis               */
+    pdots(MIC_CAP_X, 18, MIC_CAP_X, 42, 1);     /* where it was captured */
+
+    /* ---- the mic ---- */
+    /* POS IS RADIAL and the cone is symmetric, so it is drawn going one
+     * way only: 0 at the cap, 1 at the surround. Drawing it both ways
+     * would need a sign the knob does not have. */
+    const mx = MIC_CAP_X + Math.round((cm / 40) * MIC_SPAN);
+    const my = MIC_AXIS_Y - Math.round(pos * 11);
+    pline(20, MIC_AXIS_Y, mx, my, 1);           /* cap -> mic            */
+    draw_rect(mx - 2, my - 2, 5, 5, 1);
+    fill_rect(mx + 3, my, 3, 1, 1);             /* the body, pointing in */
+
+    /* THE TWO ZEROS, NAMED. Without them the dotted lines are decoration
+     * and the sign on Dist still means nothing.
+     *
+     * Two separate draws rather than one sentence, so each is clipped on
+     * its own: a single line long enough to say both is long enough to
+     * lose the end of itself, which is the defect this screen exists to
+     * fix. And `off-axis` because that is what Pos is - the standard
+     * word for leaving the dust cap, and the one the diagram's vertical
+     * offset is drawing. */
+    ptext(1, FOOT_Y, '0=capture', 1, 60);
+    pright(126, FOOT_Y, '^=off-axis', 1, 62);
+
+    /* ---- the five values, in full ---- */
+    const rows = [['Pos', 'p1'], ['Dst', 'p2'], ['Mic', 'p3'],
+                  ['Phs', 'p4'], ['Dmp', 'p5']];
+    for (let i = 0; i < rows.length; i++) {
+        const y = 12 + i * 9;
+        ptext(76, y, rows[i][0], 1, 18);
+        pright(126, y, micShown(rows[i][1]), 1, 32);
+    }
+}
+
 function draw() {
     if (tunerOpen) { drawTuner(); return; }
     if (menuOpen) { drawMenu(); return; }
+    /* AFTER the menu and the tuner, which are MODES - this is a peek, and
+     * a peek must never be the thing standing between you and a screen
+     * you deliberately opened. */
+    if (micPeekUntil && Date.now() < micPeekUntil) { drawMicView(); return; }
     clear_screen();
     drawHeader();
     drawBoxes();
@@ -1726,6 +1958,14 @@ function onKnob(idx, ccValue) {
     if (s.kind === 'gap') return;
     lastKnob = idx;
     lastPaint = 0;
+    /* RAISED BY A TOUCH, not by a turn, which is why it is above the
+     * detent gate. Move sends a capacitive touch note before the first
+     * detent arrives, so arming here means the diagram is already up by
+     * the time the value starts moving - and a touch that never turns
+     * into a turn still answers "which knob is this and where is it",
+     * which is the question. */
+    if (st.type[sel] === TYPE_CAB && s.key && s.key[0] === 'p')
+        micPeekUntil = Date.now() + MIC_PEEK_MS;
     const d = detents(ccValue);
     if (!d) return;
     const k = fullKey(s);

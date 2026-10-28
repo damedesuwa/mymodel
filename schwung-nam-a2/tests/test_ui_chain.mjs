@@ -359,8 +359,12 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     /* The count is not pinned: a category grows by however many captures
      * are on the card, and a test that spelled it out would fail on a
      * device with files rather than on a bug. */
-    ok(drawn.some(t => /^Digital Dly {2}Delay 1\/\d+$/.test(String(t))),
-       'footer: names the pedal, its family and its place in it');
+    /* Two draws now, not one string: the counter is right-aligned chrome
+     * and the name is a marquee, so they are separate calls. */
+    ok(drawn.some(t => String(t) === 'Digital Dly'),
+       'footer: names the pedal');
+    ok(drawn.some(t => /^Delay 1\/\d+$/.test(String(t))),
+       'footer: and its family and its place in it');
 
     /* EVERY CATEGORY HAS ITS OWN PAD COLOUR, and the two brightnesses are
      * one hue - "switched on" and "bypassed" have to read as the SAME
@@ -541,13 +545,17 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     writes.length = 0;
     turn(K1, +1, CAT.AMP);
     ok(writes.some(([k, v]) => k === 'b1_type' && v === '1'),
-       'stack: Amp still lands on a capture, not on the stack');
-    /* EXACTLY past the two captures, not to the end: the tail holds two
-     * now, and a walk that runs off it lands on the other one. */
+       'stack: Amp lands on a capture, and ONLY captures are in it');
+    /* THE TWO AMP STAGES HAVE THEIR OWN CATEGORY NOW. They were the Amp
+     * list's tail, which meant walking Amp for an amp went through every
+     * capture and then two things that are not amps. Amp+ is the next
+     * category along, so they are one step away rather than N captures
+     * away - and the Amp list cannot land on them at all. */
     writes.length = 0;
-    turn(K2, +1, 2);
+    turn(K1, +1, CAT['AMP+'] - CAT.AMP);
     ok(writes.some(([k, v]) => k === 'b1_fx' && v === '50'),
-       'stack: and it is after the captures in the Amp list');
+       'stack: Amp+ is the next category and starts on the Tone Stack');
+    ok(params['b1_type'] === '3', 'stack: and it is an FX block');
     drawnAt.length = 0; repaint();
     ok(drawnAt.some(d => d[2] === 'Bass'), 'stack: its page names Bass');
     ui.onMidiMessageInternal([0xb0, K5, 1]);
@@ -638,16 +646,23 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
      * their encoder - the same as any pedal with five controls. */
     ui.onMidiMessageInternal([0xb0, K5, 1]);
     ui.onMidiMessageInternal([0xb0, K6, 1]);
+    /* PAST THE MIC PEEK. Touching a cab's p-knob raises the placement
+     * diagram over the strip for a moment and these assertions are about
+     * what is UNDER it, so they have to wait it out - the peek is the
+     * subject of its own block below. */
+    advance(2500);
     drawnAt.length = 0; repaint();
     for (const want of ['Mic', 'Phase'])
         ok(drawnAt.some(d => d[2] === want), 'mic: the cab page names ' + want);
     /* WHICH POWER STAGE IS DRIVING THE CAB, which an IR cannot carry. */
     ui.onMidiMessageInternal([0xb0, K7, 1]);
+    advance(2500);
     drawnAt.length = 0; repaint();
     ok(drawnAt.some(d => d[2] === 'Damp'), 'mic: and Damp');
     ok(drawnAt.some(d => d[2] === 'Off'), 'mic: and Mic is Off by default');
-    drawnAt.length = 0;
     ui.onMidiMessageInternal([0xb0, K4, 1]);
+    advance(2500);
+    drawnAt.length = 0;
     repaint();
     /* Dist is CENTRED on the capture, which is the only zero an IR has,
      * so it reads in signed centimetres and its bar fills from the middle. */
@@ -1630,6 +1645,199 @@ for (const [what, impl] of [
     ok(!drawn.some(t => String(t).indexOf('Recto') >= 0 ||
                         String(t).indexOf('My RAT') >= 0),
        'outbrd: and does not offer amps/ or dist/ captures');
+    params.sel_block = '16';
+}
+
+/* A NAME TOO LONG TO FIT TRAVELS, and comes back.
+ *
+ * The real names are file names: "Recto Modern - G8 Tube Spongy - DI" is
+ * 34 characters, and the end is the half that tells two captures of the
+ * same amp apart. Clipping drops exactly that half, so the two captures
+ * of the Recto read identically on the one line that is supposed to tell
+ * them apart. */
+{
+    const mkUi = () => new Function('globalThis', 'leds', 'buttonLeds',
+        ...names, stubs + src + '\nreturn globalThis.chain_ui;')(
+        {}, leds, buttonLeds, ...names.map(n => host[n]));
+    const LONG = 'Recto Modern - G8 Tube Spongy - DI';
+    params.model_list = JSON.stringify([LONG, 'Plexi']);
+    params.model_dirs = JSON.stringify(['amps', 'amps']);
+    board({ b1: 1 });              /* a NAM block on the first column */
+    params.b1_model = '0';
+    params.sel_block = '0';
+    const u = mkUi();
+    u.init();
+    u.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); u.tick();
+    u.onMidiMessageInternal([0x80, 68, 0]);
+    advance(2000);                 /* past every flash */
+
+    /* The window is a PREFIX of the name at rest - the long hold at the
+     * left is what makes the start readable, and a marquee that started
+     * moving immediately would never show it. */
+    const shot = () => {
+        drawn.length = 0; advance(50); u.tick();
+        return drawn.map(String).filter(t => LONG.indexOf(t) === 0 ||
+                                             LONG.indexOf(t) > 0);
+    };
+    const first = shot();
+    ok(first.some(t => LONG.indexOf(t) === 0 && t.length > 3),
+       'marquee: at rest the line shows the START of the name -- ' +
+       JSON.stringify(first));
+    ok(!first.some(t => t === LONG),
+       'marquee: and the whole name does not fit, so this is a window');
+
+    /* MOVE THE CLOCK AND THE WINDOW MOVES. Nothing else changed - no
+     * input, no state - so a different window can only have come from
+     * the time. */
+    let moved = false, sawEnd = false;
+    for (let i = 0; i < 80 && !(moved && sawEnd); i++) {
+        advance(200);
+        for (const t of shot()) {
+            if (LONG.indexOf(t) > 0) moved = true;
+            if (t.length > 3 && LONG.endsWith(t)) sawEnd = true;
+        }
+    }
+    ok(moved, 'marquee: the window moves with the clock alone');
+    ok(sawEnd, 'marquee: and it travels far enough to show the END');
+
+    /* IT COMES BACK. A one-way marquee that stops at the end leaves the
+     * start unreadable for the rest of the session, which is the same
+     * defect as clipping with extra steps. */
+    let returned = false;
+    for (let i = 0; i < 120 && !returned; i++) {
+        advance(200);
+        if (shot().some(t => LONG.indexOf(t) === 0 && t.length > 3))
+            returned = true;
+    }
+    ok(returned, 'marquee: and ping-pongs back to the start');
+
+    /* A SHORT NAME IS LEFT ALONE. Eight scrolling lines is noise, and a
+     * name that fits has nothing to say by moving. */
+    drawn.length = 0; advance(50); u.tick();
+    const shortSeen = drawn.map(String).some(t => t.indexOf('Plexi') >= 0);
+    params.b1_model = '1';
+    u.onMidiMessageInternal([0xb0, 72, 1]);   /* nudge a repaint */
+    let plexiStable = true, seen = 0;
+    for (let i = 0; i < 40; i++) {
+        advance(300);
+        drawn.length = 0; u.tick();
+        const t = drawn.map(String).filter(x => 'Plexi'.indexOf(x) === 0 ||
+                                                x.indexOf('Plexi') === 0);
+        if (t.length) { seen++; if (!t.some(x => x === 'Plexi')) plexiStable = false; }
+    }
+    ok(seen > 0 && plexiStable,
+       'marquee: a name that fits is drawn whole and never moves' +
+       ' (seen ' + seen + ')');
+    void shortSeen;
+    params.sel_block = '16';
+}
+
+/* THE MIC PEEK. Five positions on five clipped cells, and the one that
+ * most needed a picture - Dist - is SIGNED against a reference the cells
+ * never mention. */
+{
+    const mkUi = () => new Function('globalThis', 'leds', 'buttonLeds',
+        ...names, stubs + src + '\nreturn globalThis.chain_ui;')(
+        {}, leds, buttonLeds, ...names.map(n => host[n]));
+    const K1 = 71, K4 = 74;
+    board({ b1: 2 });                                /* TYPE_CAB */
+    params['b1_p1'] = '0.0'; params['b1_p2'] = '0.5';
+    params['b1_p3'] = '0.0'; params['b1_p4'] = '0.0'; params['b1_p5'] = '0.0';
+    params.cab_list = JSON.stringify(['TF MESA ST 4X12A V30 57']);
+    params.sel_block = '0';
+    const u = mkUi();
+    u.init();
+    u.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); u.tick();
+    u.onMidiMessageInternal([0x80, 68, 0]);
+    advance(3000);
+
+    const shot = () => {
+        drawnAt.length = 0; rects.length = 0; drawn.length = 0;
+        advance(50); u.tick();
+        return drawn.map(String);
+    };
+
+    /* A TOUCH IS ENOUGH. Move sends the capacitive note before the first
+     * detent, and a knob you are holding but have not turned is exactly
+     * when you want to be told where it is. Value 0 is a touch: no
+     * detents in it. */
+    u.onMidiMessageInternal([0xb0, K4, 0]);
+    let seen = shot();
+    ok(seen.includes('Mic'), 'micview: a TOUCH of a cab p-knob raises it');
+    ok(seen.includes('0=capture') && seen.includes('^=off-axis'),
+       'micview: and it names both zeros the knobs are signed against');
+    ok(seen.includes('Dst') && seen.includes('Phs') && seen.includes('Dmp'),
+       'micview: all five values are spelled out -- ' + JSON.stringify(seen));
+    /* The one thing that cannot be drawn honestly: an off-axis angle
+     * needs a distance from the CONE and Dist is measured from the
+     * capture point, which the IR does not record. */
+    ok(!seen.some(t => /\u00b0|deg/i.test(t)),
+       'micview: and no angle, because there is no honest one to print');
+    ok(!seen.some(t => String(t).indexOf('Block') === 0),
+       'micview: the cell strip is covered, not drawn under it');
+
+    /* NOTHING OFF THE PANEL. The mic's x comes from a knob and the
+     * diagram is the only thing that can refuse an off-screen
+     * coordinate - fill_rect will take one. */
+    const bad = rects.filter(r => r[1] < 0 || r[2] < 0 ||
+                                  r[1] + r[3] > 128 || r[2] + r[4] > 64);
+    ok(bad.length === 0, 'micview: draws nothing outside 128x64 -- ' +
+       JSON.stringify(bad.slice(0, 3)));
+
+    /* IT IS A PEEK, so it goes. A mode would need a way out. */
+    advance(3000);
+    seen = shot();
+    ok(!seen.includes('0=capture'), 'micview: and it auto-dismisses');
+    ok(seen.some(t => String(t).indexOf('Block') === 0),
+       'micview: leaving the strip behind it');
+
+    /* THE MIC MOVES WITH THE KNOB, which is the whole claim. Dist at the
+     * capture point puts it on the drawn zero; walked out, it is to the
+     * right of it. The ring is the only 5x5 draw_rect on the screen. */
+    const micX = () => {
+        for (const r of rects)
+            if (r[0] === 'draw' && r[3] === 5 && r[4] === 5) return r[1] + 2;
+        return null;
+    };
+    u.onMidiMessageInternal([0xb0, K4, 0]);
+    shot();
+    const atZero = micX();
+    ok(atZero !== null, 'micview: the mic is drawn as a ring');
+    for (let i = 0; i < 40; i++) u.onMidiMessageInternal([0xb0, K4, 1]);
+    shot();
+    const out = micX();
+    ok(out !== null && out > atZero,
+       'micview: backing the mic off moves it away from the cone (' +
+       atZero + ' -> ' + out + ')');
+
+    /* AND POS MOVES IT ACROSS THE CONE, not along the axis. Two
+     * different geometries on two knobs, and conflating them is how the
+     * numbers got confusing in the first place. */
+    const micY = () => {
+        for (const r of rects)
+            if (r[0] === 'draw' && r[3] === 5 && r[4] === 5) return r[2] + 2;
+        return null;
+    };
+    const K3 = 73;                 /* Pos is the third encoder */
+    u.onMidiMessageInternal([0xb0, K3, 0]);
+    shot();
+    const yCap = micY();
+    for (let i = 0; i < 60; i++) u.onMidiMessageInternal([0xb0, K3, 1]);
+    shot();
+    const yEdge = micY();
+    ok(yCap !== null && yEdge !== null && yEdge < yCap,
+       'micview: Pos moves it across the cone, toward the surround (' +
+       yCap + ' -> ' + yEdge + ')');
+
+    /* NOT RAISED BY THE PICKERS. Knob 1 is the block category and knob 2
+     * is which cabinet - neither is a position, and the footer already
+     * names what they land on. */
+    advance(3000);
+    u.onMidiMessageInternal([0xb0, K1, 0]);
+    ok(!shot().includes('0=capture'),
+       'micview: the Block knob does not raise it');
     params.sel_block = '16';
 }
 

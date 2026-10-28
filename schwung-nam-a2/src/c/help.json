@@ -133,9 +133,9 @@
       "title": "The encoders",
       "lines": [
         "1  Block: Off, then",
-        "   Amp Cab OD Dist Fuzz Boost",
-        "   Dyn Filter Mod Delay",
-        "   Reverb Pitch",
+        "   Amp Amp+ Cab OD Dist Fuzz",
+        "   Boost Dyn Outbrd Filter",
+        "   Mod Delay Reverb Pitch",
         "2  which pedal, capture, cab",
         "   or IR - one list each",
         "3-7  that block's own controls",
@@ -171,7 +171,8 @@
     {
       "title": "Tone Stack",
       "lines": [
-        "At the END of the Amp list.",
+        "In Amp+, the category right",
+        "after Amp.",
         "The amp's own Bass/Mid/Treble,",
         "which a CAPTURE cannot have -",
         "a .nam is one setting of one",
@@ -198,8 +199,14 @@
     {
       "title": "Power Amp",
       "lines": [
-        "Beside the Tone Stack, at the",
-        "end of the Amp list.",
+        "Beside the Tone Stack, in the",
+        "Amp+ category.",
+        "",
+        "WHY THEY ARE NOT IN THE AMP",
+        "LIST: they are not captures,",
+        "and walking past twenty of",
+        "those to reach them read as",
+        "two amps in one list.",
         "A .nam is a STATIC function -",
         "sample in, sample out, no",
         "memory. So every amp behaviour",
@@ -359,9 +366,6 @@
         "        Ribbon / Cond - a",
         "        character on top",
         "6 Phase Norm / Inv",
-        "Two cabs in the two lanes with",
-        "different Dist comb exactly as",
-        "two mics in a room do. That is",
         "7 Damp  WHICH POWER STAGE is",
         "        driving the cab. A",
         "        speaker is not a flat",
@@ -380,7 +384,25 @@
         "Two cabs in the two lanes with",
         "different Dist comb exactly as",
         "two mics in a room do. That is",
-        "what Dist is really for."
+        "what Dist is really for.",
+        "",
+        "TOUCH ANY OF THE FIVE and the",
+        "screen draws where the mic is:",
+        "the cone from the side, the",
+        "capture point as a dotted",
+        "line, and all five values in",
+        "full instead of clipped to the",
+        "cell. It goes on its own.",
+        "No ANGLE is printed. An",
+        "off-axis angle needs a",
+        "distance from the CONE, and",
+        "Dist is measured from the",
+        "capture point - a distance the",
+        "IR does not record. Any angle",
+        "here would be invented. The",
+        "line from the cap to the mic",
+        "is that angle, without a",
+        "number pretending to it."
       ]
     },
     {
@@ -415,6 +437,25 @@
         "Under each knob is a bar. A +/-",
         "control fills from the CENTRE,",
         "so an EQ reads as a shape."
+      ]
+    },
+    {
+      "title": "Long names",
+      "lines": [
+        "A capture is named by its file",
+        "and files are long. The cells",
+        "are 31 pixels, so they clip.",
+        "The HEADER and the FOOTER",
+        "scroll instead: a name that",
+        "does not fit travels left,",
+        "holds at the end, and comes",
+        "back. The end is the half that",
+        "tells two captures of the same",
+        "amp apart, so it is the half",
+        "clipping used to eat.",
+        "The cells still clip - eight",
+        "lines moving at once is not a",
+        "screen you can read."
       ]
     },
     {

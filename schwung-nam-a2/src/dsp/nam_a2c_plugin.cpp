@@ -34,7 +34,7 @@
 #include "a2_fx.h"
 #include "a2_tuner.h"
 
-#define NAM_A2C_BUILD_ID "swap"
+#define NAM_A2C_BUILD_ID "micview"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
