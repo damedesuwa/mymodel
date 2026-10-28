@@ -903,14 +903,20 @@ JA_RE = re.compile(r"[぀-ヿㇰ-ㇿ㐀-䶿一-鿿ｦ-ﾟ]")
 FAT_BAD = str.maketrans({"\\": "＼", "/": "／", ":": "：", "*": "＊", "?": "？",
                          '"': "＂", "<": "＜", ">": "＞", "|": "｜"})
 MAX_NAME_BYTES = 250
+HANGUL_RE = re.compile(r"[\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f]")
+
+
+def needs_translation(stem):
+    """일본어(가나/한자)가 있고, 한글이 한 글자도 없는 이름만 번역 대상 (이미 한국어면 건너뜀)."""
+    return bool(JA_RE.search(stem)) and not HANGUL_RE.search(stem)
 
 
 def export_names(mp3s, path):
-    """일본어(가나/한자)가 들어간 MP3 이름(확장자 제외)을 작품별로 한 번씩 적는다."""
+    """번역이 필요한 MP3 이름(확장자 제외)을 작품별로 한 번씩 적는다."""
     seen, lines, cur = set(), [], None
     for m in mp3s:
         stem = nfc(split_ext(m["name"])[0])
-        if not JA_RE.search(stem) or stem in seen:
+        if not needs_translation(stem) or stem in seen:
             continue
         seen.add(stem)
         w = m.get("work", "(작품 폴더 밖)")
@@ -957,7 +963,7 @@ def plan_renames(data, mp3s, nmap):
     for m in mp3s:
         stem_raw, _ = split_ext(m["name"])
         stem = nfc(stem_raw)
-        ja = bool(JA_RE.search(stem))
+        ja = needs_translation(stem)
         if stem not in nmap:
             if ja:
                 plans.append({"m": m, "status": "NO_TRANSLATION"})
@@ -1316,7 +1322,7 @@ def main():
             dl = os.path.expanduser("~/storage/downloads")
             path = os.path.join(dl if os.path.isdir(dl) else dirs["reports"], "mp3_names_ja.txt")
         n = export_names(mp3s, path)
-        out("일본어가 들어간 MP3 이름 %d개를 저장했습니다: %s" % (n, path))
+        out("번역할 MP3 이름 %d개를 저장했습니다 (한글이 들어간 이름은 제외): %s" % (n, path))
         return 0
 
     # 4) 매칭

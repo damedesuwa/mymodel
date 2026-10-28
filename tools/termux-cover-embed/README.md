@@ -31,7 +31,7 @@ bash ~/bin/asmr_cover_update.sh --local-dir ~/storage/downloads/Moving
 
 ## MP3 파일 이름 번역
 
-1. `bash ~/bin/asmr_cover_embed.sh --export-names`를 실행한다. 일본어가 들어간 MP3 이름이 `Download/mp3_names_ja.txt`에 작품별로 저장된다.
+1. `bash ~/bin/asmr_cover_embed.sh --export-names`를 실행한다. 일본어(가나·한자)가 있고 한글이 없는 MP3 이름이 `Download/mp3_names_ja.txt`에 작품별로 저장된다. 이미 한국어인 이름은 건너뛴다.
 2. 그 목록을 번역해 `원래 이름<TAB>새 이름` 형식의 번역표를 만든다.
 3. `bash ~/bin/asmr_cover_embed.sh --reuse-scan --rename-map 번역표.tsv`를 실행한다. DRY RUN으로 바뀔 이름만 보여 준다.
 4. 같은 명령에 `--apply`를 붙여 실제로 적용한다.
