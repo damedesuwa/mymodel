@@ -12,18 +12,44 @@
 #   - 이미 커버가 있는 MP3, 원본 이미지, 음원 데이터는 건드리지 않음
 #
 # 사용:  bash ~/bin/asmr_cover_update.sh            (추가 인자는 본 스크립트로 전달, 예: --work RJ01234567)
+#        bash ~/bin/asmr_cover_update.sh --replace --work RJ01234567   이미 있는 커버를 새 이미지로 교체
+#        bash ~/bin/asmr_cover_update.sh --self-update                 두 스크립트를 최신판으로 교체
 set -euo pipefail
 
 MAIN="$HOME/bin/asmr_cover_embed.sh"
-URL="https://raw.githubusercontent.com/damedesuwa/mymodel/ccr-248d2e90-8vttzu/tools/termux-cover-embed/asmr_cover_embed.sh"
+REPO="damedesuwa/mymodel"
+BRANCH="ccr-248d2e90-8vttzu"
 STATE="${ASMR_COVER_HOME:-$HOME/.asmr_cover}"
 RULES=(--work-cover --other-images)
 
+# 브랜치 이름 주소(raw)는 몇 분간 옛 파일을 캐시하므로, 최신 커밋 번호로 고정한 주소에서 받는다
+self_update() {
+    local sha base f dir
+    dir="$(dirname "$MAIN")"
+    sha="$(curl -fsSL "https://api.github.com/repos/$REPO/commits/$BRANCH" \
+           | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')" || {
+        echo "최신 버전 정보를 가져오지 못했습니다 (네트워크 확인)."; return 1; }
+    base="https://raw.githubusercontent.com/$REPO/$sha/tools/termux-cover-embed"
+    mkdir -p "$dir"
+    for f in asmr_cover_embed.sh asmr_cover_update.sh; do
+        curl -fsSL -o "$dir/$f.new" "$base/$f" && bash -n "$dir/$f.new" || {
+            rm -f "$dir/$f.new"; echo "$f 받기 실패"; return 1; }
+    done
+    for f in asmr_cover_embed.sh asmr_cover_update.sh; do
+        chmod +x "$dir/$f.new"
+        mv -f "$dir/$f.new" "$dir/$f"
+    done
+    echo "최신판으로 교체했습니다 (${sha:0:7})."
+}
+
+if [ "${1:-}" = "--self-update" ]; then
+    self_update
+    exit $?
+fi
+
 if [ ! -f "$MAIN" ]; then
     echo "본 스크립트가 없어 내려받습니다: $MAIN"
-    mkdir -p "$(dirname "$MAIN")"
-    curl -fsSL -o "$MAIN" "$URL"
-    chmod +x "$MAIN"
+    self_update
 fi
 
 if command -v termux-wake-lock >/dev/null 2>&1; then
@@ -40,7 +66,8 @@ latest() { ls -t "$STATE/reports/$1"_*."$2" 2>/dev/null | head -1; }
 
 echo "[1/3] 폴더를 스캔하고 확인하는 중입니다. 작품 수에 따라 수십 분 걸릴 수 있습니다…"
 if ! bash "$MAIN" "${RULES[@]}" "$@" > /dev/null; then
-    echo "스캔 중 오류가 났습니다. 리포트: $(latest report txt)"
+    echo "실행하지 못했습니다:"
+    tail -n 5 "$(latest report txt)" 2>/dev/null | sed 's/^/  /'
     exit 1
 fi
 REPORT="$(latest report txt)"
@@ -77,7 +104,7 @@ def works_with(status):
 
 todo = works_with("EMBED")
 print("  이미 커버 있음      : %d곡" % counts["SKIP_EXISTING"])
-print("  새로 커버 넣을 곡   : %d곡 (작품 %d개)" % (counts["EMBED"], len(todo)))
+print("  커버 넣거나 바꿀 곡 : %d곡 (작품 %d개)" % (counts["EMBED"], len(todo)))
 for w, n in todo:
     print("      - %s  (%d곡)" % (w, n))
 none = works_with("NO_IMAGE")
@@ -106,6 +133,9 @@ elif [ "$rc" -ne 0 ]; then
     exit 1
 fi
 
+case " $* " in
+    *" --replace "*) echo "  ※ --replace: 위 곡에 이미 있는 커버는 새 이미지로 바뀝니다." ;;
+esac
 printf "위 곡들에 커버를 넣을까요? (y/n) "
 read -r ans || ans=""
 case "$ans" in

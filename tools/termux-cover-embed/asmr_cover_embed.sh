@@ -707,16 +707,19 @@ def has_attached_pic(streams):
     return any(s.get("codec_type") == "video" or (s.get("disposition") or {}).get("attached_pic") for s in streams)
 
 
-def embed(orig, new, cover_path):
-    """반환: ('existing'|'ok', 설명). 실패는 SafError."""
+def embed(orig, new, cover_path, replace=False):
+    """반환: ('existing'|'ok', 설명). 실패는 SafError.
+    replace=True 이면 기존 ID3 커버(APIC)를 모두 지우고 새 커버 하나로 바꾼다."""
     from mutagen.mp3 import MP3
     from mutagen.id3 import APIC, PictureType
 
     streams, dur_orig = probe_streams(orig)
     if not any(s.get("codec_type") == "audio" and s.get("codec_name") == "mp3" for s in streams):
         raise SafError("MP3 오디오 스트림이 아님: %s" % [s.get("codec_name") for s in streams])
-    if has_attached_pic(streams):
+    if has_attached_pic(streams) and not replace:
         return "existing", "ffprobe: 기존 이미지 스트림 있음"
+    with open(cover_path, "rb") as f:
+        cover = f.read()
 
     shutil.copyfile(orig, new)
     try:
@@ -728,12 +731,15 @@ def embed(orig, new, cover_path):
         ver = 3
         before = []
     else:
-        if audio.tags.getall("APIC"):
+        old_pics = audio.tags.getall("APIC")
+        if old_pics and not replace:
             return "existing", "ID3 APIC 프레임 있음"
+        if replace and len(old_pics) == 1 and old_pics[0].data == cover and old_pics[0].type == 3:
+            return "existing", "이미 같은 커버가 들어 있음"
+        if old_pics:
+            audio.tags.delall("APIC")
         ver = 4 if audio.tags.version[1] == 4 else 3
         before = frame_snapshot(audio.tags)
-    with open(cover_path, "rb") as f:
-        cover = f.read()
     audio.tags.add(APIC(encoding=0, mime="image/jpeg", type=PictureType.COVER_FRONT,
                         desc="", data=cover))
     # padding: 기존 여유 공간이 충분하면 그 크기를 그대로 유지 -> 파일이 원본보다 작아지지 않음
@@ -847,7 +853,7 @@ def apply_one(r, ctx):
         return "READ_FAIL", str(e)
     try:
         cover = ctx["images"].cover(j)
-        kind, info = embed(orig, new, cover)
+        kind, info = embed(orig, new, cover, replace=r.get("replace", False))
     except SafError as e:
         return "APPLY_FAIL", "변환/검증 실패(원본 그대로): %s" % e
     if kind == "existing":
@@ -947,7 +953,10 @@ def print_result(out, r, apply_mode):
         out("  대응 JPG: -   [%s]" % r["rule"])
     else:
         out("  대응 JPG: 없음")
-    out("  기존 썸네일: %s" % ART_TEXT.get(r.get("art"), r.get("art")))
+    art_text = ART_TEXT.get(r.get("art"), r.get("art"))
+    if r.get("replace"):
+        art_text += " → 새 커버로 교체"
+    out("  기존 썸네일: %s" % art_text)
     if r.get("img"):
         w, h = r["img"]
         shape = "정사각형" if w == h else "비율 유지 후 중앙 크롭"
@@ -987,6 +996,8 @@ def main():
     ap.add_argument("--work", action="append", help="이름에 이 문자열이 들어간 작품만 처리 (여러 번 가능)")
     ap.add_argument("--work-cover", action="store_true", help="이름 일치 JPG가 없는 트랙에 작품 대표 커버 적용")
     ap.add_argument("--cover-name", action="append", help="대표 커버로 인정할 파일 이름(확장자 제외) 추가")
+    ap.add_argument("--replace", action="store_true",
+                    help="이미 커버가 있는 MP3도 새 이미지로 교체 (--work 로 작품을 지정해야 함)")
     ap.add_argument("--other-images", action="store_true",
                     help="PNG/WEBP/GIF/BMP 등 JPG가 아닌 이미지도 커버 소스로 사용 (240x240 JPEG로 변환해 삽입, 원본은 그대로)")
     ap.add_argument("--prefer-same-dir", action="store_true", help="같은 이름 후보 중 MP3와 같은 폴더의 것이 1개면 그것을 사용")
@@ -1010,6 +1021,11 @@ def main():
 
     if opts.restore_pending:
         return restore_pending(dirs["pending"], dirs["work"], out)
+
+    if opts.replace and not opts.work:
+        out("--replace 는 --work 로 바꿀 작품을 지정해야 합니다. (실수로 전체 커버를 바꾸지 않도록)")
+        out("  예: --replace --work RJ01234567")
+        return 2
 
     if opts.apply and os.listdir(dirs["pending"]):
         out("중단된 작업의 원본 백업이 남아 있습니다: %s" % dirs["pending"])
@@ -1095,8 +1111,11 @@ def main():
                 r["status"], r["note"] = "READ_FAIL", "MP3 읽기 실패: %s" % e
                 continue
             if art == "yes":
-                r["status"] = "SKIP_EXISTING"
-                continue
+                if opts.replace and r["status"] == "EMBED":
+                    r["replace"] = True
+                else:
+                    r["status"] = "SKIP_EXISTING"
+                    continue
             if r["status"] == "EMBED":
                 try:
                     r["img"] = images.size(r["jpg"])
