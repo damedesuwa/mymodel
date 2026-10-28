@@ -29,6 +29,17 @@ bash ~/bin/asmr_cover_update.sh --local-dir ~/storage/downloads/Moving
 `--local-dir`를 쓰면 termux-saf 대신 일반 파일 경로로 읽고 쓴다. 교체는 같은 폴더의 숨김 임시 파일에 다 쓴 뒤 한 번에 바꾸는 방식이다.
 폴더 자체가 작품 하나라면 `--work-depth 0`을 붙인다.
 
+## MP3 파일 이름 번역
+
+1. `bash ~/bin/asmr_cover_embed.sh --export-names`를 실행한다. 일본어가 들어간 MP3 이름이 `Download/mp3_names_ja.txt`에 작품별로 저장된다.
+2. 그 목록을 번역해 `원래 이름<TAB>새 이름` 형식의 번역표를 만든다.
+3. `bash ~/bin/asmr_cover_embed.sh --reuse-scan --rename-map 번역표.tsv`를 실행한다. DRY RUN으로 바뀔 이름만 보여 준다.
+4. 같은 명령에 `--apply`를 붙여 실제로 적용한다.
+
+- 바꾸는 것은 MP3 파일 이름뿐이다. 폴더 이름과 태그는 그대로 둔다. `\ / : * ? " < > |`는 전각 문자로 바꾼다.
+- SD 카드(SAF)에는 이름 바꾸기 명령이 없다. 그래서 새 이름으로 복사하고, 다시 읽어 SHA-256으로 확인한 뒤 원본을 지운다. `--local-dir` 폴더는 그냥 이름만 바꾼다.
+- 같은 폴더에 같은 이름의 파일이 이미 있으면 바꾸지 않는다. 단, 두 파일의 내용이 바이트 단위로 같으면 중단된 이전 작업으로 보고 원래 이름 쪽을 지운다.
+
 ## 설치
 
 ```bash

@@ -229,8 +229,8 @@ def saf_write_from_file(uri, path):
         raise SafError("termux-saf-write 실패: %s" % _err_text(r))
 
 
-def saf_create(parent_uri, name):
-    r = _run(["termux-saf-create", "-t", "application/octet-stream", parent_uri, name], timeout=120)
+def saf_create(parent_uri, name, mime="application/octet-stream"):
+    r = _run(["termux-saf-create", "-t", mime, parent_uri, name], timeout=120)
     text = r.stdout.decode("utf-8", "replace").strip()
     if r.returncode != 0 or not text:
         raise SafError("termux-saf-create 실패: %s" % _err_text(r))
@@ -896,6 +896,228 @@ def apply_one(r, ctx):
     return "APPLY_FAIL", "SD 반영 검증 실패 -> 원본으로 복원 완료: %s" % err
 
 
+# --------------------------------------------------------------------------
+# MP3 파일 이름 번역 (--export-names / --rename-map)
+# --------------------------------------------------------------------------
+JA_RE = re.compile(r"[぀-ヿㇰ-ㇿ㐀-䶿一-鿿ｦ-ﾟ]")
+FAT_BAD = str.maketrans({"\\": "＼", "/": "／", ":": "：", "*": "＊", "?": "？",
+                         '"': "＂", "<": "＜", ">": "＞", "|": "｜"})
+MAX_NAME_BYTES = 250
+
+
+def export_names(mp3s, path):
+    """일본어(가나/한자)가 들어간 MP3 이름(확장자 제외)을 작품별로 한 번씩 적는다."""
+    seen, lines, cur = set(), [], None
+    for m in mp3s:
+        stem = nfc(split_ext(m["name"])[0])
+        if not JA_RE.search(stem) or stem in seen:
+            continue
+        seen.add(stem)
+        w = m.get("work", "(작품 폴더 밖)")
+        if w != cur:
+            lines.append("# [%s]" % w)
+            cur = w
+        lines.append(stem)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return len(seen)
+
+
+def load_name_map(path):
+    nmap, problems = {}, []
+    with open(path, encoding="utf-8-sig") as f:
+        for no, line in enumerate(f, 1):
+            line = line.rstrip("\r\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+                problems.append("%d번째 줄: '원래 이름<TAB>새 이름' 형식이 아님" % no)
+                continue
+            src, dst = nfc(parts[0].strip()), nfc(parts[1].strip())
+            if src.lower().endswith(".mp3"):
+                src = src[:-4]
+            if dst.lower().endswith(".mp3"):
+                dst = dst[:-4]
+            nmap[src] = dst
+    return nmap, problems
+
+
+def clean_stem(stem):
+    s = "".join(ch for ch in stem.translate(FAT_BAD) if ord(ch) >= 32)
+    return s.strip().rstrip(".").strip()
+
+
+def plan_renames(data, mp3s, nmap):
+    listing = {}
+    for d in data["dirs"]:
+        listing[tuple(d["rel"])] = {norm(f["name"]): f for f in d["files"]}
+    claimed = defaultdict(set)
+    plans = []
+    for m in mp3s:
+        stem_raw, _ = split_ext(m["name"])
+        stem = nfc(stem_raw)
+        ja = bool(JA_RE.search(stem))
+        if stem not in nmap:
+            if ja:
+                plans.append({"m": m, "status": "NO_TRANSLATION"})
+            continue
+        new_stem = clean_stem(nmap[stem])
+        new_name = new_stem + m["name"][len(stem_raw):]
+        p = {"m": m, "new": new_name}
+        if not new_stem:
+            p["status"], p["why"] = "BAD", "번역이 비어 있음"
+        elif nfc(new_name) == nfc(m["name"]):
+            p["status"] = "SAME"
+        elif len(new_name.encode("utf-8")) > MAX_NAME_BYTES:
+            p["status"], p["why"] = "BAD", "이름이 너무 김 (%d바이트, 최대 %d)" % (
+                len(new_name.encode("utf-8")), MAX_NAME_BYTES)
+        else:
+            key = norm(new_name)
+            existing = listing.get(m["dir"], {}).get(key)
+            if key in claimed[m["dir"]]:
+                p["status"], p["why"] = "CONFLICT", "같은 폴더의 다른 곡도 이 이름으로 바뀜"
+            elif existing is not None and norm(existing["name"]) != norm(m["name"]):
+                p["status"], p["why"], p["target"] = "CONFLICT", "같은 이름의 파일이 이미 있음 — 내용까지 똑같을 때만 적용 시 원래 이름 쪽을 정리", existing
+            else:
+                p["status"] = "RENAME"
+            claimed[m["dir"]].add(key)
+        plans.append(p)
+    return plans
+
+
+def rename_one(p, workdir):
+    """원본은 새 이름 파일이 검증된 뒤에만 지운다. 반환: 설명"""
+    m, new_name = p["m"], p["new"]
+    if LOCAL:
+        dst = os.path.join(os.path.dirname(m["uri"]), new_name)
+        if os.path.exists(dst):
+            raise SafError("같은 이름의 파일이 이미 있음")
+        try:
+            os.rename(m["uri"], dst)
+        except OSError as e:
+            raise SafError("이름 바꾸기 실패: %s" % e)
+        return "이름 변경"
+    # SAF 에는 이름 바꾸기 명령이 없다: 새 이름으로 복사 -> 다시 읽어 확인 -> 원본 삭제
+    src = os.path.join(workdir, "rename_src.mp3")
+    try:
+        saf_read_to_file(m["uri"], src, m.get("length"))
+        new_uri = saf_create(m["dir_uri"], new_name, "audio/mpeg")
+        try:
+            got = nfc(str(saf_stat(new_uri).get("name") or ""))
+            if got != nfc(new_name):
+                raise SafError("새 파일이 다른 이름(%s)으로 만들어짐" % got)
+            write_and_verify(new_uri, src, workdir)
+        except SafError:
+            try:
+                saf_rm(new_uri)
+            except SafError:
+                pass
+            raise
+        saf_rm(m["uri"])
+    finally:
+        if os.path.exists(src):
+            os.remove(src)
+    return "새 이름으로 복사·검증 후 원본 삭제"
+
+
+def resume_conflict(p, workdir):
+    """지난번에 복사까지 하고 끊긴 경우: 새 이름 파일이 원본과 똑같으면 원본만 지운다."""
+    m, t = p["m"], p.get("target")
+    if not t or t.get("length") is None or t.get("length") != m.get("length"):
+        return False
+    a, b = os.path.join(workdir, "resume_a"), os.path.join(workdir, "resume_b")
+    try:
+        saf_read_to_file(m["uri"], a, m.get("length"))
+        saf_read_to_file(t["uri"], b, t.get("length"))
+        if sha256_file(a) != sha256_file(b):
+            return False
+    finally:
+        for x in (a, b):
+            if os.path.exists(x):
+                os.remove(x)
+    if LOCAL:
+        os.remove(m["uri"])
+    else:
+        saf_rm(m["uri"])
+    return True
+
+
+def run_renames(opts, data, mp3s, dirs, out):
+    nmap, problems = load_name_map(opts.rename_map)
+    if problems:
+        for x in problems[:20]:
+            out("번역표 오류: " + x)
+        return 2
+    plans = plan_renames(data, mp3s, nmap)
+    cnt = defaultdict(int)
+    for p in plans:
+        cnt[p["status"]] += 1
+    cur = None
+    for p in plans:
+        if p["status"] in ("SAME",) or (opts.only_problems and p["status"] == "RENAME"):
+            continue
+        m = p["m"]
+        w = m.get("work", "(작품 폴더 밖)")
+        if w != cur:
+            out("[%s]" % w)
+            cur = w
+        old = m.get("in_work", m["rel"])
+        if p["status"] == "RENAME":
+            out("  %s\n    → %s" % (old, p["new"]))
+        elif p["status"] == "NO_TRANSLATION":
+            out("  번역 없음: %s" % old)
+        else:
+            out("  %s: %s\n    → %s  (%s)" % (p["status"], old, p.get("new", ""), p.get("why", "")))
+    out("")
+    out("=" * 60)
+    out("이름 바꿀 MP3     : %d" % cnt["RENAME"])
+    out("번역표에 없는 일본어 이름: %d" % cnt["NO_TRANSLATION"])
+    if cnt["CONFLICT"] or cnt["BAD"]:
+        out("충돌 / 잘못된 번역 : %d / %d (바꾸지 않음)" % (cnt["CONFLICT"], cnt["BAD"]))
+    if not opts.apply:
+        out("DRY RUN 이었습니다. 확인 후 --apply 를 붙여 실행하세요.")
+        return 0
+    todo = [p for p in plans if p["status"] == "RENAME"]
+    resumable = [p for p in plans if p["status"] == "CONFLICT" and p.get("target")]
+    if not todo and not resumable:
+        return 0
+    if not opts.yes:
+        out("%d개 MP3의 이름을 바꿉니다. 계속할까요? (y/n) " % len(todo))
+        try:
+            ans = input().strip()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "Y", "yes", "YES", "Yes", "예", "네", "ㅛ"):
+            out("취소했습니다.")
+            return 0
+    ok = fail = resumed = 0
+    for p in resumable:
+        try:
+            if resume_conflict(p, dirs["work"]):
+                resumed += 1
+                out("  마무리(지난번 중단분): %s" % p["m"]["full"])
+        except SafError as e:
+            out("  확인 실패: %s (%s)" % (p["m"]["full"], e))
+    for i, p in enumerate(todo, 1):
+        progress("이름 변경 %d/%d  %s" % (i, len(todo), p["new"][-40:]))
+        try:
+            rename_one(p, dirs["work"])
+            ok += 1
+        except SafError as e:
+            fail += 1
+            progress_end()
+            out("  실패(원본 그대로): %s (%s)" % (p["m"]["full"], e))
+    progress_end()
+    if ok or resumed:
+        try:
+            os.remove(os.path.join(dirs["cache"], "scan.json"))   # 다음 실행은 새로 스캔
+        except OSError:
+            pass
+    out("이름 변경 성공 %d / 실패 %d%s" % (ok, fail, (" / 중단분 마무리 %d" % resumed) if resumed else ""))
+    return 0
+
+
 def restore_pending(pending_dir, workdir, out):
     items = sorted(os.listdir(pending_dir)) if os.path.isdir(pending_dir) else []
     if not items:
@@ -1009,6 +1231,10 @@ def main():
     ap.add_argument("--keep-backup", action="store_true", help="적용 성공 후에도 원본 MP3를 Termux 쪽 backup/ 에 보관")
     ap.add_argument("--allow-no-truncate", action="store_true", help="SAF 쓰기가 truncate 하지 않아도 진행 (권장하지 않음)")
     ap.add_argument("--restore-pending", action="store_true", help="중단으로 남은 pending 백업을 SD에 되돌림")
+    ap.add_argument("--export-names", nargs="?", const="", metavar="FILE",
+                    help="일본어가 들어간 MP3 이름 목록을 파일로 저장 (기본: Download/mp3_names_ja.txt)")
+    ap.add_argument("--rename-map", metavar="FILE",
+                    help="'원래 이름<TAB>새 이름' 번역표로 MP3 파일 이름 변경 (기본 DRY RUN, --apply 로 적용)")
     opts = ap.parse_args()
 
     state = os.environ["ASMR_STATE"]
@@ -1078,6 +1304,20 @@ def main():
     if opts.work:
         keys = [norm(w) for w in opts.work]
         sel = [w for w in sel if any(k in norm(w["name"]) for k in keys)]
+
+    if opts.export_names is not None or opts.rename_map:
+        mp3s = [m for w in sel for m in w["mp3"]]
+        if not opts.work:
+            mp3s += [o for o in outside if o["kind"] == "mp3"]
+        if opts.rename_map:
+            return run_renames(opts, data, mp3s, dirs, out)
+        path = opts.export_names
+        if not path:
+            dl = os.path.expanduser("~/storage/downloads")
+            path = os.path.join(dl if os.path.isdir(dl) else dirs["reports"], "mp3_names_ja.txt")
+        n = export_names(mp3s, path)
+        out("일본어가 들어간 MP3 이름 %d개를 저장했습니다: %s" % (n, path))
+        return 0
 
     # 4) 매칭
     all_results = []
