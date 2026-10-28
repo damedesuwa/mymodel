@@ -84,5 +84,6 @@ tools/param-pages/assets.local.json
 !schwung-nam-a2/src/dist/*.nam
 !schwung-nam-a2/src/fuzz/*.nam
 !schwung-nam-a2/src/boost/*.nam
+!schwung-nam-a2/src/outboard/*.nam
 !schwung-nam-a2/src/cabs/*.wav
 !schwung-nam-a2/src/reverbs/*.wav

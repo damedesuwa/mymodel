@@ -34,7 +34,7 @@
 #include "a2_fx.h"
 #include "a2_tuner.h"
 
-#define NAM_A2C_BUILD_ID "arm"
+#define NAM_A2C_BUILD_ID "rack"
 
 /* TWO ROWS OF EIGHT, because the user was paying for the split in BLOCKS.
  *
@@ -564,6 +564,11 @@ static const asset_dir_t ASSET_DIRS[] = {
     { "dist",    BLK_NAM },
     { "fuzz",    BLK_NAM },
     { "boost",   BLK_NAM },
+    /* THE RACK. A capture of a 1176, a Pultec, a console preamp or a tape
+     * machine is the same architecture as an amp capture and therefore the
+     * same cost - it is only the thing on the other end of the cable that
+     * differs, which is why it needs a folder and not a block type. */
+    { "outboard", BLK_NAM },
     { "cabs",    BLK_CAB },
     { "reverbs", BLK_IR  },
 };

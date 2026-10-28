@@ -362,11 +362,33 @@ chmod +x "dist/$MODULE_ID/$MODULE_ID.so"
 # find, not a glob: these normally hold only a .gitkeep, and a bare
 # `src/<d>/*` doesn't match dotfiles - it matches nothing, so the glob is
 # passed through literally and cp fails with "cannot stat".
-for d in amps od dist fuzz boost cabs reverbs; do
+for d in amps od dist fuzz boost outboard cabs reverbs; do
     mkdir -p "dist/$MODULE_ID/$d"
     [ -d "src/$d" ] || continue
     find "src/$d" -maxdepth 1 -type f ! -name '.gitkeep' \
         -exec cp {} "dist/$MODULE_ID/$d/" \;
+done
+
+# EVERY ASSET FOLDER MUST BE IN THE TARBALL, and this is a hard check
+# because of a NAME COLLISION that cost five releases.
+#
+# The build output directory is `dist/` and so is the DISTORTION captures
+# folder. Listing the staged tree showed `nam-a2c/dist/`, which read as the
+# build directory leaking into the package, so a `rmdir dist/$MODULE_ID/dist`
+# went into the release routine - and quietly removed the distortion folder
+# from v17 through v21. It was self-healing on the device (the plugin
+# mkdirs every folder in ASSET_DIRS at create_instance) so nothing was
+# reported, which is exactly why it needed a check rather than care.
+#
+# The list is the same one the staging loop above walks; a folder added to
+# one and not the other fails here instead of shipping.
+for d in amps od dist fuzz boost outboard cabs reverbs; do
+    if [ ! -d "dist/$MODULE_ID/$d" ]; then
+        echo "ERROR: asset folder '$d' is missing from the staged module." >&2
+        echo "       The build dir and the distortion folder are both called" >&2
+        echo "       'dist' - do not remove one thinking it is the other." >&2
+        exit 1
+    fi
 done
 
 # Create tarball for release

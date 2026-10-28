@@ -234,8 +234,25 @@ const CATS = [
       items: [10, 11, 43], folder: 'fuzz', from: 'nam' },
     { name: 'Boost',  type: TYPE_FX,  led: [122, 118],    /* white   */
       items: [12, 44], folder: 'boost', from: 'nam' },
+    /* PEDAL dynamics. The 1176 and the Limiter moved OUT of here into
+     * Outbrd: a 1176 is a rack unit and these four are stomp boxes, and
+     * the split is what makes "where do I look for a compressor" have one
+     * answer per kind rather than one list holding both. Moving an id
+     * between categories changes nothing that is saved - a board stores
+     * the PEDAL id, and the category only decides which list you walk to
+     * reach it. */
     { name: 'Dyn',    type: TYPE_FX,  led: [15, 93],      /* teal    */
-      items: [13, 14, 15, 16, 17, 18] },
+      items: [14, 15, 16, 17] },
+    /* OUTBOARD: the rack, and the one category here whose whole point is
+     * your own captures. A .nam of a 1176, a Pultec, a console preamp or a
+     * tape machine is the same architecture as an amp capture - it is only
+     * what was on the other end of the cable that differs - so it needs a
+     * folder of its own and not a block type of its own.
+     *
+     * The two modelled ones are here so the category is not empty on a
+     * fresh install, which is a dead end that reads as a broken list. */
+    { name: 'Outbrd', type: TYPE_FX,  led: [9, 81],       /* lime    */
+      items: [13, 18], folder: 'outboard', from: 'nam' },
     { name: 'Filter', type: TYPE_FX,  led: [11, 85],      /* green   */
       items: [19, 47, 20, 21, 22] },
     { name: 'Mod',    type: TYPE_FX,  led: [16, 95],      /* azure   */

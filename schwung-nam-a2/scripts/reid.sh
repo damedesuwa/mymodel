@@ -30,6 +30,14 @@ SRC_ID="$1"; NEW_ID="$2"; NEW_NAME="$3"; NEW_ABBREV="$4"
 
 rm -rf "dist/$NEW_ID"
 cp -r "dist/$SRC_ID" "dist/$NEW_ID"
+
+# The same check build.sh makes, because reid.sh writes the tarball people
+# actually install and a copy is where a folder goes missing. See the note
+# in build.sh: the build dir and the distortion folder are both `dist`.
+for d in amps od dist fuzz boost outboard cabs reverbs; do
+    [ -d "dist/$NEW_ID/$d" ] || {
+        echo "ERROR: asset folder '$d' missing from dist/$NEW_ID" >&2; exit 1; }
+done
 mv "dist/$NEW_ID/$SRC_ID.so" "dist/$NEW_ID/$NEW_ID.so"
 
 python3 - "$NEW_ID" "$NEW_NAME" "$NEW_ABBREV" <<'PY'

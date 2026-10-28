@@ -29,8 +29,9 @@ const params = {
     split: '0', pan_a: '-1.0', pan_b: '1.0',
     /* Two in models/ (Amp) and two in a category folder, which is what
      * the plugin's scan produces: root first, then each folder. */
-    model_list: JSON.stringify(['Recto', 'Plexi', 'My RAT', 'My Muff']),
-    model_dirs: JSON.stringify(['amps','amps','dist','fuzz']),
+    model_list: JSON.stringify(['Recto', 'Plexi', 'My RAT', 'My Muff',
+                                'My 1176']),
+    model_dirs: JSON.stringify(['amps','amps','dist','fuzz','outboard']),
     cab_list: JSON.stringify(['TF MESA']),
     ir_list: JSON.stringify(['Big Hall', 'Plate A']),
     /* THE PEDAL TABLE COMES FROM THE PLUGIN, not from a copy written out
@@ -228,8 +229,7 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     /* Off NAM Cab OD Dist Fuzz Boost Dyn Filter Mod Time Pitch */
     /* Delay and Reverb are two lists now, so `reverbs/` lands somewhere
      * with the same name on screen. */
-    const CAT = { OFF:0, AMP:1, CAB:2, OD:3, DIST:4, FUZZ:5, BOOST:6,
-                  DYN:7, FILTER:8, MOD:9, DELAY:10, REVERB:11, PITCH:12 };
+    const CAT = CAT_INDEX();
     const gotoCat = (c) => { turn(K1, -1, 16); turn(K1, +1, c); };
 
     /* The sensitivity itself, which is the thing that was wrong twice:
@@ -270,9 +270,16 @@ ok(rects.some(r => r[0] === 'fill' && r[1] === 0 && r[3] === 2),
     gotoCat(CAT.DIST);
     ok(params['b4_fx'] === '5', 'cat: Dist starts at the RAT');
 
-    /* THE KNOBS ARE THE REAL PEDAL'S, read from the served table. */
     gotoCat(CAT.DYN);
-    ok(params['b4_fx'] === '13', 'dyn: starts at the 1176');
+    ok(params['b4_fx'] === '14', 'dyn: starts at the Dyna Comp');
+
+    /* THE KNOBS ARE THE REAL PEDAL'S, read from the served table.
+     *
+     * The 1176 lives in Outbrd, not Dyn: it is a rack unit and the four
+     * left in Dyn are stomp boxes. It is still the five-knob case this
+     * whole block exists to pin, wherever it is reached from. */
+    gotoCat(CAT.OUTBRD);
+    ok(params['b4_fx'] === '13', 'outbrd: starts at the 1176');
     /* Four cells, eight encoders: the row follows the knob last touched,
      * so reaching the fifth control is what brings it on screen. */
     for (const [cc, label] of [[K3, 'Input'], [K4, 'Attac'], [K5, 'Relea'],
@@ -1019,6 +1026,23 @@ function CATS_OF() {
         .map(x => [Number(x[1]), Number(x[2])]);
 }
 
+/* THE CATEGORY INDEX MAP, READ OUT OF THE SOURCE.
+ *
+ * It was restated here as a literal, which is a copy of the CATS order
+ * that agrees with itself and with nothing else: inserting Outbrd after
+ * Dyn moved five categories by one and six unrelated assertions failed
+ * pointing at the wrong things ("mod: starts at the Chorus"). The walk
+ * order is the thing under test, so it has to come FROM the thing. */
+function CAT_INDEX() {
+    const m = /const CATS = \[([\s\S]*?)\n\];/.exec(src);
+    const out = {};
+    if (!m) return out;
+    [...m[1].matchAll(/name:\s*'([^']+)'/g)].forEach((x, i) => {
+        out[x[1].toUpperCase()] = i;
+    });
+    return out;
+}
+
 /* --- the host refusing to answer -------------------------------------- */
 /* Three ways the binding can come back useless. The menu has to stay usable
  * in all of them, because it is the only way to remove the module from its
@@ -1539,6 +1563,74 @@ for (const [what, impl] of [
     ok(drawn.some(t => t === 'B1') || drawn.some(t => t === 'A2C') ||
        rects.length > 0, 'tuner: and the board is back');
     delete params.tuner;
+}
+
+/* --- outboard captures land in the Outbrd list -------------------------- */
+/* The folder is the whole feature: a .nam of a 1176, a Pultec or a tape
+ * machine is the same architecture as an amp capture, so what it needs is
+ * somewhere of its own to be LISTED, not a block type of its own. The
+ * plugin serves model_dirs parallel to model_list, and the UI slices the
+ * list by folder - so this is the test that the slice is wired. */
+{
+    const mkUi = () => new Function('globalThis', 'leds', 'buttonLeds',
+        ...names, stubs + src + '\nreturn globalThis.chain_ui;')(
+        {}, leds, buttonLeds, ...names.map(n => host[n]));
+    const CAT = CAT_INDEX();
+    const K1 = 71, K2 = 72;
+    const STEP2 = 5;
+    const turn2 = (u, cc, dir, n = 1) => {
+        for (let i = 0; i < n * STEP2; i++)
+            u.onMidiMessageInternal([0xb0, cc, dir > 0 ? 1 : 127]);
+    };
+
+    /* SET EXPLICITLY, because an earlier block leaves these mutated. The
+     * list_gen test ends with a five-entry model_list that has no
+     * outboard/ entry in it, and `params` is shared across the file - so
+     * this read a list with nothing to find and failed pointing at the
+     * slice rather than at the fixture. */
+    params.model_list = JSON.stringify(['Recto', 'Plexi', 'My RAT',
+                                        'My Muff', 'My 1176']);
+    params.model_dirs = JSON.stringify(['amps', 'amps', 'dist', 'fuzz',
+                                        'outboard']);
+    board({ b1: 0 });
+    params.sel_block = '16';
+    const u = mkUi();
+    u.init();
+    /* Pick block 1 on the main row, then walk the category knob to Outbrd. */
+    u.onMidiMessageInternal([0x90, 68, 127]);
+    advance(1000); u.tick();
+    u.onMidiMessageInternal([0x80, 68, 0]);
+    turn2(u, K1, -1, 16);
+    turn2(u, K1, +1, CAT.OUTBRD);
+    advance(50); u.tick();
+    ok(params['b1_type'] === '3' && params['b1_fx'] === '13',
+       'outbrd: the category lands on the 1176 (type=' + params['b1_type'] +
+       ' fx=' + params['b1_fx'] + ')');
+
+    /* Past the two modelled ones is the CAPTURE from outboard/. The Amp
+     * list does the same thing with amps/, and this is the proof the new
+     * folder is sliced out of the shared list rather than ignored. */
+    turn2(u, K2, +1, 8);
+    advance(50); u.tick();
+    ok(params['b1_type'] === '1',
+       'outbrd: walking past the modelled ones reaches a NAM capture' +
+       ' (type=' + params['b1_type'] + ')');
+    /* Read off the FOOTER, after the flash has expired. The cell clips at
+     * 31 px ("My 1176" draws as "My 11"), and the footer is the one line
+     * that carries a capture's name in full - which is what it is for. */
+    advance(2000);
+    drawn.length = 0; advance(50); u.tick();
+    ok(drawn.some(t => String(t).indexOf('My 1176') >= 0),
+       'outbrd: and it is the one from outboard/, by name -- drew ' +
+       JSON.stringify(drawn.filter(t => String(t).length > 2)));
+
+    /* AND NOT SOMEBODY ELSE'S FOLDER. The list is shared across every NAM
+     * folder, so a slice that ignored model_dirs would offer the Recto
+     * here - which is the bug this folder exists to prevent. */
+    ok(!drawn.some(t => String(t).indexOf('Recto') >= 0 ||
+                        String(t).indexOf('My RAT') >= 0),
+       'outbrd: and does not offer amps/ or dist/ captures');
+    params.sel_block = '16';
 }
 
 console.log(fails ? 'FAILED' : 'PASS');

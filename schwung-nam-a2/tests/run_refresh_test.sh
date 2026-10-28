@@ -73,7 +73,7 @@ g++ -std=c++20 -O1 -w -o /tmp/a2c_test_refresh \
 
 FIX=$(mktemp -d)
 trap 'rm -rf "$FIX"' EXIT
-for d in amps od dist fuzz boost cabs reverbs; do mkdir -p "$FIX/$d"; done
+for d in amps od dist fuzz boost outboard cabs reverbs; do mkdir -p "$FIX/$d"; done
 printf '{}' > "$FIX/amps/M2.nam"
 
 /tmp/a2c_test_refresh "$FIX"

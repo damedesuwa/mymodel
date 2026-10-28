@@ -22,7 +22,7 @@ FIX=$(mktemp -d)
 trap 'rm -rf "$FIX"' EXIT
 # The same seven the plugin makes and build.sh stages. Listed once here;
 # the check below is what keeps this in step with the other two lists.
-for d in amps od dist fuzz boost cabs reverbs; do
+for d in amps od dist fuzz boost outboard cabs reverbs; do
     mkdir -p "$FIX/$d"
     [ -d "src/$d" ] && cp "src/$d"/* "$FIX/$d/" 2>/dev/null || true
 done
